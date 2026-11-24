@@ -1,0 +1,26 @@
+# Política de cargo-deny para frikiSSH. Comprobar con: cargo deny check
+
+[advisories]
+version = 2
+# Vulnerabilidades (por defecto deny), crates sin mantenimiento y versiones yanked bloquean el CI.
+unmaintained = "all"
+yanked = "deny"
+
+[licenses]
+version = 2
+# Solo licencias permisivas. MPL-2.0 no se añade hasta que una dependencia real lo necesite.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
