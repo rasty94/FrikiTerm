@@ -1,0 +1,8 @@
+# fuente: Unicode (UTF-8): un carácter de 3 bytes (U+20AC) partido en tres trozos, y un prefijo truncado seguido de ASCII (U+FFFD)
+# size: 2 10
+a\xe2
+\x82
+\xacb\xe2\x82
+c\xf0\x9f
+\x98
+\x80d

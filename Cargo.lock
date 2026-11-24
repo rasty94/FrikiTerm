@@ -1654,6 +1654,7 @@ dependencies = [
  "friki-core",
  "libc",
  "time",
+ "unicode-width",
  "vt100",
 ]
 
