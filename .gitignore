@@ -5,3 +5,4 @@
 extracted/
 tmp/
 /target
+.claude/worktrees/
