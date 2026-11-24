@@ -2,6 +2,7 @@
 
 mod auth;
 mod errors;
+mod forward;
 mod policy;
 mod session;
 mod verifier;
@@ -253,32 +254,45 @@ pub struct ForwardHandle {
 }
 
 pub struct Connection {
-    handle: russh::client::Handle<session::Handler>,
+    // Orden de campos = orden de destrucción: primero la conexión al destino y al final los saltos.
+    handle: Arc<russh::client::Handle<session::Handler>>,
     info: Arc<session::Info>,
     verifier: Arc<dyn HostKeyVerifier>,
+    warnings: Vec<String>,
+    forwards: std::sync::Mutex<ForwardState>,
+    _jumps: Vec<russh::client::Handle<session::Handler>>,
+}
+
+#[derive(Default)]
+struct ForwardState {
+    next_id: u64,
+    active: std::collections::HashMap<u64, forward::Active>,
     warnings: Vec<String>,
 }
 
 impl Connection {
+    /// Con `cfg.proxy_jump` (`[user@]host[:port]`, lista separada por comas) conecta
+    /// por los saltos; la clave del destino se verifica contra el destino.
     pub async fn connect(
         cfg: &SessionConfig,
         verifier: Arc<dyn HostKeyVerifier>,
         prompter: Arc<dyn AuthPrompter>,
     ) -> Result<Self> {
-        // ponytail: sin saltos todavía (TODO.md §2). Conectar directo al host de una sesión
-        // con ProxyJump podría ofrecer credenciales a otra máquina: se rechaza (auditoría #10).
-        if let Some(jump) = &cfg.proxy_jump {
-            return Err(Error::Other(format!(
-                "ProxyJump ({jump}) aún no está soportado; no se conecta directamente al host"
-            )));
-        }
         let c = session::connect(cfg, verifier.clone(), prompter).await?;
         Ok(Self {
-            handle: c.handle,
+            handle: Arc::new(c.handle),
             info: c.info,
             verifier,
             warnings: c.warnings,
+            forwards: std::sync::Mutex::default(),
+            _jumps: c.jumps,
         })
+    }
+
+    fn fwd(&self) -> std::sync::MutexGuard<'_, ForwardState> {
+        self.forwards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Avisos de la conexión (nada se degrada en silencio): uso de `legacy`,
@@ -289,6 +303,7 @@ impl Connection {
         if let Some(n) = self.negotiated() {
             w.extend(n.weak());
         }
+        w.extend(self.fwd().warnings.clone());
         w.extend(self.verifier.warnings());
         w
     }
@@ -358,33 +373,50 @@ impl Connection {
         cols: u16,
         rows: u16,
     ) -> Result<friki_core::transport::Stream> {
-        let _ = (term, cols, rows);
-        todo!("friki-ssh: open_shell_stream")
+        let (w, r) = self.open_shell(term, cols, rows).await?;
+        Ok((Arc::new(w), Box::new(r)))
     }
 
     /// Canal con un subsistema (`"sftp"`) como flujo de bytes bidireccional.
     pub async fn open_subsystem(&self, name: &str) -> Result<ChannelStream> {
-        let _ = name;
-        todo!("friki-ssh: open_subsystem")
+        session::open_channel_stream(&self.handle, session::Req::Subsystem(name)).await
     }
 
     /// Canal `exec` como flujo de bytes (para `scp -t`/`scp -f`). El estado de salida
     /// se obtiene con `ChannelStream::exit_status` tras el EOF.
     pub async fn open_exec_stream(&self, command: &str) -> Result<ChannelStream> {
-        let _ = command;
-        todo!("friki-ssh: open_exec_stream")
+        session::open_channel_stream(&self.handle, session::Req::Exec(command)).await
     }
 
     /// Activa una redirección de puertos (fase 4). Devuelve la dirección real de escucha
     /// (útil con puerto 0). Se mantiene mientras viva la conexión o hasta `stop_forward`.
     pub async fn start_forward(&self, fwd: &friki_core::config::Forward) -> Result<ForwardHandle> {
-        let _ = fwd;
-        todo!("friki-ssh: start_forward")
+        let (listen, active, warn) = forward::start(&self.handle, &self.info, fwd).await?;
+        let mut st = self.fwd();
+        st.next_id += 1;
+        let id = st.next_id;
+        st.active.insert(id, active);
+        st.warnings.extend(warn);
+        Ok(ForwardHandle { id, listen })
     }
 
     pub async fn stop_forward(&self, handle: ForwardHandle) -> Result<()> {
-        let _ = handle;
-        todo!("friki-ssh: stop_forward")
+        // Al soltar `Active::Task` se aborta la escucha local.
+        let Some(active) = self.fwd().active.remove(&handle.id) else {
+            return Ok(());
+        };
+        if let forward::Active::Remote { addr, port } = &active {
+            self.info
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(port);
+            self.handle
+                .cancel_tcpip_forward(addr.clone(), *port)
+                .await
+                .map_err(|e| errors::classify(e, false))?;
+        }
+        Ok(())
     }
 
     pub async fn disconnect(self) -> Result<()> {
@@ -437,6 +469,39 @@ impl ShellReader {
     }
 }
 
+fn to_io(e: Error) -> std::io::Error {
+    let kind = match e {
+        Error::Network(_) => std::io::ErrorKind::BrokenPipe,
+        _ => std::io::ErrorKind::Other,
+    };
+    std::io::Error::new(kind, e.to_string())
+}
+
+#[async_trait::async_trait]
+impl friki_core::transport::StreamWriter for ShellWriter {
+    async fn write(&self, data: &[u8]) -> std::io::Result<()> {
+        ShellWriter::write(self, data).await.map_err(to_io)
+    }
+
+    async fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
+        ShellWriter::resize(self, cols, rows).await.map_err(to_io)
+    }
+}
+
+#[async_trait::async_trait]
+impl friki_core::transport::StreamReader for ShellReader {
+    async fn next_event(&mut self) -> Option<friki_core::transport::StreamEvent> {
+        use friki_core::transport::StreamEvent as E;
+        Some(match ShellReader::next_event(self).await? {
+            ShellEvent::Data(d) => E::Data(d),
+            ShellEvent::ExitStatus(n) => E::Exit(i32::try_from(n).unwrap_or(i32::MAX)),
+            ShellEvent::ExitSignal { signal, .. } => E::Exit(exit_code_for_signal(&signal)),
+            ShellEvent::Closed => E::Closed,
+            ShellEvent::Lost(why) => E::Lost(why),
+        })
+    }
+}
+
 /// Código de salida para un proceso remoto terminado por señal, como hacen los
 /// shells: 128 + número POSIX. Señal desconocida = 255.
 pub fn exit_code_for_signal(signal: &str) -> i32 {
@@ -457,53 +522,6 @@ pub fn exit_code_for_signal(signal: &str) -> i32 {
         _ => return 255,
     };
     128 + n
-}
-
-#[cfg(test)]
-mod proxy_jump_tests {
-    use super::*;
-
-    struct No;
-    #[async_trait::async_trait]
-    impl HostKeyVerifier for No {
-        async fn verify(&self, _: &str, _: u16, _: &HostKey) -> HostKeyDecision {
-            HostKeyDecision::Reject
-        }
-    }
-    #[async_trait::async_trait]
-    impl AuthPrompter for No {
-        async fn password(&self, _: &str, _: &str) -> Option<Zeroizing<String>> {
-            None
-        }
-        async fn passphrase(&self, _: &Path) -> Option<Zeroizing<String>> {
-            None
-        }
-        async fn keyboard_interactive(
-            &self,
-            _: &str,
-            _: &str,
-            _: &[(String, bool)],
-        ) -> Option<Vec<Zeroizing<String>>> {
-            None
-        }
-    }
-
-    #[tokio::test]
-    async fn proxy_jump_se_rechaza_sin_conectar() {
-        // Puerto 1 en localhost: si intentara conectar, el error sería de red, no Other.
-        let cfg = SessionConfig {
-            host: "127.0.0.1".into(),
-            port: 1,
-            proxy_jump: Some("bastion".into()),
-            ..Default::default()
-        };
-        let r = Connection::connect(&cfg, Arc::new(No), Arc::new(No)).await;
-        assert!(
-            matches!(r, Err(Error::Other(ref m)) if m.contains("ProxyJump")),
-            "{:?}",
-            r.err()
-        );
-    }
 }
 
 #[cfg(test)]

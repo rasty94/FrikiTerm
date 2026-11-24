@@ -101,6 +101,7 @@ up() {
     printf 'export FRIKI_TEST_HOST=127.0.0.1\n'
     printf 'export FRIKI_TEST_PORT=2222\n'
     printf 'export FRIKI_TEST_LEGACY_PORT=2223\n'
+printf 'export FRIKI_TEST_JUMP_TARGET=127.0.0.1:2224\n'
     printf 'export FRIKI_TEST_USER=friki\n'
     printf 'export FRIKI_TEST_PASSWORD=%s\n' "$pass"
     printf "export FRIKI_TEST_KEY='%s'\n" "$dir/id_ed25519"

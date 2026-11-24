@@ -1,5 +1,6 @@
 # OpenSSH de pruebas para frikiSSH. Un contenedor, dos sshd:
 #   2222: configuración moderna (solo algoritmos seguros, Ed25519, contraseña y clave pública).
+#   2224: como 2222 pero solo en 127.0.0.1 del contenedor (no publicado): destino de ProxyJump.
 #   2223: solo algoritmos heredados que OpenSSH aún admite. El cliente seguro debe negarse a negociarlos.
 # La base va fijada por tag y por digest.
 FROM debian:bookworm-20260202-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
@@ -13,6 +14,7 @@ RUN apt-get update \
 
 COPY sshd_config.modern /etc/friki-sshd/modern.conf
 COPY sshd_config.legacy /etc/friki-sshd/legacy.conf
+COPY sshd_config.jump /etc/friki-sshd/jump.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 755 /usr/local/bin/entrypoint.sh
 

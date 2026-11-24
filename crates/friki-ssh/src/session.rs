@@ -1,5 +1,6 @@
 //! Conexión, canal de shell y exec sobre `russh::client`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -29,6 +30,14 @@ pub(crate) const MAX_QUEUED_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) struct Info {
     lost: Mutex<Option<String>>,
     negotiated: Mutex<Option<Negotiated>>,
+    /// `require_strict_kex`: abortar si el servidor no anuncia strict KEX.
+    require_strict: AtomicBool,
+    strict_failed: AtomicBool,
+    /// `forward_agent`: pedir y atender el reenvío del agente.
+    pub(crate) agent: AtomicBool,
+    /// Redirecciones remotas: puerto escuchado en el servidor -> destino local.
+    // ponytail: clave solo por puerto; dos binds distintos con el mismo puerto compartirían destino.
+    pub(crate) remote_forwards: Mutex<HashMap<u32, (String, u16)>>,
 }
 
 impl Info {
@@ -44,6 +53,10 @@ impl Info {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    pub(crate) fn strict_failed(&self) -> bool {
+        self.strict_failed.load(Ordering::SeqCst)
     }
 
     fn set_lost(&self, why: String) {
@@ -104,6 +117,12 @@ impl client::Handler for Handler {
         names: &russh::Names,
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
+        // Solo en el primer intercambio: en las reclaves el servidor no repite la extensión.
+        let first = self.info.negotiated().is_none();
+        if first && self.info.require_strict.load(Ordering::SeqCst) && !names.strict_kex() {
+            self.info.strict_failed.store(true, Ordering::SeqCst);
+            return Err(russh::Error::Kex);
+        }
         *self
             .info
             .negotiated
@@ -114,6 +133,68 @@ impl client::Handler for Handler {
             mac: names.client_mac.as_ref().to_string(),
             host_key: names.key.to_string(),
         });
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        let dest = self
+            .info
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&connected_port)
+            .cloned();
+        // Solo se atienden los puertos que pedimos nosotros.
+        let Some((host, port)) = dest else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+            Ok(mut local) => {
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut chan = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut local, &mut chan).await;
+                });
+            }
+            Err(_) => reply.reject(russh::ChannelOpenFailure::ConnectFailed).await,
+        }
+        Ok(())
+    }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        #[cfg(unix)]
+        if self.info.agent.load(Ordering::SeqCst)
+            && let Some(sock) = std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty())
+            && let Ok(mut agent) = tokio::net::UnixStream::connect(sock).await
+        {
+            reply.accept().await;
+            tokio::spawn(async move {
+                let mut chan = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut agent, &mut chan).await;
+            });
+            return Ok(());
+        }
+        let _ = channel;
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
         Ok(())
     }
 
@@ -146,6 +227,55 @@ pub(crate) struct Connected {
     pub handle: Handle<Handler>,
     pub info: Arc<Info>,
     pub warnings: Vec<String>,
+    /// Conexiones a los saltos de ProxyJump; deben vivir tanto como `handle`.
+    pub jumps: Vec<Handle<Handler>>,
+}
+
+/// Un salto de `ProxyJump`: `[user@]host[:port]`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Hop {
+    pub user: Option<String>,
+    pub host: String,
+    pub port: u16,
+}
+
+pub(crate) fn parse_jumps(spec: &str) -> Result<Vec<Hop>> {
+    let bad = |s: &str| Error::Other(format!("ProxyJump inválido: {s:?}"));
+    spec.split(',')
+        .map(str::trim)
+        .map(|part| {
+            let (user, rest) = match part.rsplit_once('@') {
+                Some((u, r)) if !u.is_empty() => (Some(u.to_string()), r),
+                Some(_) => return Err(bad(part)),
+                None => (None, part),
+            };
+            let (host, port) = if let Some(r) = rest.strip_prefix('[') {
+                // IPv6 entre corchetes: [::1] o [::1]:22
+                let (h, tail) = r.split_once(']').ok_or_else(|| bad(part))?;
+                match tail {
+                    "" => (h, None),
+                    t => (h, Some(t.strip_prefix(':').ok_or_else(|| bad(part))?)),
+                }
+            } else {
+                match rest.split_once(':') {
+                    Some((h, p)) => (h, Some(p)),
+                    None => (rest, None),
+                }
+            };
+            let port = match port {
+                Some(p) => p.parse().map_err(|_| bad(part))?,
+                None => 22,
+            };
+            if host.is_empty() {
+                return Err(bad(part));
+            }
+            Ok(Hop {
+                user,
+                host: host.to_string(),
+                port,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn connect(
@@ -153,11 +283,10 @@ pub(crate) async fn connect(
     verifier: Arc<dyn HostKeyVerifier>,
     prompter: Arc<dyn AuthPrompter>,
 ) -> Result<Connected> {
-    let user = cfg
-        .user
-        .clone()
-        .or_else(default_user)
-        .ok_or_else(|| Error::Other("sin usuario: configúralo en la sesión".into()))?;
+    let hops = match cfg.proxy_jump.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => parse_jumps(s)?,
+        _ => Vec::new(),
+    };
 
     let mut warnings = Vec::new();
     if cfg.legacy_algorithms {
@@ -171,6 +300,120 @@ pub(crate) async fn connect(
             .to_string(),
         );
     }
+    if cfg.forward_agent {
+        warnings.push(
+            if cfg!(unix) {
+                "reenvío del agente activo: un administrador del servidor podría usar tus claves mientras dure la sesión"
+            } else {
+                "forward_agent no está soportado en esta plataforma: no se reenvía el agente"
+            }
+            .to_string(),
+        );
+    }
+
+    // Cada salto se conecta con los datos de la sesión (mismo verificador y prompter,
+    // mismas credenciales salvo el usuario si el salto trae uno); sin sesiones guardadas.
+    let mut jumps: Vec<Handle<Handler>> = Vec::new();
+    for hop in &hops {
+        let hop_cfg = SessionConfig {
+            host: hop.host.clone(),
+            port: hop.port,
+            user: hop.user.clone().or_else(|| cfg.user.clone()),
+            proxy_jump: None,
+            forwards: Vec::new(),
+            forward_agent: false,
+            ..cfg.clone()
+        };
+        let (handle, _) = match jumps.last() {
+            None => {
+                let stream = tcp(&hop_cfg).await?;
+                handshake(&hop_cfg, stream, &verifier, &prompter, &mut warnings).await?
+            }
+            Some(prev) => {
+                let stream = through(prev, &hop_cfg).await?;
+                handshake(&hop_cfg, stream, &verifier, &prompter, &mut warnings).await?
+            }
+        };
+        jumps.push(handle);
+    }
+
+    let (handle, info) = match jumps.last() {
+        None => {
+            let stream = tcp(cfg).await?;
+            handshake(cfg, stream, &verifier, &prompter, &mut warnings).await?
+        }
+        Some(prev) => {
+            let stream = through(prev, cfg).await?;
+            handshake(cfg, stream, &verifier, &prompter, &mut warnings).await?
+        }
+    };
+    Ok(Connected {
+        handle,
+        info,
+        warnings,
+        jumps,
+    })
+}
+
+fn timeout_of(cfg: &SessionConfig) -> Duration {
+    Duration::from_secs(cfg.connect_timeout_secs.max(1))
+}
+
+fn timed_out(cfg: &SessionConfig) -> Error {
+    Error::Network(format!(
+        "tiempo de conexión agotado ({}s) con {}:{}",
+        timeout_of(cfg).as_secs(),
+        cfg.host,
+        cfg.port
+    ))
+}
+
+async fn tcp(cfg: &SessionConfig) -> Result<tokio::net::TcpStream> {
+    tokio::time::timeout(
+        timeout_of(cfg),
+        tokio::net::TcpStream::connect((cfg.host.as_str(), cfg.port)),
+    )
+    .await
+    .map_err(|_| timed_out(cfg))?
+    .map_err(|e| Error::Network(format!("{}:{}: {e}", cfg.host, cfg.port)))
+}
+
+/// Canal `direct-tcpip` desde `via` hacia `cfg.host:cfg.port`, como flujo para el SSH interno.
+async fn through(
+    via: &Handle<Handler>,
+    cfg: &SessionConfig,
+) -> Result<russh::ChannelStream<client::Msg>> {
+    let ch = tokio::time::timeout(
+        timeout_of(cfg),
+        via.channel_open_direct_tcpip(cfg.host.clone(), cfg.port.into(), "127.0.0.1", 0),
+    )
+    .await
+    .map_err(|_| timed_out(cfg))?
+    .map_err(|e| {
+        Error::Network(format!(
+            "el salto no pudo abrir {}:{}: {e}",
+            cfg.host, cfg.port
+        ))
+    })?;
+    Ok(ch.into_stream())
+}
+
+/// Handshake SSH sobre `stream`, verificación de la clave de `cfg.host:cfg.port` y autenticación.
+async fn handshake<R>(
+    cfg: &SessionConfig,
+    stream: R,
+    verifier: &Arc<dyn HostKeyVerifier>,
+    prompter: &Arc<dyn AuthPrompter>,
+    warnings: &mut Vec<String>,
+) -> Result<(Handle<Handler>, Arc<Info>)>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let user = cfg
+        .user
+        .clone()
+        .or_else(default_user)
+        .ok_or_else(|| Error::Other("sin usuario: configúralo en la sesión".into()))?;
 
     let mut policy = AlgorithmPolicy::for_session(cfg);
     policy.prefer_known(&verifier.known_algorithms(&cfg.host, cfg.port));
@@ -188,8 +431,12 @@ pub(crate) async fn connect(
     let rejected = Arc::new(AtomicBool::new(false));
     let in_dialog = Arc::new(AtomicBool::new(false));
     let info = Arc::new(Info::default());
+    info.require_strict
+        .store(cfg.require_strict_kex, Ordering::SeqCst);
+    info.agent
+        .store(cfg.forward_agent && cfg!(unix), Ordering::SeqCst);
     let handler = Handler {
-        verifier,
+        verifier: verifier.clone(),
         host: cfg.host.clone(),
         port: cfg.port,
         rejected: rejected.clone(),
@@ -197,23 +444,7 @@ pub(crate) async fn connect(
         info: info.clone(),
     };
 
-    let timeout = Duration::from_secs(cfg.connect_timeout_secs.max(1));
-    let timed_out = || {
-        Error::Network(format!(
-            "tiempo de conexión agotado ({}s) con {}:{}",
-            timeout.as_secs(),
-            cfg.host,
-            cfg.port
-        ))
-    };
-    let stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect((cfg.host.as_str(), cfg.port)),
-    )
-    .await
-    .map_err(|_| timed_out())?
-    .map_err(|e| Error::Network(format!("{}:{}: {e}", cfg.host, cfg.port)))?;
-
+    let timeout = timeout_of(cfg);
     // El plazo cubre el handshake, pero no mientras el usuario decide sobre la clave
     // de host (`in_dialog`): vencido el plazo con el diálogo abierto se espera sin límite.
     let hs = client::connect_stream(config, stream, handler);
@@ -226,13 +457,27 @@ pub(crate) async fn connect(
             r = &mut hs => break r,
             () = &mut deadline, if !expired => {
                 if !in_dialog.load(Ordering::SeqCst) {
-                    return Err(timed_out());
+                    return Err(timed_out(cfg));
                 }
                 expired = true;
             }
         }
     };
-    let mut handle = res.map_err(|e| classify(e, rejected.load(Ordering::SeqCst)))?;
+    let strict_err = || {
+        Error::Negotiation(
+            "el servidor no anunció strict KEX (kex-strict-s-v00@openssh.com): \
+             vulnerable a Terrapin; conexión abortada por require_strict_kex"
+                .into(),
+        )
+    };
+    let mut handle = match res {
+        Ok(h) => h,
+        Err(_) if info.strict_failed() => return Err(strict_err()),
+        Err(e) => return Err(classify(e, rejected.load(Ordering::SeqCst))),
+    };
+    if info.strict_failed() {
+        return Err(strict_err());
+    }
 
     crate::auth::authenticate(
         &mut handle,
@@ -240,14 +485,10 @@ pub(crate) async fn connect(
         &user,
         prompter.as_ref(),
         &rejected,
-        &mut warnings,
+        warnings,
     )
     .await?;
-    Ok(Connected {
-        handle,
-        info,
-        warnings,
-    })
+    Ok((handle, info))
 }
 
 /// Órdenes de `ShellWriter` hacia la tarea escritora del canal.
@@ -279,6 +520,9 @@ pub(crate) async fn open_shell(
     rows: u16,
 ) -> Result<(ShellWriter, ShellReader)> {
     let channel = handle.channel_open_session().await.map_err(net)?;
+    if info.agent.load(Ordering::SeqCst) {
+        channel.agent_forward(true).await.map_err(net)?;
+    }
     channel
         .request_pty(true, term, cols.into(), rows.into(), 0, 0, &[])
         .await
@@ -425,4 +669,106 @@ where
         )));
     }
     Ok(status)
+}
+
+pub(crate) enum Req<'a> {
+    Subsystem(&'a str),
+    Exec(&'a str),
+}
+
+/// Canal con subsistema o `exec` como flujo de bytes. El estado de salida queda en
+/// `ChannelStream::exit_status`; stderr (datos extendidos) se descarta para no
+/// mezclarlo con el protocolo que viaja por stdout.
+pub(crate) async fn open_channel_stream(
+    handle: &Handle<Handler>,
+    req: Req<'_>,
+) -> Result<crate::ChannelStream> {
+    let channel = handle.channel_open_session().await.map_err(net)?;
+    match req {
+        Req::Subsystem(n) => channel.request_subsystem(true, n).await,
+        Req::Exec(c) => channel.exec(true, c).await,
+    }
+    .map_err(net)?;
+    let (mut read_half, write_half) = channel.split();
+    // Esperar la respuesta a la petición antes de entregar el flujo.
+    loop {
+        match read_half.wait().await {
+            Some(ChannelMsg::Success) => break,
+            Some(ChannelMsg::Failure) => {
+                return Err(Error::Other(
+                    "el servidor rechazó la petición del canal".into(),
+                ));
+            }
+            Some(ChannelMsg::Close) | None => {
+                return Err(Error::Network("el canal se cerró antes de abrirse".into()));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let exit = Arc::new(Mutex::new(None));
+    let (user_end, pump_end) = tokio::io::duplex(64 * 1024);
+    let (mut from_user, mut to_user) = tokio::io::split(pump_end);
+    let mut writer = write_half.make_writer();
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut from_user, &mut writer).await;
+        let _ = write_half.eof().await;
+    });
+    let status = exit.clone();
+    tokio::spawn(async move {
+        loop {
+            match read_half.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    if to_user.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    *status.lock().unwrap_or_else(PoisonError::into_inner) = Some(exit_status);
+                }
+                Some(ChannelMsg::Close) | None => break,
+                Some(_) => {}
+            }
+        }
+        // El estado de salida ya está guardado cuando el lector ve el EOF.
+        let _ = to_user.shutdown().await;
+    });
+    Ok(crate::ChannelStream {
+        inner: Box::pin(user_end),
+        exit,
+    })
+}
+
+#[cfg(test)]
+mod jump_tests {
+    use super::{Hop, parse_jumps};
+
+    fn hop(user: Option<&str>, host: &str, port: u16) -> Hop {
+        Hop {
+            user: user.map(Into::into),
+            host: host.into(),
+            port,
+        }
+    }
+
+    #[test]
+    fn parsea_lista_de_saltos() {
+        let got = parse_jumps("a@bastion:2200, interno ,[::1]:23,u@[fe80::1]").expect("válido");
+        assert_eq!(
+            got,
+            [
+                hop(Some("a"), "bastion", 2200),
+                hop(None, "interno", 22),
+                hop(None, "::1", 23),
+                hop(Some("u"), "fe80::1", 22),
+            ]
+        );
+    }
+
+    #[test]
+    fn rechaza_saltos_mal_formados() {
+        for bad in ["", "@host", "host:xx", "host:99999", "[::1", ",a", "a,,b"] {
+            assert!(parse_jumps(bad).is_err(), "{bad:?}");
+        }
+    }
 }
