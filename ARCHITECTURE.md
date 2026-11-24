@@ -41,4 +41,6 @@ Contra un OpenSSH en Docker (`docker/sshd-test/`, `scripts/test-sshd.sh`). Varia
 
 ## Códigos de salida de la CLI
 
-0 correcto · 100 red · 200 autenticación · 300 clave de host · 400 otros (incluye `Negotiation`). En `friki ssh`, si el shell remoto termina con estado N, se devuelve N.
+0 correcto · 250 uso incorrecto · 251 red · 252 autenticación · 253 clave de host · 254 otros (incluye `Negotiation`). En `friki ssh` y `friki exec`, si el comando remoto termina con estado N, se devuelve N.
+
+Los códigos caben en 8 bits: en Unix el estado de salida se trunca módulo 256, así que el esquema 100/200/300/400 de `sfxcl` (Windows) no es portable. Van al final del rango, como el 255 de OpenSSH, para no chocar con los códigos habituales de un comando remoto.

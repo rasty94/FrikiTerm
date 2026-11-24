@@ -64,7 +64,7 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 ## 6. CLI y automatización (ver `docs/13`)
 
 - [ ] Binario principal `friki` con subcomandos: `ssh`, `sftp`, `scp`, `keygen`, `pubkey-assist`, `sync`.
-- [ ] Códigos de salida **que funcionen** y estén documentados (referencia: 0 / 100 red / 200 origen / 300 destino / 400 general; el ejemplo `if not errorlevel 0` del manual de `sfxcl` no detecta fallos nunca).
+- [x] Códigos de salida **que funcionen** y estén documentados: 0 / 250 uso / 251 red / 252 autenticación / 253 clave de host / 254 otros (`ARCHITECTURE.md`). El esquema 100-400 de `sfxcl` no cabe en 8 bits en Unix, y el ejemplo `if not errorlevel 0` de su manual no detecta fallos nunca.
 - [ ] Salida `--json` para scripts.
 - [ ] Generación de claves (Ed25519 por defecto) y gestión de claves públicas.
 

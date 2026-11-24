@@ -1,5 +1,6 @@
 //! Binario `friki`. Códigos de salida (TODO.md §6):
-//! 0 correcto, 100 red, 200 autenticación, 300 clave de host, 400 otros.
+//! 0 correcto, 250 uso, 251 red, 252 autenticación, 253 clave de host, 254 otros.
+//! Caben en 8 bits (Unix trunca módulo 256) y no chocan con los códigos habituales.
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -34,10 +35,9 @@ enum Command {
     Keygen(KeygenArgs),
 }
 
+/// Opciones de conexión comunes a `ssh` y `exec`.
 #[derive(Debug, clap::Args)]
-struct SshArgs {
-    /// Sesión guardada o `[user@]host[:port]`.
-    target: String,
+struct ConnArgs {
     /// Puerto (sobrescribe el de la sesión).
     #[arg(short, long)]
     port: Option<u16>,
@@ -52,10 +52,35 @@ struct SshArgs {
     legacy_algorithms: bool,
 }
 
+impl ConnArgs {
+    fn apply(self, cfg: &mut SessionConfig) {
+        if let Some(port) = self.port {
+            cfg.port = port;
+        }
+        if let Some(user) = self.user {
+            cfg.user = Some(user);
+        }
+        cfg.identity_files.extend(self.identity);
+        if self.legacy_algorithms {
+            cfg.legacy_algorithms = true;
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct SshArgs {
+    /// Sesión guardada o `[user@]host[:port]`.
+    target: String,
+    #[command(flatten)]
+    conn: ConnArgs,
+}
+
 #[derive(Debug, clap::Args)]
 struct ExecArgs {
     /// Sesión guardada o `[user@]host[:port]`.
     target: String,
+    #[command(flatten)]
+    conn: ConnArgs,
     /// Comando remoto; se une con espacios.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
@@ -102,7 +127,14 @@ struct KeygenArgs {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let code = if e.use_stderr() { EXIT_USAGE } else { 0 };
+            let _ = e.print();
+            std::process::exit(code);
+        }
+    };
     match run(cli).await {
         Ok(code) => std::process::exit(code),
         Err(err) => {
@@ -121,20 +153,26 @@ async fn run(cli: Cli) -> anyhow::Result<i32> {
     }
 }
 
+const EXIT_USAGE: i32 = 250;
+const EXIT_NETWORK: i32 = 251;
+const EXIT_AUTH: i32 = 252;
+const EXIT_HOST_KEY: i32 = 253;
+const EXIT_OTHER: i32 = 254;
+
 /// Código de salida de la CLI según el error (ARCHITECTURE.md).
 pub fn exit_code(err: &anyhow::Error) -> i32 {
     if let Some(e) = err.downcast_ref::<friki_ssh::Error>() {
         return match e {
-            friki_ssh::Error::Network(_) => 100,
-            friki_ssh::Error::Auth(_) => 200,
-            friki_ssh::Error::HostKey(_) => 300,
-            friki_ssh::Error::Negotiation(_) | friki_ssh::Error::Other(_) => 400,
+            friki_ssh::Error::Network(_) => EXIT_NETWORK,
+            friki_ssh::Error::Auth(_) => EXIT_AUTH,
+            friki_ssh::Error::HostKey(_) => EXIT_HOST_KEY,
+            friki_ssh::Error::Negotiation(_) | friki_ssh::Error::Other(_) => EXIT_OTHER,
         };
     }
     if err.downcast_ref::<friki_core::Error>().is_some() {
-        return 400;
+        return EXIT_OTHER;
     }
-    400
+    EXIT_OTHER
 }
 
 fn home_dir() -> anyhow::Result<PathBuf> {
@@ -150,16 +188,7 @@ fn load_target(target: &str) -> anyhow::Result<SessionConfig> {
 
 async fn ssh(args: SshArgs) -> anyhow::Result<i32> {
     let mut cfg = load_target(&args.target)?;
-    if let Some(port) = args.port {
-        cfg.port = port;
-    }
-    if let Some(user) = args.user {
-        cfg.user = Some(user);
-    }
-    cfg.identity_files.extend(args.identity);
-    if args.legacy_algorithms {
-        cfg.legacy_algorithms = true;
-    }
+    args.conn.apply(&mut cfg);
     friki_tui::run(cfg).await
 }
 
@@ -248,7 +277,8 @@ impl AuthPrompter for TerminalPrompter {
 }
 
 async fn exec(args: ExecArgs) -> anyhow::Result<i32> {
-    let cfg = load_target(&args.target)?;
+    let mut cfg = load_target(&args.target)?;
+    args.conn.apply(&mut cfg);
     let known = KnownHosts::load(&paths::known_hosts_file())?;
     let verifier = Arc::new(StrictVerifier { known });
     let prompter = Arc::new(TerminalPrompter {
@@ -387,44 +417,44 @@ mod tests {
     #[test]
     fn exit_code_red_es_100() {
         let e = anyhow::Error::from(friki_ssh::Error::Network("x".into()));
-        assert_eq!(exit_code(&e), 100);
+        assert_eq!(exit_code(&e), EXIT_NETWORK);
     }
 
     #[test]
     fn exit_code_auth_es_200() {
         let e = anyhow::Error::from(friki_ssh::Error::Auth("x".into()));
-        assert_eq!(exit_code(&e), 200);
+        assert_eq!(exit_code(&e), EXIT_AUTH);
     }
 
     #[test]
     fn exit_code_clave_de_host_es_300() {
         let e = anyhow::Error::from(friki_ssh::Error::HostKey("x".into()));
-        assert_eq!(exit_code(&e), 300);
+        assert_eq!(exit_code(&e), EXIT_HOST_KEY);
     }
 
     #[test]
     fn exit_code_negociacion_y_otros_son_400() {
         let neg = anyhow::Error::from(friki_ssh::Error::Negotiation("x".into()));
         let otro = anyhow::Error::from(friki_ssh::Error::Other("x".into()));
-        assert_eq!(exit_code(&neg), 400);
-        assert_eq!(exit_code(&otro), 400);
+        assert_eq!(exit_code(&neg), EXIT_OTHER);
+        assert_eq!(exit_code(&otro), EXIT_OTHER);
     }
 
     #[test]
     fn exit_code_error_de_core_es_400() {
         let e = anyhow::Error::from(friki_core::Error::Secret("x".into()));
-        assert_eq!(exit_code(&e), 400);
+        assert_eq!(exit_code(&e), EXIT_OTHER);
     }
 
     #[test]
     fn exit_code_error_ajeno_es_400() {
-        assert_eq!(exit_code(&anyhow!("otro")), 400);
+        assert_eq!(exit_code(&anyhow!("otro")), EXIT_OTHER);
     }
 
     #[test]
     fn exit_code_atraviesa_contexto() {
         let e = anyhow::Error::from(friki_ssh::Error::Auth("x".into())).context("conectando");
-        assert_eq!(exit_code(&e), 200);
+        assert_eq!(exit_code(&e), EXIT_AUTH);
     }
 
     #[test]
@@ -445,10 +475,13 @@ mod tests {
         ]) {
             Command::Ssh(a) => {
                 assert_eq!(a.target, "srv");
-                assert_eq!(a.port, Some(2222));
-                assert_eq!(a.user.as_deref(), Some("ana"));
-                assert_eq!(a.identity, vec![PathBuf::from("a"), PathBuf::from("b")]);
-                assert!(a.legacy_algorithms);
+                assert_eq!(a.conn.port, Some(2222));
+                assert_eq!(a.conn.user.as_deref(), Some("ana"));
+                assert_eq!(
+                    a.conn.identity,
+                    vec![PathBuf::from("a"), PathBuf::from("b")]
+                );
+                assert!(a.conn.legacy_algorithms);
             }
             other => panic!("subcomando inesperado: {other:?}"),
         }
@@ -459,8 +492,10 @@ mod tests {
         match parse(&["friki", "ssh", "ana@host:22"]) {
             Command::Ssh(a) => {
                 assert_eq!(a.target, "ana@host:22");
-                assert!(a.port.is_none() && a.user.is_none() && a.identity.is_empty());
-                assert!(!a.legacy_algorithms);
+                assert!(
+                    a.conn.port.is_none() && a.conn.user.is_none() && a.conn.identity.is_empty()
+                );
+                assert!(!a.conn.legacy_algorithms);
             }
             other => panic!("subcomando inesperado: {other:?}"),
         }
