@@ -38,6 +38,10 @@ mod tests {
     #[test]
     #[ignore = "toca el llavero real del sistema"]
     fn roundtrip_real_keyring() {
+        if std::env::var("FRIKI_TEST_KEYRING").as_deref() != Ok("1") {
+            eprintln!("omitida: define FRIKI_TEST_KEYRING=1 para usar el llavero real");
+            return;
+        }
         let acct = "friki-core-test-account";
         set(acct, "s3cr3t").unwrap();
         assert_eq!(get(acct).unwrap().as_deref(), Some("s3cr3t"));
