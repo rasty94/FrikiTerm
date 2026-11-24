@@ -135,16 +135,48 @@ pub fn save_session(dir: &Path, session: &SessionConfig) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn expand_tilde(p: &str) -> PathBuf {
-    let home = || directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+fn expand_tilde(p: &str, home: Option<&Path>) -> PathBuf {
     match p.strip_prefix('~') {
-        Some("") => home().unwrap_or_else(|| PathBuf::from(p)),
-        Some(rest) if rest.starts_with('/') => home().map_or_else(
+        Some("") => home.map_or_else(|| PathBuf::from(p), Path::to_path_buf),
+        Some(rest) if rest.starts_with('/') => home.map_or_else(
             || PathBuf::from(p),
             |h| h.join(rest.trim_start_matches('/')),
         ),
         _ => PathBuf::from(p),
     }
+}
+
+/// Expande `%h` (alias), `%%`, `%d` (home), `%u` (usuario local) y `%r`
+/// (usuario remoto, si ya se conoce). Devuelve el token no soportado en `Err`.
+fn expand_tokens(
+    val: &str,
+    alias: &str,
+    home: Option<&Path>,
+    local_user: Option<&str>,
+    remote_user: Option<&str>,
+) -> std::result::Result<String, String> {
+    let mut out = String::with_capacity(val.len());
+    let mut it = val.chars();
+    while let Some(c) = it.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let t = it.next();
+        let rep = match t {
+            Some('%') => Some("%".to_string()),
+            Some('h') => Some(alias.to_string()),
+            Some('d') => home.map(|h| h.display().to_string()),
+            Some('u') => local_user.map(str::to_string),
+            Some('r') => remote_user.map(str::to_string),
+            _ => None,
+        };
+        match rep {
+            Some(r) => out.push_str(&r),
+            None => return Err(format!("%{}", t.unwrap_or(' ')).trim_end().to_string()),
+        }
+    }
+    Ok(out)
 }
 
 /// `Clave valor` o `Clave=valor`, con comillas opcionales en el valor.
@@ -165,42 +197,111 @@ fn split_directive(line: &str) -> Option<(String, String)> {
     (!val.is_empty()).then(|| (key, val.to_string()))
 }
 
+/// Directivas con efecto de seguridad o de red que no se importan.
+const IGNORED_DIRECTIVES: &[&str] = &[
+    "proxycommand",
+    "hostkeyalias",
+    "userknownhostsfile",
+    "globalknownhostsfile",
+    "identitiesonly",
+    "identityagent",
+    "certificatefile",
+    "stricthostkeychecking",
+    "forwardagent",
+    "forwardx11",
+    "localforward",
+    "remoteforward",
+    "dynamicforward",
+    "localcommand",
+    "permitlocalcommand",
+    "remotecommand",
+    "include",
+    "match",
+];
+
 /// Convierte los bloques `Host` concretos (sin comodines) de un `ssh_config`.
-/// Soporta HostName, User, Port, IdentityFile (con `~`) y ProxyJump.
-/// `Include`, `Match`, bloques con comodines y el resto de directivas se ignoran.
+/// Soporta HostName, User, Port, IdentityFile (con `~` y `%h %d %u %r %%`) y
+/// ProxyJump. `Include`, `Match`, bloques con comodines y el resto de
+/// directivas se ignoran; use [`import_ssh_config_report`] para saber cuáles.
 pub fn import_ssh_config(path: &Path) -> Result<Vec<SessionConfig>> {
+    import_ssh_config_report(path).map(|(s, _)| s)
+}
+
+/// Como [`import_ssh_config`], y además devuelve avisos legibles: directivas
+/// ignoradas (con el bloque `Host` donde aparecen) y tokens `%x` no soportados.
+pub fn import_ssh_config_report(path: &Path) -> Result<(Vec<SessionConfig>, Vec<String>)> {
+    let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok();
+    import_with_env(path, home.as_deref(), user.as_deref())
+}
+
+fn import_with_env(
+    path: &Path,
+    home: Option<&Path>,
+    local_user: Option<&str>,
+) -> Result<(Vec<SessionConfig>, Vec<String>)> {
     let text = String::from_utf8_lossy(&std::fs::read(path)?).into_owned();
     let mut out: Vec<SessionConfig> = Vec::new();
-    // Índices en `out` del bloque abierto (un `Host a b` crea varias sesiones).
+    let mut warnings: Vec<String> = Vec::new();
+    // Un alias repetido en varios bloques `Host` se fusiona en una sola sesión.
+    let mut by_alias: std::collections::HashMap<String, usize> = Default::default();
+    // Índices en `out` del bloque abierto.
     let mut current: Vec<usize> = Vec::new();
+    let mut label = String::from("(global)");
     let mut seen: Vec<std::collections::HashSet<&'static str>> = Vec::new();
     for line in text.lines() {
         let Some((key, val)) = split_directive(line) else {
             continue;
         };
+        if IGNORED_DIRECTIVES.contains(&key.as_str()) {
+            warnings.push(format!("{label}: directiva {key} ignorada ({val})"));
+        }
         match key.as_str() {
             "host" => {
                 current.clear();
+                label = val.clone();
                 for h in val.split_whitespace() {
                     if h.contains(['*', '?', '!']) {
+                        warnings.push(format!("Host {h}: patrón con comodines omitido"));
                         continue;
                     }
-                    current.push(out.len());
-                    out.push(SessionConfig {
-                        name: h.into(),
-                        host: h.into(),
-                        ..Default::default()
+                    let i = *by_alias.entry(h.to_string()).or_insert_with(|| {
+                        out.push(SessionConfig {
+                            name: h.into(),
+                            host: h.into(),
+                            ..Default::default()
+                        });
+                        seen.push(Default::default());
+                        out.len() - 1
                     });
-                    seen.push(Default::default());
+                    if !current.contains(&i) {
+                        current.push(i);
+                    }
                 }
             }
-            "match" => current.clear(),
+            "match" => {
+                current.clear();
+                label = format!("Match {val}");
+            }
             _ => {
                 for &i in &current {
                     // ssh_config: el primer valor obtenido gana.
                     let (s, seen) = (&mut out[i], &mut seen[i]);
+                    let alias = s.name.clone();
+                    let mut expand = |v: &str, user: Option<&str>| {
+                        expand_tokens(v, &alias, home, local_user, user).map_err(|t| {
+                            warnings.push(format!("{alias}: {key} omitida, token {t} no soportado"))
+                        })
+                    };
                     match key.as_str() {
-                        "hostname" if seen.insert("hostname") => s.host = val.clone(),
+                        "hostname" if !seen.contains("hostname") => {
+                            if let Ok(v) = expand(&val, s.user.as_deref()) {
+                                s.host = v;
+                                seen.insert("hostname");
+                            }
+                        }
                         "user" if seen.insert("user") => s.user = Some(val.clone()),
                         "port" if !seen.contains("port") => {
                             if let Ok(p) = val.parse() {
@@ -208,7 +309,11 @@ pub fn import_ssh_config(path: &Path) -> Result<Vec<SessionConfig>> {
                                 seen.insert("port");
                             }
                         }
-                        "identityfile" => s.identity_files.push(expand_tilde(&val)),
+                        "identityfile" => {
+                            if let Ok(v) = expand(&val, s.user.as_deref()) {
+                                s.identity_files.push(expand_tilde(&v, home));
+                            }
+                        }
                         "proxyjump" if seen.insert("proxyjump") => s.proxy_jump = Some(val.clone()),
                         _ => {}
                     }
@@ -216,7 +321,7 @@ pub fn import_ssh_config(path: &Path) -> Result<Vec<SessionConfig>> {
             }
         }
     }
-    Ok(out)
+    Ok((out, warnings))
 }
 
 /// Resuelve un nombre de sesión guardada o `[user@]host[:port]`.
@@ -389,6 +494,83 @@ Host late
             ("bare", 22, None)
         );
         assert_eq!(got[4].port, 2200);
+    }
+
+    #[test]
+    fn import_merges_repeated_aliases_first_value_wins() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config");
+        std::fs::write(
+            &p,
+            "Host web\n HostName 10.0.0.5\n\nHost web db\n User deploy\n HostName other\n",
+        )
+        .unwrap();
+        let got = import_ssh_config(&p).unwrap();
+        let names: Vec<_> = got.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["web", "db"]);
+        assert_eq!(got[0].host, "10.0.0.5");
+        assert_eq!(got[0].user.as_deref(), Some("deploy"));
+        assert_eq!(got[1].host, "other");
+    }
+
+    #[test]
+    fn import_expands_tokens_and_warns_on_unknown() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config");
+        std::fs::write(
+            &p,
+            "Host web\n User bob\n HostName %h.example.com\n IdentityFile %d/.ssh/%r_%u_100%%\n IdentityFile ~/k\n IdentityFile /x/%p\n",
+        )
+        .unwrap();
+        let (got, warns) = import_with_env(&p, Some(Path::new("/home/me")), Some("local")).unwrap();
+        assert_eq!(got[0].host, "web.example.com");
+        assert_eq!(
+            got[0].identity_files,
+            [
+                PathBuf::from("/home/me/.ssh/bob_local_100%"),
+                PathBuf::from("/home/me/k")
+            ]
+        );
+        assert!(warns.iter().any(|w| w.contains("web") && w.contains("%p")));
+        // Token desconocido en HostName: se omite y se conserva el alias.
+        std::fs::write(&p, "Host a\n HostName %z\n").unwrap();
+        let (got, warns) = import_with_env(&p, None, None).unwrap();
+        assert_eq!(got[0].host, "a");
+        assert_eq!(warns.len(), 1);
+    }
+
+    #[test]
+    fn import_report_lists_ignored_security_directives() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config");
+        std::fs::write(
+            &p,
+            "Include conf.d/*\nHost web\n ProxyCommand nc %h 22\n ForwardAgent yes\n StrictHostKeyChecking no\n HostKeyAlias x\n UserKnownHostsFile /dev/null\n IdentitiesOnly yes\nMatch host foo\n User m\n",
+        )
+        .unwrap();
+        let (got, warns) = import_ssh_config_report(&p).unwrap();
+        assert_eq!(got.len(), 1);
+        for dir in [
+            "include",
+            "proxycommand",
+            "forwardagent",
+            "stricthostkeychecking",
+            "hostkeyalias",
+            "userknownhostsfile",
+            "identitiesonly",
+            "match",
+        ] {
+            assert!(
+                warns.iter().any(|w| w.contains(dir)),
+                "falta aviso de {dir}"
+            );
+        }
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.starts_with("web:") && w.contains("proxycommand"))
+        );
+        assert_eq!(got[0].user, None);
     }
 
     #[test]

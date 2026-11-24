@@ -1,17 +1,23 @@
 //! Rutas de la aplicación según la plataforma (XDG, `~/Library/Application Support`, `%APPDATA%`).
 //! `FRIKI_HOME` las sustituye todas (útil para pruebas).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub fn config_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("FRIKI_HOME").filter(|v| !v.is_empty()) {
+    resolve_config_dir(
+        std::env::var_os("FRIKI_HOME"),
+        directories::ProjectDirs::from("", "", "frikiSSH").map(|d| d.config_dir().to_path_buf()),
+    )
+}
+
+/// Lógica pura: `FRIKI_HOME` no vacío gana; si no, el directorio de la plataforma.
+fn resolve_config_dir(friki_home: Option<OsString>, platform: Option<PathBuf>) -> PathBuf {
+    if let Some(home) = friki_home.filter(|v| !v.is_empty()) {
         return PathBuf::from(home);
     }
-    match directories::ProjectDirs::from("", "", "frikiSSH") {
-        Some(d) => d.config_dir().to_path_buf(),
-        // ponytail: sin HOME resoluble caemos al directorio actual
-        None => PathBuf::from(".friki"),
-    }
+    // ponytail: sin HOME resoluble caemos al directorio actual
+    platform.unwrap_or_else(|| PathBuf::from(".friki"))
 }
 
 pub fn sessions_dir() -> PathBuf {
@@ -30,19 +36,28 @@ pub fn logs_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    // Un único test: manipula una variable de entorno global.
     #[test]
-    fn friki_home_overrides_everything() {
-        // SAFETY: único test del crate que toca FRIKI_HOME.
-        unsafe { std::env::set_var("FRIKI_HOME", "/tmp/friki-x") };
-        assert_eq!(config_dir(), PathBuf::from("/tmp/friki-x"));
-        assert_eq!(sessions_dir(), PathBuf::from("/tmp/friki-x/sessions"));
+    fn friki_home_overrides_platform_dir() {
+        let want = PathBuf::from("/plat/frikiSSH");
+        let plat = Some(want.clone());
         assert_eq!(
-            known_hosts_file(),
-            PathBuf::from("/tmp/friki-x/known_hosts")
+            resolve_config_dir(Some("/tmp/friki-x".into()), plat.clone()),
+            PathBuf::from("/tmp/friki-x")
         );
-        assert_eq!(logs_dir(), PathBuf::from("/tmp/friki-x/logs"));
-        unsafe { std::env::remove_var("FRIKI_HOME") };
-        assert!(config_dir().ends_with("frikiSSH") || config_dir().ends_with(".friki"));
+        // Vacío = como no definido.
+        assert_eq!(
+            resolve_config_dir(Some("".into()), plat.clone()),
+            want.clone()
+        );
+        assert_eq!(resolve_config_dir(None, plat.clone()), want);
+        assert_eq!(resolve_config_dir(None, None), PathBuf::from(".friki"));
+    }
+
+    #[test]
+    fn derived_paths_hang_from_config_dir() {
+        let base = config_dir();
+        assert_eq!(sessions_dir(), base.join("sessions"));
+        assert_eq!(known_hosts_file(), base.join("known_hosts"));
+        assert_eq!(logs_dir(), base.join("logs"));
     }
 }

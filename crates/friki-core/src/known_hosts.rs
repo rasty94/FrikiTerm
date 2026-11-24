@@ -1,6 +1,7 @@
 //! `known_hosts` compatible con OpenSSH: lee entradas en claro y hasheadas
 //! (`|1|salt|hash`), `[host]:port` para puertos distintos de 22, y marcadores
-//! `@revoked`. Escribe en claro, con bloqueo y de forma atómica.
+//! `@revoked`. Escribe en claro, de forma atómica y con bloqueo de fichero
+//! (`<known_hosts>.lock`) alrededor de leer-modificar-renombrar.
 
 use std::path::{Path, PathBuf};
 
@@ -101,7 +102,8 @@ impl Pattern {
             }
             Pattern::Hashed { salt, hash } => match Hmac::<Sha1>::new_from_slice(salt) {
                 Ok(mut mac) => {
-                    mac.update(token.as_bytes());
+                    // OpenSSH hashea el nombre en minúsculas.
+                    mac.update(token.to_ascii_lowercase().as_bytes());
                     mac.verify_slice(hash).is_ok()
                 }
                 Err(_) => false,
@@ -169,9 +171,33 @@ impl KnownHosts {
         })
     }
 
-    pub fn check(&self, host: &str, port: u16, key: &HostKey) -> HostKeyStatus {
+    /// Algoritmos de las claves no revocadas que aplican al host, sin duplicados
+    /// y en orden de aparición (para ofrecer primero los ya conocidos).
+    pub fn algorithms_for(&self, host: &str, port: u16) -> Vec<String> {
+        if !valid_host(host) {
+            return Vec::new();
+        }
         let token = host_token(host, port);
-        let mut previous = None;
+        let mut out: Vec<String> = Vec::new();
+        for e in self
+            .entries
+            .iter()
+            .filter(|e| !e.revoked && e.applies_to(&token))
+        {
+            if !out.contains(&e.key.algorithm) {
+                out.push(e.key.algorithm.clone());
+            }
+        }
+        out
+    }
+
+    pub fn check(&self, host: &str, port: u16, key: &HostKey) -> HostKeyStatus {
+        if !valid_host(host) {
+            return HostKeyStatus::Unknown;
+        }
+        let token = host_token(host, port);
+        let mut same_alg = None;
+        let mut other_alg = None;
         let mut known = false;
         for e in self.entries.iter().filter(|e| e.applies_to(&token)) {
             let same = e.key == *key;
@@ -182,10 +208,14 @@ impl KnownHosts {
             } else if same {
                 known = true;
             } else if e.key.algorithm == key.algorithm {
-                previous.get_or_insert_with(|| e.key.clone());
+                same_alg.get_or_insert_with(|| e.key.clone());
+            } else {
+                other_alg.get_or_insert_with(|| e.key.clone());
             }
         }
-        match (known, previous) {
+        // Una clave de otro algoritmo ya guardada también es un cambio: si no,
+        // un intermediario ofrecería otro algoritmo para evitar el aviso fuerte.
+        match (known, same_alg.or(other_alg)) {
             (true, _) => HostKeyStatus::Known,
             (false, Some(previous)) => HostKeyStatus::Changed { previous },
             (false, None) => HostKeyStatus::Unknown,
@@ -193,13 +223,22 @@ impl KnownHosts {
     }
 
     pub fn add(&mut self, host: &str, port: u16, key: &HostKey) -> Result<()> {
-        let token = host_token(host, port);
-        let mut text = read_lossy(&self.path)?;
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
+        if !valid_host(host) {
+            return Err(crate::Error::Parse {
+                path: self.path.display().to_string(),
+                msg: format!("nombre de host no válido para known_hosts: {host:?}"),
+            });
         }
-        text.push_str(&format!("{token} {} {}\n", key.algorithm, key.base64));
-        crate::fsutil::write_atomic(&self.path, text.as_bytes())?;
+        let token = host_token(host, port);
+        let path = self.path.clone();
+        crate::fsutil::with_lock(&path, || {
+            let mut text = read_lossy(&path)?;
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&format!("{token} {} {}\n", key.algorithm, key.base64));
+            crate::fsutil::write_atomic(&path, text.as_bytes())
+        })?;
         self.entries.push(Entry {
             patterns: vec![Pattern::Plain {
                 glob: token.to_ascii_lowercase(),
@@ -210,6 +249,14 @@ impl KnownHosts {
         });
         Ok(())
     }
+}
+
+/// Rechaza lo que rompería la línea o se interpretaría como patrón/marcador.
+fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || ",*?!|#@".contains(c))
 }
 
 fn read_lossy(path: &Path) -> Result<String> {
@@ -273,12 +320,84 @@ mod tests {
             HostKeyStatus::Changed { previous: key(K1) }
         );
         assert_eq!(kh.check("other", 22, &key(K1)), HostKeyStatus::Unknown);
-        // Otro algoritmo: no es un cambio, es desconocido.
+        // Otro algoritmo con clave guardada: también es un cambio (anti-downgrade).
         let rsa = HostKey {
             algorithm: "ssh-rsa".into(),
             base64: "AAAA".into(),
         };
-        assert_eq!(kh.check("host.example", 22, &rsa), HostKeyStatus::Unknown);
+        assert_eq!(
+            kh.check("host.example", 22, &rsa),
+            HostKeyStatus::Changed { previous: key(K1) }
+        );
+    }
+
+    #[test]
+    fn algorithms_for_dedups_in_order_and_skips_revoked() {
+        let (_d, kh) = load(&format!(
+            "h ssh-ed25519 {K1}\nh ecdsa-sha2-nistp256 AAAA\nh ssh-ed25519 {K2}\n@revoked h ssh-rsa BBBB\nother ssh-rsa CCCC\n"
+        ));
+        assert_eq!(
+            kh.algorithms_for("h", 22),
+            vec!["ssh-ed25519", "ecdsa-sha2-nistp256"]
+        );
+        assert!(kh.algorithms_for("zzz", 22).is_empty());
+        assert!(kh.algorithms_for("a,*", 22).is_empty());
+    }
+
+    #[test]
+    fn hashed_entries_are_case_insensitive() {
+        let (_d, kh) = load(&format!("{HASHED} ssh-ed25519 {K1}\n"));
+        assert_eq!(kh.check("EXAMPLE.com", 22, &key(K1)), HostKeyStatus::Known);
+    }
+
+    #[test]
+    fn rejects_injection_in_host() {
+        let (d, mut kh) = load(&format!("* ssh-ed25519 {K1}\n"));
+        for bad in [
+            "evil\n* ssh-ed25519 CCCC\n#",
+            "a,*",
+            "",
+            "a b",
+            "a?",
+            "!a",
+            "|1|x",
+            "#a",
+            "@a",
+        ] {
+            assert!(matches!(
+                kh.add(bad, 22, &key(K2)),
+                Err(crate::Error::Parse { .. })
+            ));
+            // Aunque haya un comodín que cubriría todo, un host inválido es Unknown.
+            assert_eq!(kh.check(bad, 22, &key(K1)), HostKeyStatus::Unknown);
+        }
+        let text = std::fs::read_to_string(d.path().join("known_hosts")).unwrap();
+        assert_eq!(text, format!("* ssh-ed25519 {K1}\n"));
+    }
+
+    #[test]
+    fn concurrent_adds_do_not_lose_entries() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("known_hosts");
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    let mut kh = KnownHosts::load(&p).unwrap();
+                    kh.add(&format!("h{i}"), 22, &key(K1)).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let kh = KnownHosts::load(&p).unwrap();
+        for i in 0..8 {
+            assert_eq!(
+                kh.check(&format!("h{i}"), 22, &key(K1)),
+                HostKeyStatus::Known
+            );
+        }
     }
 
     #[test]
@@ -344,8 +463,8 @@ mod tests {
         );
         let kh2 = KnownHosts::load(&p).unwrap();
         assert_eq!(kh2.check("h2", 2222, &key(K2)), HostKeyStatus::Known);
-        // Sin ficheros temporales sobrantes.
-        assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
+        // Sin ficheros temporales sobrantes (solo datos + .lock).
+        assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 2);
     }
 
     #[test]
