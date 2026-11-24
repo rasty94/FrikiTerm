@@ -31,3 +31,11 @@ Solo análisis estático: no se ejecutó ningún binario del producto.
 - **Registrar:** `claude mcp add -s user rea -- docker run -i --rm --platform linux/amd64 -v "$PWD:$PWD" rea-ghidra mcp` y reiniciar Claude Code.
 - **Rutas:** el proyecto se monta en la misma ruta absoluta del host, porque REA devuelve rutas tal cual.
 - **Comprobar:** `docker run --rm --platform linux/amd64 rea-ghidra doctor --json`
+
+## Ghidra nativo en macOS arm64 (alternativa a Docker)
+
+`scripts/build-ghidra-macos-arm64.sh` descarga la release de Ghidra 12.2 (SHA-256 verificado) y compila su decompilador desde el código fuente con `-arch arm64`. Instala en `~/tools/ghidra`; necesita `brew install openjdk` (JDK 25 o superior).
+
+- **Resultado:** `rea doctor` da todas las comprobaciones de Ghidra en verde (`mach-o arm64`, JDK 27).
+- **Prueba real:** decompilar `SSH2::Init` tarda unos 46 s en frío, frente a unos 2 min en Docker emulado, con el mismo resultado (mismos manejadores de KEX).
+- **Uso:** `GHIDRA_INSTALL_DIR=~/tools/ghidra JAVA_HOME=/opt/homebrew/opt/openjdk npx -y rea-agents@latest decompile <binario> <dirección> --json`
