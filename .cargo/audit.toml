@@ -1,0 +1,6 @@
+# chrono (RUSTSEC-2026-0543): transitiva de russh-util; misma excepción en deny.toml.
+# zbus_names / zvariant / zvariant_derive (RUSTSEC-2026-0370/0371/0372): opcionales de keyring
+# (secret-service) que figuran en Cargo.lock pero no se compilan con nuestras features
+# (cargo tree --target all no las muestra; cargo-deny, que resuelve features, no las detecta).
+[advisories]
+ignore = ["RUSTSEC-2026-0543", "RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]

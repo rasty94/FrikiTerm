@@ -5,6 +5,11 @@ version = 2
 # Vulnerabilidades (por defecto deny), crates sin mantenimiento y versiones yanked bloquean el CI.
 unmaintained = "all"
 yanked = "deny"
+# Excepciones revisadas a mano; quitar en cuanto el origen se actualice.
+ignore = [
+    # chrono sin mantenimiento: llega solo por russh -> russh-util; no lo usamos directamente.
+    { id = "RUSTSEC-2026-0543", reason = "transitiva de russh-util; revisar al subir russh" },
+]
 
 [licenses]
 version = 2
