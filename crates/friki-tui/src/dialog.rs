@@ -191,6 +191,14 @@ impl Dialog {
         )
     }
 
+    /// Entrada de una línea con eco y valor inicial (renombrar pestaña). Contesta con
+    /// `Answer::Secret(Some(texto))`.
+    pub fn text(title: &str, label: &str, initial: &str) -> Self {
+        let mut f = field(label, true);
+        f.value.push_str(&clean(initial));
+        Self::new(Kind::Input { multi: false }, title.into(), vec![], vec![f])
+    }
+
     /// Aviso informativo (Enter, Esc o espacio lo cierran).
     pub fn notice(title: &str, lines: &[String], alert: bool) -> Self {
         let mut body: Vec<String> = lines.iter().map(|l| clean(l)).collect();
