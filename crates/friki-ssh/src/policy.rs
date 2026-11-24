@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use russh::keys::{Algorithm, EcdsaCurve, HashAlg};
-use russh::{Preferred, cipher, kex, mac};
+use russh::{Preferred, cipher, compression, kex, mac};
 
 use crate::AlgorithmPolicy;
 
@@ -47,6 +47,21 @@ fn conv<T>(
 }
 
 impl AlgorithmPolicy {
+    /// Pone primero los algoritmos de clave de host que ya figuran en `known_hosts`
+    /// para este host (como OpenSSH), conservando el orden relativo. Los
+    /// `rsa-sha2-*` y `ssh-rsa` cuentan como la familia `ssh-rsa`.
+    pub(crate) fn prefer_known(&mut self, known: &[String]) {
+        let family = |n: &str| {
+            if n.starts_with("rsa-sha2-") {
+                "ssh-rsa"
+            } else {
+                n
+            }
+            .to_string()
+        };
+        self.host_keys.sort_by_key(|n| !known.contains(&family(n)));
+    }
+
     /// Devuelve la configuración de russh y los nombres que russh no conoce
     /// (omitidos). Añade las extensiones de strict KEX (CVE-2023-48795).
     pub(crate) fn to_preferred(&self) -> (Preferred, Vec<&'static str>) {
@@ -66,6 +81,8 @@ impl AlgorithmPolicy {
             key: Cow::Owned(keys),
             cipher: Cow::Owned(ciphers),
             mac: Cow::Owned(macs),
+            // Sin compresión: ni `zlib` ni `zlib@openssh.com` (superficie y CRIME-style).
+            compression: Cow::Borrowed(&[compression::NONE]),
             ..Preferred::default()
         };
         (preferred, skipped)
@@ -95,6 +112,46 @@ mod tests {
                 assert!(!n.contains(d), "{n} contiene {d}");
             }
         }
+    }
+
+    #[test]
+    fn secure_ofrecido_a_russh_no_tiene_nada_debil() {
+        let (p, _) = AlgorithmPolicy::secure().to_preferred();
+        let ofrecidos: Vec<String> = p
+            .kex
+            .iter()
+            .map(|n| n.as_ref().to_string())
+            .chain(p.cipher.iter().map(|n| n.as_ref().to_string()))
+            .chain(p.mac.iter().map(|n| n.as_ref().to_string()))
+            .chain(p.key.iter().map(|n| n.to_string()))
+            .collect();
+        assert!(!ofrecidos.is_empty());
+        for n in &ofrecidos {
+            for d in ["none", "-cbc", "sha1", "md5", "group1-", "dss"] {
+                assert!(!n.contains(d), "{n} contiene {d}");
+            }
+        }
+        assert_eq!(p.compression.as_ref(), [compression::NONE]);
+    }
+
+    #[test]
+    fn conocidos_van_primero_y_el_resto_conserva_orden() {
+        let mut p = AlgorithmPolicy::secure();
+        p.prefer_known(&["ecdsa-sha2-nistp256".into(), "ssh-rsa".into()]);
+        assert_eq!(
+            p.host_keys,
+            [
+                "ecdsa-sha2-nistp256",
+                "rsa-sha2-512",
+                "rsa-sha2-256",
+                "ssh-ed25519",
+                "ecdsa-sha2-nistp384",
+                "ecdsa-sha2-nistp521"
+            ]
+        );
+        let mut q = AlgorithmPolicy::secure();
+        q.prefer_known(&[]);
+        assert_eq!(q, AlgorithmPolicy::secure());
     }
 
     #[test]
