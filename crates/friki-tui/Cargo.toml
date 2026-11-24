@@ -4,14 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 friki-core = { path = "../friki-core" }
 friki-ssh = { path = "../friki-ssh" }
 friki-term = { path = "../friki-term" }
 anyhow = "1"
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 futures-util = "0.3"
 async-trait = "0.1"

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [features]
 # Algoritmos heredados (3DES, CBC, SHA-1, DH group1, DSA). Desactivado por defecto (TODO.md §11).

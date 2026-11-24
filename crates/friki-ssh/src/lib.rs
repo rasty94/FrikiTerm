@@ -107,7 +107,12 @@ impl Connection {
     }
 
     /// Canal interactivo con PTY.
-    pub async fn open_shell(&self, term: &str, cols: u16, rows: u16) -> Result<(ShellWriter, ShellReader)> {
+    pub async fn open_shell(
+        &self,
+        term: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(ShellWriter, ShellReader)> {
         let _ = (term, cols, rows);
         todo!("friki-ssh: Connection::open_shell")
     }
@@ -164,7 +169,11 @@ pub mod keys {
 
     /// Genera una clave Ed25519 en formato OpenSSH (privada en `path`, 0600;
     /// pública en `path.pub`) y devuelve la línea pública.
-    pub fn generate_ed25519(path: &Path, comment: &str, passphrase: Option<&str>) -> super::Result<String> {
+    pub fn generate_ed25519(
+        path: &Path,
+        comment: &str,
+        passphrase: Option<&str>,
+    ) -> super::Result<String> {
         let _ = (path, comment, passphrase);
         todo!("friki-ssh: keys::generate_ed25519")
     }
