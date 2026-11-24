@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs (IND/LF): LF fuera de la region en el borde inferior de pantalla no hace scroll ni mueve el cursor
+# size: 5 10
+\e[1;1HA\e[2;1Hb\e[5;1HZ\e[2;4r\e[5;1H\nQ

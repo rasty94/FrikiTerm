@@ -1,0 +1,9 @@
+size 2x10
+cursor 0,0 visible
+alt no
+scrollback 0
+title "ab"
+rows:
+00||
+01||
+attrs: ninguno

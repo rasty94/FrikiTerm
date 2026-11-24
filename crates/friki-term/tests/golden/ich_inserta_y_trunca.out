@@ -1,0 +1,10 @@
+size 3x10
+cursor 0,3 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|ABC  DEFGH|
+01||
+02||
+attrs: ninguno

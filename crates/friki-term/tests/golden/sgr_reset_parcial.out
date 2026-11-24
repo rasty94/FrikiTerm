@@ -1,0 +1,12 @@
+size 2x8
+cursor 0,6 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|ABCDEF|
+01||
+attrs:
+  0,0: bold fg=idx1
+  0,1: fg=idx1
+  0,4: bg=idx4

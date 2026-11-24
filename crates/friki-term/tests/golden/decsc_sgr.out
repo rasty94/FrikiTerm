@@ -1,0 +1,11 @@
+size 3x10
+cursor 0,1 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|B|
+01|A|
+02||
+attrs:
+  0,0: bold fg=idx1

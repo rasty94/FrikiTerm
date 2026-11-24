@@ -1,0 +1,4 @@
+# fuente: sin especificacion en xterm ctlseqs (caracterizacion): no debe entrar en panico y el cursor debe quedar dentro de la nueva pantalla
+# size: 3 6
+abcdef\r\nxyz\r\n12
+@resize 2 4

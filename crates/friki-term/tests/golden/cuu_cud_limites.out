@@ -1,0 +1,12 @@
+size 5x10
+cursor 4,6 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|    U|
+01||
+02||
+03||
+04|     D|
+attrs: ninguno

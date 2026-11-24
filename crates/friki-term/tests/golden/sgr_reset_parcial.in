@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, SGR: 22 quita negrita sin tocar el color; 39 solo color de texto; 0 reinicia todo
+# size: 2 8
+\e[1;31mA\e[22mB\e[39mC\e[0mD\e[44mE\e[49mF

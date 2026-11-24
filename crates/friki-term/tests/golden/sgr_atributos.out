@@ -1,0 +1,13 @@
+size 2x10
+cursor 0,7 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|XYZWVIJ|
+01||
+attrs:
+  0,0: bold underline inverse
+  0,1: underline inverse
+  0,2: inverse
+  0,5: italic

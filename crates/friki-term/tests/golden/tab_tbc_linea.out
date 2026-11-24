@@ -1,0 +1,10 @@
+size 3x20
+cursor 0,17 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|a       b       c|
+01||
+02||
+attrs: ninguno

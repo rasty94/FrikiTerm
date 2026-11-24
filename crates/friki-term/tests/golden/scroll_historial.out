@@ -1,0 +1,9 @@
+size 2x4
+cursor 1,1 visible
+alt no
+scrollback 1
+title ""
+rows:
+00|2|
+01|3|
+attrs: ninguno

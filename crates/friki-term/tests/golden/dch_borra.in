@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, DCH "CSI Ps P": borra caracteres en el cursor, desplaza a la izquierda y rellena con blancos al final
+# size: 3 10
+ABCDEFGHIJ\e[1;4H\e[3P

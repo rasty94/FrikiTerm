@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, "CSI s" (guardar cursor, ANSI.SYS) y "CSI u" (restaurar cursor)
+# size: 3 10
+\e[2;5H\e[s\e[3;1Hx\e[uy

@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, RI "ESC M": en el margen superior de la region hace scroll hacia abajo solo dentro de la region
+# size: 5 10
+\e[1;1HA\e[5;1HB\e[2;4r\e[2;1H1\r\n2\r\n3\e[2;1H\eMX

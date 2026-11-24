@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, EL "CSI Ps K": Ps=0 desde el cursor al final de linea, Ps=1 desde el inicio al cursor, Ps=2 toda la linea
+# size: 5 10
+1234567890\r\n1234567890\r\n1234567890\e[1;5H\e[K\e[2;5H\e[1K\e[3;5H\e[2K

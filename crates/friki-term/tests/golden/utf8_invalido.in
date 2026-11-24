@@ -1,0 +1,3 @@
+# fuente: Unicode (U+FFFD para secuencias UTF-8 invalidas): los bytes invalidos se sustituyen y no detienen el resto
+# size: 2 6
+a\xff\xfeb

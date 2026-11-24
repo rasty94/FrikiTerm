@@ -1,0 +1,4 @@
+# fuente: xterm ctlseqs, OSC: el titulo solo cambia al llegar el terminador BEL; la secuencia se reparte entre dos trozos
+# size: 2 10
+\e]0;parcial
+\aok

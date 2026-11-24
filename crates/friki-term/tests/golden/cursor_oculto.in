@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, modo privado 25 (DECTCEM) "CSI ? 25 l": oculta el cursor
+# size: 2 6
+ab\e[?25l

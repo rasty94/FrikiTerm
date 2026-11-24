@@ -1,0 +1,4 @@
+# fuente: sin especificacion en xterm ctlseqs (caracterizacion): el contenido se conserva y las celdas nuevas quedan en blanco
+# size: 2 3
+ab\r\ncd
+@resize 3 5

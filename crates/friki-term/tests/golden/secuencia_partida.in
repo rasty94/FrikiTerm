@@ -1,0 +1,5 @@
+# fuente: ECMA-48 / VT500 parser: el estado de una secuencia sobrevive entre trozos de entrada
+# size: 3 5
+\e[
+3;2H
+X

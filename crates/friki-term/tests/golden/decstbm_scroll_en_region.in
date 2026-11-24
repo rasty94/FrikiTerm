@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, DECSTBM "CSI Ps ; Ps r": el scroll por LF en el margen inferior solo afecta a la region; DECSTBM lleva el cursor a inicio
+# size: 5 10
+\e[1;1HA\e[5;1HB\e[2;4r\e[2;1H1\r\n2\r\n3\r\n4
