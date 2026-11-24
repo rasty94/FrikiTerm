@@ -99,6 +99,29 @@ fn conv_color(c: vt100::Color) -> Color {
     }
 }
 
+/// Interpreta una combinación escrita como texto: modificadores `ctrl`, `alt`, `shift`
+/// separados por `+` y una tecla final: un carácter (`"]"`, `"%"`, `"+"`), un nombre
+/// (`enter`, `tab`, `backtab`, `esc`, `backspace`, `up`, `down`, `left`, `right`, `home`,
+/// `end`, `pageup`, `pagedown`, `insert`, `delete`, `space`) o `f1`..`f12`. Sin distinguir
+/// mayúsculas en nombres y modificadores. `None` si no es válida.
+pub fn parse_chord(s: &str) -> Option<(Key, Modifiers)> {
+    let _ = s;
+    todo!("friki-term: parse_chord")
+}
+
+/// Coincidencia de búsqueda. Filas en coordenadas absolutas del buffer: 0 es la línea más
+/// antigua del scrollback y `scrollback_len() + rows - 1` la última de la pantalla.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Match {
+    pub row: usize,
+    /// Columnas [start, end) en celdas.
+    pub start_col: u16,
+    pub end_col: u16,
+}
+
+/// Posición absoluta (fila del buffer, columna) para selecciones.
+pub type Pos = (usize, u16);
+
 pub struct Terminal {
     parser: vt100::Parser<TitleCb>,
 }
@@ -113,6 +136,55 @@ impl Terminal {
                 TitleCb::default(),
             ),
         }
+    }
+
+    /// Igual que `new` con el perfil: scrollback, emulación (codificación de teclas),
+    /// modo de retroceso y `keymap` (que `encode_key` consulta antes que nada; las
+    /// entradas no válidas se ignoran y se informan en `profile_warnings`).
+    pub fn with_profile(
+        rows: u16,
+        cols: u16,
+        profile: &friki_core::config::TerminalProfile,
+    ) -> Self {
+        let _ = (rows, cols, profile);
+        todo!("friki-term: with_profile")
+    }
+
+    /// Entradas del `keymap` del perfil que no se pudieron aplicar (tecla o bytes inválidos).
+    pub fn profile_warnings(&self) -> Vec<String> {
+        todo!("friki-term: profile_warnings")
+    }
+
+    /// Valor de `TERM` que se anuncia al remoto para la emulación.
+    pub fn term_name(emulation: friki_core::config::Emulation) -> &'static str {
+        let _ = emulation;
+        todo!("friki-term: term_name")
+    }
+
+    /// Busca `needle` en scrollback + pantalla, de la más antigua a la más reciente.
+    /// `case_sensitive = false` compara sin mayúsculas (Unicode simple). Cadena vacía = nada.
+    pub fn search(&self, needle: &str, case_sensitive: bool) -> Vec<Match> {
+        let _ = (needle, case_sensitive);
+        todo!("friki-term: search")
+    }
+
+    /// Ajusta la vista para que `row` (absoluta) quede visible, centrada si se puede.
+    pub fn reveal_row(&mut self, row: usize) {
+        let _ = row;
+        todo!("friki-term: reveal_row")
+    }
+
+    /// Fila absoluta que se ve en la línea 0 de la pantalla con el desplazamiento actual.
+    pub fn top_row(&self) -> usize {
+        todo!("friki-term: top_row")
+    }
+
+    /// Texto entre dos posiciones absolutas (inclusive, en cualquier orden). Une líneas con
+    /// `\n` salvo las que el remoto partió por ancho (wrap), quita espacios finales de cada
+    /// línea y no corta caracteres anchos. `block = true`: selección rectangular.
+    pub fn text_range(&self, from: Pos, to: Pos, block: bool) -> String {
+        let _ = (from, to, block);
+        todo!("friki-term: text_range")
     }
 
     pub fn process(&mut self, bytes: &[u8]) {

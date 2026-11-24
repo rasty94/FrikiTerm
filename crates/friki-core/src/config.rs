@@ -56,6 +56,11 @@ pub struct SessionConfig {
     pub connect_timeout_secs: u64,
     pub keepalive_secs: Option<u64>,
     pub log: Option<LogConfig>,
+    /// Perfil de terminal de la sesión (fase 2). Ausente en el TOML = valores por defecto.
+    pub terminal: TerminalProfile,
+    /// Carpeta lógica en el gestor de sesiones, con `/` como separador (`"clientes/acme"`).
+    /// Vacía = raíz. No forma parte del nombre del fichero (TODO.md §8).
+    pub folder: String,
 }
 
 impl Default for SessionConfig {
@@ -79,8 +84,135 @@ impl Default for SessionConfig {
             connect_timeout_secs: 15,
             keepalive_secs: Some(30),
             log: None,
+            terminal: TerminalProfile::default(),
+            folder: String::new(),
         }
     }
+}
+
+/// Emulación de terminal (TODO.md §3). Determina sobre todo cómo se codifican las teclas
+/// y qué se anuncia; el intérprete de secuencias es el mismo (xterm compatible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Emulation {
+    #[default]
+    Xterm,
+    Vt100,
+    Vt220,
+    Linux,
+    Ansi,
+}
+
+/// Qué envía la tecla Retroceso.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackspaceMode {
+    /// 0x7F (habitual en xterm y Linux).
+    #[default]
+    Delete,
+    /// 0x08 (^H).
+    CtrlH,
+}
+
+/// Tecla con modificadores escrita como texto: `"ctrl+shift+t"`, `"alt+f4"`, `"ctrl+]"`.
+pub type KeyChord = String;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalProfile {
+    pub emulation: Emulation,
+    /// Líneas de scrollback (0 = sin scrollback).
+    pub scrollback: usize,
+    pub backspace: BackspaceMode,
+    /// Nombre del tema de colores (`"default"` o uno de `themes()`).
+    pub theme: String,
+    /// Reasignaciones de teclas enviadas al remoto: tecla → bytes a enviar, con escapes
+    /// `\e`, `\r`, `\n`, `\t`, `\xNN` (ver `parse_key_bytes`).
+    pub keymap: std::collections::BTreeMap<KeyChord, String>,
+}
+
+impl Default for TerminalProfile {
+    fn default() -> Self {
+        Self {
+            emulation: Emulation::Xterm,
+            scrollback: 10_000,
+            backspace: BackspaceMode::Delete,
+            theme: "default".into(),
+            keymap: Default::default(),
+        }
+    }
+}
+
+/// Convierte el texto de un valor de `keymap` en bytes (`"\eOP"` → `[0x1b, b'O', b'P']`).
+/// Error si hay un escape desconocido o un `\x` incompleto.
+pub fn parse_key_bytes(s: &str) -> std::result::Result<Vec<u8>, String> {
+    let _ = s;
+    todo!("friki-core: parse_key_bytes")
+}
+
+/// Configuración global de la aplicación (`config_dir()/config.toml`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppConfig {
+    /// Prefijo de los atajos de la TUI (por defecto `ctrl+]`).
+    pub prefix: KeyChord,
+    /// Acción → tecla tras el prefijo. Acciones: `quit`, `help`, `new-tab`, `close-pane`,
+    /// `next-tab`, `prev-tab`, `split-horizontal`, `split-vertical`, `focus-next`,
+    /// `focus-prev`, `scroll-up`, `scroll-down`, `search`, `copy-mode`, `sessions`, `rename-tab`.
+    pub bindings: std::collections::BTreeMap<String, KeyChord>,
+    /// Perfil de los destinos ad hoc (`user@host`), que no tienen fichero de sesión.
+    pub default_terminal: TerminalProfile,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        let b = |a: &str, k: &str| (a.to_string(), k.to_string());
+        Self {
+            prefix: "ctrl+]".into(),
+            bindings: [
+                b("quit", "q"),
+                b("help", "?"),
+                b("new-tab", "c"),
+                b("close-pane", "x"),
+                b("next-tab", "n"),
+                b("prev-tab", "p"),
+                b("split-horizontal", "\""),
+                b("split-vertical", "%"),
+                b("focus-next", "o"),
+                b("focus-prev", "shift+o"),
+                b("scroll-up", "pageup"),
+                b("scroll-down", "pagedown"),
+                b("search", "/"),
+                b("copy-mode", "["),
+                b("sessions", "s"),
+                b("rename-tab", ","),
+            ]
+            .into_iter()
+            .collect(),
+            default_terminal: TerminalProfile::default(),
+        }
+    }
+}
+
+/// Lee `path`; inexistente = `AppConfig::default()`. Las acciones que falten en `bindings`
+/// toman su valor por defecto; acciones desconocidas o teclas repetidas = `Error::Parse`.
+pub fn load_app_config(path: &Path) -> Result<AppConfig> {
+    let _ = path;
+    todo!("friki-core: load_app_config")
+}
+
+/// Árbol de carpetas del gestor de sesiones: (carpeta, sesiones) ordenado por carpeta y
+/// después por nombre; la raíz es `""`. Incluye las carpetas intermedias aunque estén vacías.
+pub fn session_tree(sessions: &[SessionConfig]) -> Vec<(String, Vec<&SessionConfig>)> {
+    let _ = sessions;
+    todo!("friki-core: session_tree")
+}
+
+/// Normaliza una carpeta: sin `/` inicial ni final, sin segmentos vacíos, `.` ni `..`.
+/// `None` si no es válida.
+pub fn normalize_folder(folder: &str) -> Option<String> {
+    let _ = folder;
+    todo!("friki-core: normalize_folder")
 }
 
 /// Lee todos los `*.toml` de `dir` (inexistente = lista vacía), ordenados por nombre.

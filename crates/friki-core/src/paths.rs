@@ -32,6 +32,11 @@ pub fn logs_dir() -> PathBuf {
     config_dir().join("logs")
 }
 
+/// Configuración global (`AppConfig`).
+pub fn app_config_file() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

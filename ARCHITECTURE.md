@@ -44,3 +44,15 @@ Contra un OpenSSH en Docker (`docker/sshd-test/`, `scripts/test-sshd.sh`). Varia
 0 correcto · 250 uso incorrecto · 251 red · 252 autenticación · 253 clave de host · 254 otros (incluye `Negotiation`). En `friki ssh` y `friki exec`, si el comando remoto termina con estado N, se devuelve N.
 
 Los códigos caben en 8 bits: en Unix el estado de salida se trunca módulo 256, así que el esquema 100/200/300/400 de `sfxcl` (Windows) no es portable. Van al final del rango, como el 255 de OpenSSH, para no chocar con los códigos habituales de un comando remoto.
+
+## Fase 2: terminal completo
+
+Contratos nuevos (las firmas son las de los `lib.rs`; mismas reglas que en la fase 1):
+
+| Crate | Añade |
+|---|---|
+| `friki-core` | `TerminalProfile` (emulación, scrollback, retroceso, tema, `keymap`) en `SessionConfig.terminal`; `SessionConfig.folder`; `AppConfig` con prefijo y atajos (`load_app_config`, `paths::app_config_file`); `session_tree`, `normalize_folder`, `parse_key_bytes` |
+| `friki-term` | `parse_chord` (texto → `Key`+`Modifiers`, lo usan TUI y keymap); `Terminal::with_profile`, `term_name`, `profile_warnings`; búsqueda (`search`, `reveal_row`, `top_row`, `Match`) y texto para copiar (`text_range`, `Pos`) |
+| `friki-tui` | Multiplexor: varias sesiones a la vez en pestañas y paneles divididos, foco, atajos configurables, apertura de sesiones |
+
+Atajos por defecto (tras el prefijo `Ctrl+]`, estilo tmux): `c` pestaña nueva, `n`/`p` siguiente/anterior, `"` dividir horizontal, `%` dividir vertical, `o` siguiente panel, `x` cerrar panel, `s` sesiones, `,` renombrar pestaña, `/` buscar, `[` modo copia, `PgUp`/`PgDn` scroll, `?` ayuda, `q` salir.
