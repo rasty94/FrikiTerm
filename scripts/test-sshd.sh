@@ -3,6 +3,9 @@
 #   eval "$(scripts/test-sshd.sh up)"   exporta las FRIKI_TEST_* y deja el contenedor corriendo
 #   scripts/test-sshd.sh down           para el contenedor y borra claves, contraseña y known_hosts
 # Solo stdout lleva las lineas export; los mensajes van a stderr.
+# Estado: la ruta del directorio de secretos (mktemp -d, en $XDG_RUNTIME_DIR o $TMPDIR) se guarda
+# en $HOME/.cache/frikissh-test/current (directorio 0700). Antes de borrar se comprueba que sea un
+# directorio propio (no enlace) llamado friki-sshd-test.* directamente bajo esa base.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -10,27 +13,58 @@ IMAGE=friki/sshd-test:local
 NAME=friki-sshd-test
 TMP_BASE=${TMPDIR:-/tmp}
 TMP_BASE=${TMP_BASE%/}
-STATE="$TMP_BASE/friki-sshd-test.state"
+CACHE="$HOME/.cache/frikissh-test"
+POINTER="$CACHE/current"
 
 log() { printf '%s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
+# Base donde mktemp crea los secretos: XDG_RUNTIME_DIR si existe, si no el temporal del sistema.
+secrets_base() {
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+        printf '%s\n' "${XDG_RUNTIME_DIR%/}"
+    else
+        printf '%s\n' "$TMP_BASE"
+    fi
+}
+
+# Devuelve 0 solo si $1 es un directorio real (no enlace) llamado friki-sshd-test.* directamente
+# bajo una de las bases posibles.
+owned_dir() {
+    d=$1
+    [ -n "$d" ] && [ -d "$d" ] && [ ! -L "$d" ] || return 1
+    for base in "${XDG_RUNTIME_DIR:-}" "$TMP_BASE"; do
+        [ -n "$base" ] && [ "${d%/*}" = "$base" ] || continue
+        case "${d##*/}" in friki-sshd-test.*) return 0 ;; esac
+    done
+    return 1
+}
+
+prepare_cache() {
+    [ ! -L "$CACHE" ] || die "$CACHE es un enlace simbólico"
+    mkdir -p "$CACHE"
+    chmod 700 "$CACHE"
+}
+
 down() {
     docker rm -f "$NAME" >/dev/null 2>&1 || true
-    if [ -f "$STATE" ]; then
-        dir=$(cat "$STATE")
-        case "$dir" in
-            "$TMP_BASE"/friki-sshd-test.*) rm -rf "$dir" ;;
-        esac
-        rm -f "$STATE"
+    if [ -f "$POINTER" ] && [ ! -L "$POINTER" ]; then
+        dir=$(cat "$POINTER")
+        if owned_dir "$dir"; then
+            rm -rf "$dir"
+        else
+            log "aviso: ruta de estado no válida, no se borra: $dir"
+        fi
     fi
+    rm -f "$POINTER"
 }
 
 up() {
     command -v docker >/dev/null 2>&1 || die "hace falta docker"
+    prepare_cache
     down
-    dir=$(mktemp -d "$TMP_BASE/friki-sshd-test.XXXXXX")
-    printf '%s\n' "$dir" > "$STATE"
+    dir=$(mktemp -d "$(secrets_base)/friki-sshd-test.XXXXXX")
+    printf '%s\n' "$dir" > "$POINTER"
 
     log "construyendo imagen $IMAGE"
     docker build -q -t "$IMAGE" "$ROOT/docker/sshd-test" >/dev/null

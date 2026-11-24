@@ -16,11 +16,20 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # Prueba del llavero real: opt-in. Sin definir la variable de repositorio, la prueba se salta.
+      FRIKI_TEST_KEYRING: ${{ vars.FRIKI_TEST_KEYRING }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Dependencias de sistema (Linux, keyring/dbus)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
 
       - name: Formato
         run: cargo fmt --all --check
@@ -33,6 +42,9 @@ jobs:
 
       - name: Pruebas de integración SSH (sshd de pruebas)
         if: matrix.os == 'ubuntu-latest'
+        env:
+          # Sin servidor, las pruebas de integración fallan en vez de saltarse.
+          FRIKI_TEST_REQUIRED: "1"
         run: |
           eval "$(scripts/test-sshd.sh up)"
           cargo test --workspace -- --include-ignored
@@ -45,7 +57,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
-          tool: cargo-deny,cargo-audit
+          tool: cargo-deny@0.22.1,cargo-audit@0.23.0
 
       - name: cargo deny
         if: matrix.os == 'ubuntu-latest'
@@ -53,4 +65,46 @@ jobs:
 
       - name: cargo audit
         if: matrix.os == 'ubuntu-latest'
-        run: cargo audit
+        run: cargo audit -D warnings
+
+  legacy:
+    name: friki-ssh con feature legacy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependencias de sistema (keyring/dbus)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - name: Clippy (legacy)
+        run: cargo clippy -p friki-ssh --features legacy --all-targets -- -D warnings
+
+      - name: Tests (legacy)
+        run: cargo test -p friki-ssh --features legacy
+
+  msrv:
+    name: MSRV (1.85.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependencias de sistema (keyring/dbus)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - name: Instalar toolchain 1.85.0
+        run: rustup toolchain install 1.85.0 --profile minimal
+
+      - name: Compilar con la MSRV (rust-version del Cargo.toml raíz)
+        run: cargo +1.85.0 build --workspace
