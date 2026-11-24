@@ -1713,6 +1713,7 @@ mod tests {
     /// 10 039 coincidencias, incluye clonar la pantalla): ~26 ms. Umbral: 50 ms.
     #[test]
     #[ignore]
+    #[cfg(not(debug_assertions))] // solo tiene sentido medido en release
     fn busca_rapido() {
         let mut t = Terminal::new(40, 120, 10_000);
         let mut s = String::new();
