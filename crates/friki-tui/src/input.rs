@@ -3,9 +3,20 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use friki_term::{Key, Modifiers};
 
+/// `false` para las teclas "release": ningún bucle debe reaccionar a soltar una tecla.
+pub fn pressed(ev: &KeyEvent) -> bool {
+    ev.kind != KeyEventKind::Release
+}
+
 /// Traduce una tecla de crossterm. `None` para teclas sin equivalente o de tipo "release".
 pub fn translate_key(ev: &KeyEvent) -> Option<(Key, Modifiers)> {
-    if ev.kind == KeyEventKind::Release {
+    translate_with(ev, cfg!(windows))
+}
+
+/// `altgr`: en Windows AltGr llega como CONTROL|ALT; con un carácter imprimible es
+/// ese carácter sin modificadores (en Unix Ctrl+Alt+letra es una combinación real).
+fn translate_with(ev: &KeyEvent, altgr: bool) -> Option<(Key, Modifiers)> {
+    if !pressed(ev) {
         return None;
     }
     let mut mods = Modifiers {
@@ -14,6 +25,15 @@ pub fn translate_key(ev: &KeyEvent) -> Option<(Key, Modifiers)> {
         shift: ev.modifiers.contains(KeyModifiers::SHIFT),
     };
     let key = match ev.code {
+        KeyCode::Char(c) if altgr && mods.ctrl && mods.alt && !c.is_control() => {
+            mods.ctrl = false;
+            mods.alt = false;
+            Key::Char(c)
+        }
+        // crossterm entrega Ctrl+\, Ctrl+^ y Ctrl+_ (0x1c, 0x1e, 0x1f) como dígitos.
+        KeyCode::Char('4') if mods.ctrl => Key::Char('\\'),
+        KeyCode::Char('6') if mods.ctrl => Key::Char('^'),
+        KeyCode::Char('7') if mods.ctrl => Key::Char('_'),
         KeyCode::Char(c) => Key::Char(c),
         KeyCode::Enter => Key::Enter,
         KeyCode::Backspace => Key::Backspace,
@@ -68,8 +88,8 @@ fn is_prefix(ev: &KeyEvent) -> bool {
 
 impl Prefix {
     pub fn feed(&mut self, ev: &KeyEvent) -> PrefixOut {
-        if ev.kind == KeyEventKind::Release {
-            return PrefixOut::Cancel;
+        if !pressed(ev) || (ev.kind == KeyEventKind::Repeat && is_prefix(ev)) {
+            return PrefixOut::Cancel; // soltar o repetir el prefijo no cambia el estado
         }
         if !self.armed {
             if is_prefix(ev) {
@@ -120,6 +140,44 @@ mod tests {
         let mut rel = k(KeyCode::Char('a'), KeyModifiers::NONE);
         rel.kind = KeyEventKind::Release;
         assert!(translate_key(&rel).is_none());
+        assert!(!pressed(&rel));
+    }
+
+    fn bytes(ev: KeyEvent, altgr: bool) -> Vec<u8> {
+        let (key, mods) = translate_with(&ev, altgr).expect("tecla");
+        friki_term::Terminal::new(24, 80, 0).encode_key(key, mods)
+    }
+
+    #[test]
+    fn altgr_and_ctrl_digits() {
+        let both = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        // Windows: AltGr+Q = '@' sin modificadores; Unix: Ctrl+Alt+q sigue siendo ESC + 0x11.
+        assert_eq!(bytes(k(KeyCode::Char('@'), both), true), b"@");
+        assert_eq!(bytes(k(KeyCode::Char('q'), both), false), vec![0x1b, 0x11]);
+        for (c, b) in [('4', 0x1c), ('6', 0x1e), ('7', 0x1f)] {
+            assert_eq!(
+                bytes(k(KeyCode::Char(c), KeyModifiers::CONTROL), false),
+                vec![b]
+            );
+        }
+        // Sin Ctrl, los dígitos son dígitos.
+        assert_eq!(
+            bytes(k(KeyCode::Char('4'), KeyModifiers::NONE), false),
+            b"4"
+        );
+    }
+
+    #[test]
+    fn prefix_ignores_release_and_repeat_of_prefix() {
+        let mut p = Prefix::default();
+        let mut pre = k(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        assert_eq!(p.feed(&pre), PrefixOut::Armed);
+        pre.kind = KeyEventKind::Repeat;
+        assert_eq!(p.feed(&pre), PrefixOut::Cancel);
+        assert!(p.is_armed());
+        pre.kind = KeyEventKind::Release;
+        assert_eq!(p.feed(&pre), PrefixOut::Cancel);
+        assert!(p.is_armed());
     }
 
     #[test]
