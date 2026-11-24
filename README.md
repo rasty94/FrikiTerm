@@ -16,3 +16,14 @@ Análisis estático de SecureCRT/SecureFX 9.7.4 (VanDyke) con la skill `reverse-
 3. La skill vive en `.claude/skills/reverse-engineer-anything/`.
 
 Solo análisis estático: no se ejecutó ningún binario del producto.
+
+## REA + Ghidra en Docker
+
+`docker/Dockerfile` construye una imagen con REA (MCP por stdio), JDK 25 y Ghidra 12.2 (SHA-256 verificado).
+
+- **Plataforma:** se construye como `linux/amd64` (emulada en Mac arm64), porque Ghidra 12.2 solo trae decompilador nativo para `linux_x86_64` y `win_x86_64`.
+- **JDK:** Ghidra 12.2 exige JDK 25 o superior.
+- **Construir:** `docker build --platform linux/amd64 -t rea-ghidra -f docker/Dockerfile docker`
+- **Registrar:** `claude mcp add -s user rea -- docker run -i --rm --platform linux/amd64 -v "$PWD:$PWD" rea-ghidra mcp` y reiniciar Claude Code.
+- **Rutas:** el proyecto se monta en la misma ruta absoluta del host, porque REA devuelve rutas tal cual.
+- **Comprobar:** `docker run --rm --platform linux/amd64 rea-ghidra doctor --json`
