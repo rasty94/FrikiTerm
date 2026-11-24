@@ -1,11 +1,12 @@
 //! Cola de transferencias: paralelismo, reintentos, reanudación, pausa, cancelación y
 //! límite de ancho de banda (TODO.md §5).
 //!
-//! Limitación actual: no hay reconexión. Un error de red agota los reintentos sobre la
-//! misma conexión (ver la propuesta de firma con `reconnect` en CONTRACT-CHANGES.md).
+//! Reconexión opcional: con [`Queue::with_reconnect`], un error de red o de E/S pide un
+//! `remote` nuevo antes de reintentar (y la copia se reanuda desde lo ya escrito).
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -60,6 +61,10 @@ impl Default for QueueOptions {
 
 pub type JobId = u64;
 
+/// Fábrica de un `remote` nuevo tras perder la conexión.
+pub type Reconnect =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Arc<dyn RemoteFs>>> + Send>> + Send + Sync>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueEvent {
     Started {
@@ -105,7 +110,8 @@ fn retryable(e: &Error) -> bool {
 
 struct Inner {
     local: Arc<dyn RemoteFs>,
-    remote: Arc<dyn RemoteFs>,
+    remote: Mutex<Arc<dyn RemoteFs>>,
+    reconnect: Mutex<Option<Reconnect>>,
     opts: QueueOptions,
     events: UnboundedSender<QueueEvent>,
     paused: AtomicBool,
@@ -146,6 +152,30 @@ impl Inner {
         }
     }
 
+    fn remote(&self) -> Arc<dyn RemoteFs> {
+        lock(&self.remote).clone()
+    }
+
+    /// (origen, destino) con el `remote` vigente en este momento.
+    fn ends(&self, dir: Direction) -> (Arc<dyn RemoteFs>, Arc<dyn RemoteFs>) {
+        match dir {
+            Direction::Upload => (self.local.clone(), self.remote()),
+            Direction::Download => (self.remote(), self.local.clone()),
+        }
+    }
+
+    /// Cambia el `remote` si nadie lo ha hecho ya (`used` es el que falló).
+    async fn reconnect(&self, used: &Arc<dyn RemoteFs>) -> Result<()> {
+        let Some(f) = lock(&self.reconnect).clone() else {
+            return Ok(());
+        };
+        if Arc::ptr_eq(used, &self.remote()) {
+            let new = f().await?;
+            *lock(&self.remote) = new;
+        }
+        Ok(())
+    }
+
     async fn throttle(&self, n: usize) {
         let Some(rate) = self.opts.bandwidth.filter(|r| *r > 0) else {
             return;
@@ -168,6 +198,7 @@ impl Inner {
         let mut attempt = 0u32;
         loop {
             self.gate(ctx).await?;
+            let used = self.remote();
             match f().await {
                 Err(e) if retryable(&e) && attempt < self.opts.retries => {
                     attempt += 1;
@@ -178,6 +209,14 @@ impl Inner {
                     });
                     let ms = (100u64 << (attempt - 1).min(6)).min(5000);
                     sleep(Duration::from_millis(ms)).await;
+                    // Si la reconexión falla, el siguiente intento fallará y gastará reintentos.
+                    if let Err(e) = self.reconnect(&used).await {
+                        self.emit(QueueEvent::Retrying {
+                            id: ctx.id,
+                            attempt,
+                            error: format!("reconexión: {e}"),
+                        });
+                    }
                 }
                 r => return r,
             }
@@ -189,10 +228,11 @@ impl Inner {
         &self,
         ctx: &Ctx,
         job: &Job,
-        (sfs, src): (&dyn RemoteFs, &str),
-        (dfs, dst): (&dyn RemoteFs, &str),
+        src: &str,
+        dst: &str,
         s: &Entry,
     ) -> Result<u64> {
+        let (sfs, dfs) = self.ends(job.direction);
         let mut offset = 0;
         if job.resume == Resume::Auto
             && let Some(d) = dfs.stat(dst).await?.filter(|d| d.kind == Kind::File)
@@ -255,15 +295,12 @@ impl Inner {
     }
 
     async fn exec(&self, ctx: &Ctx, job: &Job) -> Result<u64> {
-        let (sfs, dfs) = match job.direction {
-            Direction::Upload => (&*self.local, &*self.remote),
-            Direction::Download => (&*self.remote, &*self.local),
-        };
+        let dir = job.direction;
         let mut bytes = 0;
         let mut stack = vec![(job.src.clone(), job.dst.clone())];
         while let Some((s, d)) = stack.pop() {
             let st = self
-                .retry(ctx, || sfs.stat(&s))
+                .retry(ctx, || async { self.ends(dir).0.stat(&s).await })
                 .await?
                 .ok_or_else(|| Error::NotFound(s.clone()))?;
             match st.kind {
@@ -271,10 +308,17 @@ impl Inner {
                     if !job.recursive {
                         return Err(Error::Protocol(format!("{s} es un directorio")));
                     }
-                    if self.retry(ctx, || dfs.stat(&d)).await?.is_none() {
-                        self.retry(ctx, || dfs.mkdir(&d)).await?;
+                    if self
+                        .retry(ctx, || async { self.ends(dir).1.stat(&d).await })
+                        .await?
+                        .is_none()
+                    {
+                        self.retry(ctx, || async { self.ends(dir).1.mkdir(&d).await })
+                            .await?;
                     }
-                    let mut list = self.retry(ctx, || sfs.list(&s)).await?;
+                    let mut list = self
+                        .retry(ctx, || async { self.ends(dir).0.list(&s).await })
+                        .await?;
                     list.sort_by(|a, b| b.name.cmp(&a.name)); // pop → orden alfabético
                     for e in list {
                         if safe_name(&e.name) && matches!(e.kind, Kind::File | Kind::Dir) {
@@ -284,7 +328,7 @@ impl Inner {
                 }
                 Kind::File => {
                     bytes += self
-                        .retry(ctx, || self.copy_file(ctx, job, (sfs, &s), (dfs, &d), &st))
+                        .retry(ctx, || self.copy_file(ctx, job, &s, &d, &st))
                         .await?;
                 }
                 _ => {} // enlaces y especiales no se transfieren
@@ -323,8 +367,6 @@ impl Inner {
 impl Queue {
     /// `local` y `remote` son los dos extremos. Hay que construirla dentro de un runtime
     /// de tokio (`push` lanza tareas).
-    // TODO: recibir `reconnect: Arc<dyn Fn() -> BoxFuture<Result<Arc<dyn RemoteFs>>>>` para
-    // obtener un `remote` nuevo tras un error de red antes de reintentar (CONTRACT-CHANGES.md).
     pub fn new(
         local: Arc<dyn RemoteFs>,
         remote: Arc<dyn RemoteFs>,
@@ -334,7 +376,8 @@ impl Queue {
         Self {
             inner: Arc::new(Inner {
                 local,
-                remote,
+                remote: Mutex::new(remote),
+                reconnect: Mutex::new(None),
                 slots: Semaphore::new(opts.parallel.max(1)),
                 opts,
                 events,
@@ -347,6 +390,13 @@ impl Queue {
                 next_id: AtomicU64::new(1),
             }),
         }
+    }
+
+    /// Activa la reconexión: ante un error de red/E/S se pide un `remote` nuevo con `f`.
+    #[must_use]
+    pub fn with_reconnect(self, f: Reconnect) -> Self {
+        *lock(&self.inner.reconnect) = Some(f);
+        self
     }
 
     pub fn push(&self, job: Job) -> JobId {

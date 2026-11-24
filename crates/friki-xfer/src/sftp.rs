@@ -9,11 +9,16 @@ use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWrite};
 
 use crate::{Entry, Error, Kind, Reader, RemoteFs, Result, Writer, join, safe_name};
 
-/// Abre SFTP sobre una conexión SSH. `Connection` no expone usuario ni host, así que la
-/// etiqueta es genérica; usa [`open_stream`] si necesitas `sftp://user@host`.
+/// Abre SFTP sobre una conexión SSH; la etiqueta es `sftp://user@host` (con `:puerto` si no es 22).
 pub async fn open(conn: &friki_ssh::Connection) -> Result<Box<dyn RemoteFs>> {
     let stream = conn.open_subsystem("sftp").await?;
-    open_stream(stream, "sftp://ssh").await
+    let (user, host, port) = conn.target();
+    let port = if port == 22 {
+        String::new()
+    } else {
+        format!(":{port}")
+    };
+    open_stream(stream, &format!("sftp://{user}@{host}{port}")).await
 }
 
 /// SFTP sobre cualquier flujo bidireccional ya conectado al servidor SFTP.
