@@ -1,4 +1,8 @@
-//! Autenticación en el orden de `cfg.auth`, con tope global de intentos.
+//! Autenticación en el orden de `cfg.auth`.
+//!
+//! Presupuesto: `max_auth_attempts` cuenta peticiones al usuario (contraseña,
+//! passphrase, rondas de keyboard-interactive). Las identidades de agente y los
+//! ficheros de clave no cuentan ahí: tienen un tope propio, como el de un servidor.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +19,10 @@ use crate::{AuthPrompter, Error, Result};
 
 /// Intentos de passphrase por fichero de clave.
 const PASSPHRASE_TRIES: usize = 3;
+/// Identidades (agente + ficheros) que se prueban como máximo.
+const KEY_TRIES: u32 = 16;
+/// Rondas de keyboard-interactive por intento.
+const KBD_ROUNDS: u32 = 8;
 
 struct State<'a> {
     handle: &'a mut Handle<Handler>,
@@ -22,7 +30,12 @@ struct State<'a> {
     host: &'a str,
     prompter: &'a dyn AuthPrompter,
     rejected: &'a AtomicBool,
+    warnings: &'a mut Vec<String>,
+    /// Peticiones al usuario que quedan.
     left: u32,
+    exhausted: bool,
+    /// Identidades de clave que quedan.
+    key_left: u32,
     /// Métodos que el servidor aún acepta (se conoce tras el primer fallo).
     offered: Option<MethodSet>,
 }
@@ -36,16 +49,26 @@ impl State<'_> {
         classify(e, self.rejected.load(Ordering::SeqCst))
     }
 
-    /// Consume un intento; `false` si ya no quedan.
+    /// Consume una petición al usuario; `false` si ya no quedan.
     fn spend(&mut self) -> bool {
         if self.left == 0 {
+            self.exhausted = true;
             return false;
         }
         self.left -= 1;
         true
     }
 
-    /// `Ok(true)` = autenticado.
+    /// Consume un intento de identidad; `false` si se alcanzó el tope.
+    fn spend_key(&mut self) -> bool {
+        if self.key_left == 0 {
+            return false;
+        }
+        self.key_left -= 1;
+        true
+    }
+
+    /// `true` = autenticado.
     fn record(&mut self, r: AuthResult) -> bool {
         match r {
             AuthResult::Success => true,
@@ -65,6 +88,7 @@ pub(crate) async fn authenticate(
     user: &str,
     prompter: &dyn AuthPrompter,
     rejected: &AtomicBool,
+    warnings: &mut Vec<String>,
 ) -> Result<()> {
     let mut st = State {
         handle,
@@ -72,13 +96,13 @@ pub(crate) async fn authenticate(
         host: &cfg.host,
         prompter,
         rejected,
+        warnings,
         left: cfg.max_auth_attempts,
+        exhausted: false,
+        key_left: KEY_TRIES,
         offered: None,
     };
     for method in &cfg.auth {
-        if st.left == 0 {
-            break;
-        }
         let done = match method {
             AuthMethod::Agent => try_agent(&mut st).await?,
             AuthMethod::PublicKey => try_keys(&mut st, &cfg.identity_files).await?,
@@ -89,7 +113,7 @@ pub(crate) async fn authenticate(
             return Ok(());
         }
     }
-    let why = if st.left == 0 {
+    let why = if st.exhausted {
         "se agotaron los intentos permitidos"
     } else {
         "ningún método fue aceptado"
@@ -97,26 +121,27 @@ pub(crate) async fn authenticate(
     Err(Error::Auth(format!("{why} ({}@{})", user, cfg.host)))
 }
 
+/// La contraseña se repite mientras quede presupuesto y el usuario la dé.
 async fn try_password(st: &mut State<'_>) -> Result<bool> {
-    if !st.offers(MethodKind::Password) {
-        return Ok(false);
+    while st.offers(MethodKind::Password) && st.spend() {
+        let Some(pw) = st.prompter.password(st.user, st.host).await else {
+            return Ok(false);
+        };
+        // `pw` (Zeroizing) se borra al salir; russh recibe una copia suya.
+        let r = st
+            .handle
+            .authenticate_password(st.user, pw.as_str())
+            .await
+            .map_err(|e| st.err(e))?;
+        if st.record(r) {
+            return Ok(true);
+        }
     }
-    let Some(pw) = st.prompter.password(st.user, st.host).await else {
-        return Ok(false);
-    };
-    if !st.spend() {
-        return Ok(false);
-    }
-    let r = st
-        .handle
-        .authenticate_password(st.user, pw)
-        .await
-        .map_err(|e| st.err(e))?;
-    Ok(st.record(r))
+    Ok(false)
 }
 
 async fn try_kbd(st: &mut State<'_>) -> Result<bool> {
-    if !st.offers(MethodKind::KeyboardInteractive) || !st.spend() {
+    if !st.offers(MethodKind::KeyboardInteractive) {
         return Ok(false);
     }
     let mut resp = st
@@ -124,6 +149,7 @@ async fn try_kbd(st: &mut State<'_>) -> Result<bool> {
         .authenticate_keyboard_interactive_start(st.user, None)
         .await
         .map_err(|e| st.err(e))?;
+    let mut rounds = 0;
     loop {
         match resp {
             KeyboardInteractiveAuthResponse::Success => return Ok(true),
@@ -138,9 +164,19 @@ async fn try_kbd(st: &mut State<'_>) -> Result<bool> {
                 instructions,
                 prompts,
             } => {
-                let answers = if prompts.is_empty() {
+                rounds += 1;
+                if rounds > KBD_ROUNDS {
+                    st.warnings.push(format!(
+                        "keyboard-interactive: el servidor pidió más de {KBD_ROUNDS} rondas; se abandona"
+                    ));
+                    return Ok(false);
+                }
+                let answers: Vec<String> = if prompts.is_empty() {
                     Vec::new()
                 } else {
+                    if !st.spend() {
+                        return Ok(false);
+                    }
                     let ps: Vec<(String, bool)> =
                         prompts.into_iter().map(|p| (p.prompt, p.echo)).collect();
                     match st
@@ -148,7 +184,9 @@ async fn try_kbd(st: &mut State<'_>) -> Result<bool> {
                         .keyboard_interactive(&name, &instructions, &ps)
                         .await
                     {
-                        Some(a) if a.len() == ps.len() => a,
+                        Some(a) if a.len() == ps.len() => {
+                            a.iter().map(|s| s.as_str().to_owned()).collect()
+                        }
                         _ => return Ok(false),
                     }
                 };
@@ -184,7 +222,7 @@ async fn try_keys(st: &mut State<'_>, files: &[PathBuf]) -> Result<bool> {
         files.to_vec()
     };
     for path in files {
-        if st.left == 0 {
+        if !st.spend_key() {
             break;
         }
         let Some(key) = load_key(st, &path).await else {
@@ -196,9 +234,6 @@ async fn try_keys(st: &mut State<'_>, files: &[PathBuf]) -> Result<bool> {
             .await
             .map_err(|e| st.err(e))?
             .flatten();
-        if !st.spend() {
-            break;
-        }
         let r = st
             .handle
             .authenticate_publickey(st.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
@@ -211,16 +246,39 @@ async fn try_keys(st: &mut State<'_>, files: &[PathBuf]) -> Result<bool> {
     Ok(false)
 }
 
+/// Una clave privada legible por grupo u otros no se usa (como OpenSSH).
+#[cfg(unix)]
+fn too_open(path: &std::path::Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path).ok()?.permissions().mode();
+    (mode & 0o077 != 0).then_some(mode & 0o777)
+}
+
+#[cfg(not(unix))]
+fn too_open(_path: &std::path::Path) -> Option<u32> {
+    None
+}
+
 /// Carga la clave; pide passphrase si está cifrada. `None` = no usable.
-async fn load_key(st: &State<'_>, path: &std::path::Path) -> Option<russh::keys::PrivateKey> {
+async fn load_key(st: &mut State<'_>, path: &std::path::Path) -> Option<russh::keys::PrivateKey> {
+    if let Some(mode) = too_open(path) {
+        st.warnings.push(format!(
+            "clave {} ignorada: permisos {mode:03o} demasiado abiertos (usa chmod 600)",
+            path.display()
+        ));
+        return None;
+    }
     match load_secret_key(path, None) {
         Ok(k) => return Some(k),
         Err(russh::keys::Error::KeyIsEncrypted) => {}
         Err(_) => return None,
     }
     for _ in 0..PASSPHRASE_TRIES {
+        if !st.spend() {
+            return None;
+        }
         let pass = st.prompter.passphrase(path).await?;
-        if let Ok(k) = load_secret_key(path, Some(&pass)) {
+        if let Ok(k) = load_secret_key(path, Some(pass.as_str())) {
             return Some(k);
         }
     }
@@ -245,7 +303,7 @@ async fn try_agent(st: &mut State<'_>) -> Result<bool> {
         let AgentIdentity::PublicKey { key, .. } = id else {
             continue;
         };
-        if !st.spend() {
+        if !st.spend_key() {
             break;
         }
         let hash = st
