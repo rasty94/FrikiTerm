@@ -10,3 +10,9 @@ friki-core = { path = "../friki-core" }
 friki-ssh = { path = "../friki-ssh" }
 friki-term = { path = "../friki-term" }
 anyhow = "1"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+futures-util = "0.3"
+async-trait = "0.1"
+unicode-width = "0.2"
