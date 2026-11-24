@@ -174,38 +174,6 @@ pub fn parse_chord(s: &str) -> Option<(Key, Modifiers)> {
     Some((key, mods))
 }
 
-/// Equivalente privado de `friki_core::config::parse_key_bytes`: escapes `\e`, `\r`, `\n`,
-/// `\t`, `\\` y `\xNN`; error si es desconocido o incompleto.
-// ponytail: sustituir por friki_core::config::parse_key_bytes al integrar (en esta rama es todo!()).
-fn parse_key_bytes_local(s: &str) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    let mut it = s.chars();
-    while let Some(c) = it.next() {
-        if c != '\\' {
-            let mut b = [0u8; 4];
-            out.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
-            continue;
-        }
-        match it.next() {
-            Some('e') => out.push(0x1b),
-            Some('r') => out.push(b'\r'),
-            Some('n') => out.push(b'\n'),
-            Some('t') => out.push(b'\t'),
-            Some('\\') => out.push(b'\\'),
-            Some('x') => {
-                let h: String = it.by_ref().take(2).collect();
-                if h.len() != 2 {
-                    return Err(format!("\\x incompleto en {s:?}"));
-                }
-                out.push(u8::from_str_radix(&h, 16).map_err(|_| format!("\\x{h} no es hex"))?);
-            }
-            Some(o) => return Err(format!("escape desconocido \\{o} en {s:?}")),
-            None => return Err(format!("barra final sin escape en {s:?}")),
-        }
-    }
-    Ok(out)
-}
-
 /// Coincidencia de búsqueda. Filas en coordenadas absolutas del buffer: 0 es la línea más
 /// antigua del scrollback y `scrollback_len() + rows - 1` la última de la pantalla.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,7 +291,7 @@ impl Terminal {
                 warnings.push(format!("keymap: tecla no válida {chord:?}"));
                 continue;
             };
-            match parse_key_bytes_local(bytes) {
+            match friki_core::config::parse_key_bytes(bytes) {
                 Ok(b) => match keymap.iter_mut().find(|(kk, _)| *kk == k) {
                     Some(e) => e.1 = b,
                     None => keymap.push((k, b)),
