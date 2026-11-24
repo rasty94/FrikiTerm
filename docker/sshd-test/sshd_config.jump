@@ -1,0 +1,24 @@
+# Puerto 2224 solo en loopback del contenedor (no se publica): destino de las pruebas de ProxyJump.
+# Clave de host propia, distinta de la del salto (2222), para comprobar que se verifica la del destino.
+Port 2224
+ListenAddress 127.0.0.1
+HostKey /etc/friki-sshd/keys/jump_ed25519
+PidFile /run/sshd-jump.pid
+LogLevel VERBOSE
+
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+HostKeyAlgorithms ssh-ed25519
+PubkeyAcceptedAlgorithms ssh-ed25519
+
+PermitRootLogin no
+AllowUsers friki
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+PermitEmptyPasswords no
+
+MaxStartups 100

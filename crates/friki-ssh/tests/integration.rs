@@ -489,3 +489,350 @@ async fn el_cliente_anuncia_strict_kex_y_sin_compresion() {
     assert!(texto.contains("ext-info-c"));
     assert!(!texto.contains("zlib"));
 }
+
+// ---------- Fases 3 y 4: flujos, ProxyJump, redirecciones ----------
+
+use friki_core::config::Forward;
+use friki_core::transport::StreamEvent;
+use tokio::io::AsyncWriteExt;
+
+/// Lee hasta fin de línea (o 5 s) y devuelve lo recibido.
+async fn read_line_of<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> String {
+    let mut got = Vec::new();
+    let mut b = [0u8; 1];
+    let read = async {
+        while let Ok(1) = r.read(&mut b).await {
+            got.push(b[0]);
+            if b[0] == b'\n' {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .expect("plazo leyendo la línea");
+    String::from_utf8_lossy(&got).into_owned()
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn shell_stream_entrega_datos_y_codigo_de_salida() {
+    let Some(e) = env() else { return };
+    let conn = connect_key(&e).await;
+    let (w, mut r) = conn
+        .open_shell_stream("xterm", 80, 24)
+        .await
+        .expect("shell");
+    w.resize(100, 30).await.expect("resize");
+    w.write(b"echo hola-stream; exit 7\n").await.expect("write");
+    let (mut text, mut exit, mut closed) = (Vec::new(), None, false);
+    let run = async {
+        while let Some(ev) = r.next_event().await {
+            match ev {
+                StreamEvent::Data(d) => text.extend(d),
+                StreamEvent::Exit(n) => exit = Some(n),
+                StreamEvent::Closed => closed = true,
+                StreamEvent::Lost(m) => panic!("perdido: {m}"),
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("plazo");
+    assert!(String::from_utf8_lossy(&text).contains("hola-stream"));
+    assert_eq!(exit, Some(7));
+    assert!(closed, "Closed llega tras el estado de salida");
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn subsistema_sftp_responde_version() {
+    let Some(e) = env() else { return };
+    let conn = connect_key(&e).await;
+    let mut s = conn.open_subsystem("sftp").await.expect("sftp");
+    // SSH_FXP_INIT (1) con versión 3.
+    s.write_all(&[0, 0, 0, 5, 1, 0, 0, 0, 3])
+        .await
+        .expect("init");
+    let mut head = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut head))
+        .await
+        .expect("plazo")
+        .expect("cabecera");
+    assert_eq!(head[4], 2, "SSH_FXP_VERSION: {head:?}");
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn exec_stream_hace_eco_y_da_estado() {
+    let Some(e) = env() else { return };
+    let conn = connect_key(&e).await;
+    let mut s = conn.open_exec_stream("cat").await.expect("cat");
+    s.write_all(b"eco-exec\n").await.expect("write");
+    s.shutdown().await.expect("eof");
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out))
+        .await
+        .expect("plazo")
+        .expect("leer");
+    assert_eq!(out, b"eco-exec\n");
+    assert_eq!(s.exit_status(), Some(0));
+}
+
+/// Variables del destino de salto, o `None` (con el aviso de siempre).
+fn jump_target() -> Option<(String, u16)> {
+    let Some(t) = std::env::var("FRIKI_TEST_JUMP_TARGET")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        skip("FRIKI_TEST_JUMP_TARGET");
+        return None;
+    };
+    let (h, p) = t.rsplit_once(':')?;
+    Some((h.to_string(), p.parse().ok()?))
+}
+
+/// Acepta todo y recuerda para qué `host:puerto` se le preguntó.
+#[derive(Default)]
+struct Recording(std::sync::Mutex<Vec<(String, u16)>>);
+
+#[async_trait::async_trait]
+impl HostKeyVerifier for Recording {
+    async fn verify(&self, host: &str, port: u16, _: &HostKey) -> HostKeyDecision {
+        self.0.lock().expect("lock").push((host.to_string(), port));
+        HostKeyDecision::AcceptOnce
+    }
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn proxy_jump_conecta_al_destino_y_verifica_ambas_claves() {
+    let Some(e) = env() else { return };
+    let Some((thost, tport)) = jump_target() else {
+        return;
+    };
+    let mut c = cfg(&e, vec![AuthMethod::PublicKey]);
+    c.host = thost.clone();
+    c.port = tport;
+    c.proxy_jump = Some(format!("{}@{}:{}", e.user, e.host, e.port));
+    let v = Arc::new(Recording::default());
+    let conn = Connection::connect(&c, v.clone(), prompter(""))
+        .await
+        .expect("conexión por el salto");
+    let out = conn.exec("echo por-el-salto").await.expect("exec");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "por-el-salto");
+    let asked = v.0.lock().expect("lock").clone();
+    assert_eq!(
+        asked,
+        [(e.host.clone(), e.port), (thost, tport)],
+        "una verificación por salto, la del destino con el nombre del destino"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn proxy_jump_rechaza_la_clave_del_destino() {
+    let Some(e) = env() else { return };
+    let Some((thost, tport)) = jump_target() else {
+        return;
+    };
+    struct OnlyJump(u16);
+    #[async_trait::async_trait]
+    impl HostKeyVerifier for OnlyJump {
+        async fn verify(&self, _: &str, port: u16, _: &HostKey) -> HostKeyDecision {
+            if port == self.0 {
+                HostKeyDecision::AcceptOnce
+            } else {
+                HostKeyDecision::Reject
+            }
+        }
+    }
+    let mut c = cfg(&e, vec![AuthMethod::PublicKey]);
+    c.host = thost;
+    c.port = tport;
+    c.proxy_jump = Some(format!("{}:{}", e.host, e.port));
+    let r = Connection::connect(&c, Arc::new(OnlyJump(e.port)), prompter("")).await;
+    assert!(matches!(r, Err(Error::HostKey(_))), "{:?}", r.err());
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn proxy_jump_mal_formado_no_conecta() {
+    let Some(e) = env() else { return };
+    let mut c = cfg(&e, vec![AuthMethod::PublicKey]);
+    c.proxy_jump = Some("host:xx".into());
+    let r = Connection::connect(&c, Arc::new(AcceptAll), prompter("")).await;
+    assert!(
+        matches!(r, Err(Error::Other(ref m)) if m.contains("ProxyJump")),
+        "{:?}",
+        r.err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn redireccion_local_llega_al_sshd_remoto() {
+    let Some(e) = env() else { return };
+    let conn = connect_key(&e).await;
+    let h = conn
+        .start_forward(&Forward::Local {
+            bind: String::new(),
+            port: 0,
+            host: "127.0.0.1".into(),
+            host_port: e.port,
+        })
+        .await
+        .expect("forward");
+    assert!(h.listen.ip().is_loopback(), "{h:?}");
+    assert!(conn.warnings().is_empty(), "{:?}", conn.warnings());
+    let mut s = tokio::net::TcpStream::connect(h.listen).await.expect("tcp");
+    assert!(read_line_of(&mut s).await.starts_with("SSH-2.0"));
+    conn.stop_forward(h.clone()).await.expect("stop");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(tokio::net::TcpStream::connect(h.listen).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn redireccion_expuesta_avisa() {
+    let Some(e) = env() else { return };
+    let conn = connect_key(&e).await;
+    let h = conn
+        .start_forward(&Forward::Local {
+            bind: "*".into(),
+            port: 0,
+            host: "127.0.0.1".into(),
+            host_port: e.port,
+        })
+        .await
+        .expect("forward");
+    assert!(
+        conn.warnings()
+            .iter()
+            .any(|w| w.contains("accesible desde la red")),
+        "{:?}",
+        conn.warnings()
+    );
+    conn.stop_forward(h).await.expect("stop");
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn redireccion_remota_vuelve_al_destino_local() {
+    let Some(e) = env() else { return };
+    // Destino local: responde con una línea fija.
+    let local = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let local_port = local.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = local.accept().await {
+            let _ = s.write_all(b"hola-remoto\n").await;
+        }
+    });
+
+    let a = connect_key(&e).await;
+    let r = a
+        .start_forward(&Forward::Remote {
+            bind: String::new(),
+            port: 0,
+            host: "127.0.0.1".into(),
+            host_port: local_port,
+        })
+        .await
+        .expect("remote");
+    assert_ne!(r.listen.port(), 0);
+
+    // Segunda conexión: llega al puerto que `a` abrió en el servidor.
+    let b = connect_key(&e).await;
+    let l = b
+        .start_forward(&Forward::Local {
+            bind: String::new(),
+            port: 0,
+            host: "127.0.0.1".into(),
+            host_port: r.listen.port(),
+        })
+        .await
+        .expect("local");
+    let mut s = tokio::net::TcpStream::connect(l.listen).await.expect("tcp");
+    assert_eq!(read_line_of(&mut s).await, "hola-remoto\n");
+    a.stop_forward(r).await.expect("cancelar");
+}
+
+async fn socks_connect(
+    listen: std::net::SocketAddr,
+    atyp_and_addr: &[u8],
+    port: u16,
+) -> tokio::net::TcpStream {
+    let mut s = tokio::net::TcpStream::connect(listen).await.expect("tcp");
+    s.write_all(&[5, 1, 0]).await.expect("saludo");
+    let mut m = [0u8; 2];
+    s.read_exact(&mut m).await.expect("método");
+    assert_eq!(m, [5, 0]);
+    let mut req = vec![5, 1, 0];
+    req.extend(atyp_and_addr);
+    req.extend(port.to_be_bytes());
+    s.write_all(&req).await.expect("petición");
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).await.expect("respuesta");
+    assert_eq!(rep[1], 0, "éxito: {rep:?}");
+    s
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn redireccion_dinamica_socks5() {
+    let Some(e) = env() else { return };
+    let conn = connect_key(&e).await;
+    let h = conn
+        .start_forward(&Forward::Dynamic {
+            bind: String::new(),
+            port: 0,
+        })
+        .await
+        .expect("socks");
+
+    // IPv4
+    let mut s = socks_connect(h.listen, &[1, 127, 0, 0, 1], e.port).await;
+    assert!(read_line_of(&mut s).await.starts_with("SSH-2.0"));
+    // Dominio
+    let mut name = vec![3, 9];
+    name.extend(b"localhost");
+    let mut s = socks_connect(h.listen, &name, e.port).await;
+    assert!(read_line_of(&mut s).await.starts_with("SSH-2.0"));
+    // IPv6 loopback (si el contenedor lo tiene el banner llega; si no, se rechaza con error SOCKS)
+    let mut v6 = vec![4];
+    v6.extend(std::net::Ipv6Addr::LOCALHOST.octets());
+    let mut s = tokio::net::TcpStream::connect(h.listen).await.expect("tcp");
+    s.write_all(&[5, 1, 0]).await.expect("saludo");
+    let mut m = [0u8; 2];
+    s.read_exact(&mut m).await.expect("método");
+    let mut req = vec![5, 1, 0];
+    req.extend(&v6);
+    req.extend(e.port.to_be_bytes());
+    s.write_all(&req).await.expect("petición");
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).await.expect("respuesta IPv6");
+    assert_eq!(rep[0], 5);
+
+    // BIND no se admite.
+    let mut s = tokio::net::TcpStream::connect(h.listen).await.expect("tcp");
+    // Solo la cabecera: el servidor cierra tras rechazar y no debe quedar nada sin leer (RST).
+    s.write_all(&[5, 1, 0, 5, 2, 0, 1]).await.expect("bind");
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.expect("leer");
+    assert_eq!(buf[..2], [5, 0]);
+    assert_eq!(buf[2..4], [5, 7]);
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn require_strict_kex_conecta_con_openssh() {
+    let Some(e) = env() else { return };
+    let mut c = cfg(&e, vec![AuthMethod::PublicKey]);
+    c.require_strict_kex = true;
+    let conn = Connection::connect(&c, Arc::new(AcceptAll), prompter(""))
+        .await
+        .expect("OpenSSH anuncia strict KEX");
+    conn.exec("true").await.expect("exec");
+}
