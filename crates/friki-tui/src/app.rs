@@ -13,11 +13,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyEvent, MouseEventKind};
-use friki_core::config::{AppConfig, SessionConfig, load_sessions};
+use friki_core::config::{AppConfig, Protocol, SessionConfig, load_app_config, load_sessions};
 use friki_core::known_hosts::{HostKey, HostKeyStatus};
+use friki_core::transport::{StreamEvent, StreamReader, StreamWriter};
 use friki_ssh::{
-    AuthPrompter, Connection, Error, HostKeyDecision, KnownHostsVerifier, Negotiated, ShellEvent,
-    ShellWriter, Zeroizing,
+    AuthPrompter, Connection, Error, HostKeyDecision, KnownHostsVerifier, Negotiated, Zeroizing,
 };
 use friki_term::{Key, Modifiers, Terminal as Emulator};
 use futures_util::{Stream, StreamExt};
@@ -37,7 +37,9 @@ use crate::keys::{Action, KeyOut, Keymap};
 use crate::layout::{Dir, Node, PaneId, cycle};
 use crate::picker::{Picker, PickerOut};
 use crate::render::{StatusInfo, draw_dialog, popup, screen_to_buffer, status_line};
-use crate::{Log, Out, Paths, SCROLLBACK, WHEEL_LINES, compact, exit_code, finish, is_legacy};
+use crate::target::{forward_label, label, telnet_options, term_for};
+use crate::theme::Theme;
+use crate::{Log, Out, Paths, WHEEL_LINES, compact, exit_code, finish, is_legacy};
 
 type Ask = Pin<Box<dyn Future<Output = HostKeyDecision> + Send>>;
 
@@ -45,18 +47,23 @@ type Ask = Pin<Box<dyn Future<Output = HostKeyDecision> + Send>>;
 enum Msg {
     Ask(PaneId, Dialog, oneshot::Sender<Answer>),
     Opened(PaneId, Box<Opened>),
-    Failed(PaneId, Error),
-    Shell(PaneId, ShellEvent),
+    /// Fallo al conectar: un `friki_ssh::Error` en SSH, un error de red genérico en el resto.
+    Failed(PaneId, anyhow::Error),
+    Stream(PaneId, StreamEvent),
     ReaderEnd(PaneId),
 }
 
 struct Opened {
-    conn: Connection,
-    writer: ShellWriter,
+    /// Solo SSH: la conexión que mantiene vivas las redirecciones y el canal.
+    conn: Option<Connection>,
+    writer: Arc<dyn StreamWriter>,
     /// (columnas, filas) con las que se abrió el PTY.
     size: (u16, u16),
     warnings: Vec<String>,
     negotiated: Option<Negotiated>,
+    /// Redirecciones SSH activas (ya formateadas) y las que fallaron (con su motivo).
+    forwards: Vec<String>,
+    fwd_errors: Vec<String>,
 }
 
 /// Envía diálogos al bucle principal y espera la respuesta.
@@ -121,74 +128,133 @@ impl AuthPrompter for UiPrompter {
     }
 }
 
-/// Conecta, abre el shell y reenvía sus eventos hasta que el canal se agota.
+/// Error de red genérico para los transportes que no son SSH.
+fn net(e: &std::io::Error) -> anyhow::Error {
+    Error::Network(e.to_string()).into()
+}
+
+/// SSH: verificación de clave de host y autenticación por diálogos, shell con PTY y las
+/// redirecciones de la sesión (cada resultado queda para el panel; un fallo no tumba el shell).
+async fn open_ssh(
+    ui: UiChannel,
+    session: &SessionConfig,
+    known_hosts: std::path::PathBuf,
+    (cols, rows): (u16, u16),
+    term: &str,
+) -> anyhow::Result<(Opened, Box<dyn StreamReader>)> {
+    let ask_ui = ui.clone();
+    let verifier = Arc::new(KnownHostsVerifier::new(
+        known_hosts,
+        move |host: &str, port: u16, key: &HostKey, status: HostKeyStatus| -> Ask {
+            let fp = key.fingerprint_sha256();
+            let dialog = match status {
+                HostKeyStatus::Unknown => Dialog::unknown_host(host, port, &key.algorithm, &fp),
+                HostKeyStatus::Changed { previous } => Dialog::changed_host(
+                    host,
+                    port,
+                    &key.algorithm,
+                    &fp,
+                    &previous.fingerprint_sha256(),
+                ),
+                _ => return Box::pin(async { HostKeyDecision::Reject }),
+            };
+            let ui = ask_ui.clone();
+            Box::pin(async move {
+                match ui.ask(dialog).await {
+                    Some(Answer::HostKey(d)) => d,
+                    _ => HostKeyDecision::Reject,
+                }
+            })
+        },
+    ));
+    let prompter = Arc::new(UiPrompter {
+        ui,
+        host: session.host.clone(),
+    });
+    let conn = Connection::connect(session, verifier, prompter).await?;
+    let (writer, reader) = conn.open_shell_stream(term, cols, rows).await?;
+    let (mut forwards, mut fwd_errors) = (vec![], vec![]);
+    for f in &session.forwards {
+        match conn.start_forward(f).await {
+            Ok(h) => forwards.push(forward_label(f, Some(h.listen))),
+            Err(e) => fwd_errors.push(format!(
+                "redirección {}: {}",
+                forward_label(f, None),
+                clean(&e.to_string())
+            )),
+        }
+    }
+    let opened = Opened {
+        warnings: conn.warnings(),
+        negotiated: conn.negotiated(),
+        conn: Some(conn),
+        writer,
+        size: (cols, rows),
+        forwards,
+        fwd_errors,
+    };
+    Ok((opened, reader))
+}
+
+/// Abre el flujo según el protocolo de la sesión.
+async fn open_stream(
+    ui: UiChannel,
+    session: &SessionConfig,
+    known_hosts: std::path::PathBuf,
+    size: (u16, u16),
+) -> anyhow::Result<(Opened, Box<dyn StreamReader>)> {
+    let term = term_for(session);
+    let (cols, rows) = size;
+    let stream = match session.protocol {
+        Protocol::Ssh => return open_ssh(ui, session, known_hosts, size, &term).await,
+        Protocol::Telnet | Protocol::TelnetTls | Protocol::Raw => {
+            let opts = telnet_options(session, &term);
+            friki_telnet::connect(&session.host, session.port, &opts, cols, rows).await
+        }
+        Protocol::Serial => friki_serial::open(&session.serial).await,
+        Protocol::LocalShell => {
+            friki_pty::spawn(session.local_command.as_deref(), &term, cols, rows).await
+        }
+    }
+    .map_err(|e| net(&e))?;
+    let (writer, reader) = stream;
+    let opened = Opened {
+        conn: None,
+        writer,
+        size,
+        warnings: vec![],
+        negotiated: None,
+        forwards: vec![],
+        fwd_errors: vec![],
+    };
+    Ok((opened, reader))
+}
+
+/// Conecta, abre el flujo y reenvía sus eventos hasta que se agota.
 fn spawn_connect(
     tx: mpsc::UnboundedSender<Msg>,
     id: PaneId,
     session: SessionConfig,
     known_hosts: std::path::PathBuf,
-    (cols, rows): (u16, u16),
+    size: (u16, u16),
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let ui = UiChannel {
             tx: tx.clone(),
             pane: id,
         };
-        let ask_ui = ui.clone();
-        let verifier = Arc::new(KnownHostsVerifier::new(
-            known_hosts,
-            move |host: &str, port: u16, key: &HostKey, status: HostKeyStatus| -> Ask {
-                let fp = key.fingerprint_sha256();
-                let dialog = match status {
-                    HostKeyStatus::Unknown => Dialog::unknown_host(host, port, &key.algorithm, &fp),
-                    HostKeyStatus::Changed { previous } => Dialog::changed_host(
-                        host,
-                        port,
-                        &key.algorithm,
-                        &fp,
-                        &previous.fingerprint_sha256(),
-                    ),
-                    _ => return Box::pin(async { HostKeyDecision::Reject }),
-                };
-                let ui = ask_ui.clone();
-                Box::pin(async move {
-                    match ui.ask(dialog).await {
-                        Some(Answer::HostKey(d)) => d,
-                        _ => HostKeyDecision::Reject,
-                    }
-                })
-            },
-        ));
-        let prompter = Arc::new(UiPrompter {
-            ui,
-            host: session.host.clone(),
-        });
-        let conn = match Connection::connect(&session, verifier, prompter).await {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(Msg::Failed(id, e));
-                return;
-            }
-        };
-        let (writer, mut reader) = match conn.open_shell(&session.term, cols, rows).await {
+        let (opened, mut reader) = match open_stream(ui, &session, known_hosts, size).await {
             Ok(x) => x,
             Err(e) => {
                 let _ = tx.send(Msg::Failed(id, e));
                 return;
             }
         };
-        let opened = Opened {
-            warnings: conn.warnings(),
-            negotiated: conn.negotiated(),
-            conn,
-            writer,
-            size: (cols, rows),
-        };
         if tx.send(Msg::Opened(id, Box::new(opened))).is_err() {
             return;
         }
         while let Some(ev) = reader.next_event().await {
-            if tx.send(Msg::Shell(id, ev)).is_err() {
+            if tx.send(Msg::Stream(id, ev)).is_err() {
                 return;
             }
         }
@@ -220,6 +286,9 @@ struct Pane {
     size: (u16, u16),
     cipher: String,
     legacy: bool,
+    /// Redirecciones SSH activas, para la barra de estado.
+    forwards: Vec<String>,
+    theme: Theme,
     modal: Option<Modal>,
     conn: Option<Connection>,
     task: Option<JoinHandle<()>>,
@@ -269,6 +338,8 @@ struct App<'a> {
     size: (u16, u16),
     notice: Option<String>,
     disconnects: Vec<JoinHandle<()>>,
+    /// Avisos de la configuración global; se muestran una vez (selector o primer panel).
+    config_warnings: Vec<String>,
 }
 
 fn inner(r: Rect, multi: bool) -> Rect {
@@ -310,15 +381,29 @@ fn ended_label(r: &anyhow::Result<i32>) -> String {
 }
 
 impl<'a> App<'a> {
+    /// Carga `config.toml` junto a las sesiones (`app_config_file()` con las rutas por
+    /// defecto). Un error de lectura o de contenido es un aviso y se usan los valores por
+    /// defecto; atajos inválidos o repetidos, otro aviso y se ignoran.
     fn new(tx: mpsc::UnboundedSender<Msg>, paths: &'a Paths, exit_with_last: bool) -> Self {
+        let cfg_path = paths
+            .sessions_dir
+            .parent()
+            .map_or_else(friki_core::paths::app_config_file, |d| {
+                d.join("config.toml")
+            });
+        let mut config_warnings = vec![];
+        let cfg = load_app_config(&cfg_path).unwrap_or_else(|e| {
+            config_warnings.push(format!("configuración: {}", clean(&e.to_string())));
+            AppConfig::default()
+        });
+        let keymap = Keymap::new(&cfg);
+        config_warnings.extend(keymap.warnings().iter().map(|w| clean(w)));
         Self {
             tabs: vec![],
             cur: 0,
             panes: BTreeMap::new(),
             next_id: 1,
-            // ponytail: `load_app_config` aún es `todo!()` en esta rama; cargar el fichero
-            // (`paths::app_config_file`) cuando esté implementado.
-            keymap: Keymap::new(&AppConfig::default()),
+            keymap,
             tx,
             asks: VecDeque::new(),
             overlay: None,
@@ -330,6 +415,7 @@ impl<'a> App<'a> {
             size: (80, 24),
             notice: None,
             disconnects: vec![],
+            config_warnings,
         }
     }
 
@@ -345,6 +431,10 @@ impl<'a> App<'a> {
                 Some(format!("sesiones guardadas: {}", clean(&e.to_string()))),
             ),
         };
+        let err = match std::mem::take(&mut self.config_warnings) {
+            w if w.is_empty() => err,
+            w => Some(w.join("; ")),
+        };
         self.overlay = Some(Overlay::Picker {
             picker: Picker::new(sessions, err),
             mode,
@@ -359,7 +449,7 @@ impl<'a> App<'a> {
         self.opened_total += 1;
         let name = clean(&session.name);
         let pane = Pane {
-            host: format!("{}:{}", session.host, session.port),
+            host: label(&session),
             session: session.clone(),
             state: State::Connecting,
             emu: None,
@@ -367,6 +457,8 @@ impl<'a> App<'a> {
             size: (80, 24),
             cipher: String::new(),
             legacy: false,
+            forwards: vec![],
+            theme: Theme::default(),
             modal: None,
             conn: None,
             task: None,
@@ -406,7 +498,6 @@ impl<'a> App<'a> {
     /// Recalcula el tamaño interior de cada panel y avisa al emulador y al remoto.
     async fn relayout(&mut self) {
         let body = body_of(self.size.0, self.size.1, self.tabs.len());
-        let mut errs = vec![];
         for tab in &self.tabs {
             let (panes, _) = compute(tab, body);
             let multi = panes.len() > 1;
@@ -423,15 +514,10 @@ impl<'a> App<'a> {
                 if let Some(e) = p.emu.as_mut() {
                     e.resize(size.1, size.0);
                 }
-                if let Some(o) = p.out.as_mut()
-                    && let Err(e) = o.resize(size.0, size.1).await
-                {
-                    errs.push((id, e));
+                if let Some(o) = p.out.as_mut() {
+                    o.resize(size.0, size.1).await;
                 }
             }
-        }
-        for (id, e) in errs {
-            self.end_pane(id, Err(e));
         }
     }
 
@@ -464,12 +550,12 @@ impl<'a> App<'a> {
         self.after_end(id);
     }
 
-    fn fail(&mut self, id: PaneId, e: Error) {
+    fn fail(&mut self, id: PaneId, e: anyhow::Error) {
         let Some(p) = self.panes.get_mut(&id) else {
             return;
         };
         p.state = State::Failed(clean(&e.to_string()));
-        p.outcome = Some(Err(e.into()));
+        p.outcome = Some(Err(e));
         p.task = None;
         self.asks.retain(|(pid, ..)| *pid != id);
         self.after_end(id);
@@ -544,9 +630,7 @@ impl<'a> App<'a> {
         let Some(o) = self.panes.get_mut(&id).and_then(|p| p.out.as_mut()) else {
             return;
         };
-        if let Err(e) = o.send(bytes).await {
-            self.end_pane(id, Err(e));
-        }
+        o.send(bytes).await;
     }
 
     // ---- mensajes de los paneles ----
@@ -561,7 +645,7 @@ impl<'a> App<'a> {
             }
             Msg::Opened(id, o) => self.opened(id, *o).await,
             Msg::Failed(id, e) => self.fail(id, e),
-            Msg::Shell(id, ev) => self.shell_event(id, ev),
+            Msg::Stream(id, ev) => self.stream_event(id, ev),
             Msg::ReaderEnd(id) => self.reader_end(id, None),
         }
     }
@@ -572,46 +656,52 @@ impl<'a> App<'a> {
             .get_mut(&id)
             .filter(|p| matches!(p.state, State::Connecting))
         else {
-            self.detach(o.conn);
+            if let Some(c) = o.conn {
+                self.detach(c);
+            }
             return;
         };
         let (cols, rows) = p.size;
+        let emu = Emulator::with_profile(rows, cols, &p.session.terminal);
+        let (theme, theme_warn) = Theme::named(&p.session.terminal.theme);
+        let mut warnings = o.warnings;
+        warnings.extend(o.fwd_errors);
+        warnings.extend(emu.profile_warnings());
+        warnings.extend(theme_warn);
+        warnings.append(&mut self.config_warnings);
         let mut out = Out {
             writer: o.writer,
-            log: Log::open(&p.session, &self.paths.logs_dir, &o.warnings),
+            log: Log::open(&p.session, &self.paths.logs_dir, &warnings),
             dropped: false,
         };
         // El panel pudo cambiar de tamaño mientras se conectaba.
-        let resize_err = if o.size == p.size {
-            None
-        } else {
-            out.resize(cols, rows).await.err()
-        };
-        p.emu = Some(Emulator::new(rows, cols, SCROLLBACK));
+        if o.size != p.size {
+            out.resize(cols, rows).await;
+        }
+        p.emu = Some(emu);
+        p.theme = theme;
+        p.forwards = o.forwards;
         p.cipher = o
             .negotiated
             .as_ref()
             .map(|n| compact(&n.cipher))
             .unwrap_or_default();
         p.legacy = p.session.legacy_algorithms || o.negotiated.as_ref().is_some_and(is_legacy);
-        p.modal = (!o.warnings.is_empty()).then(|| Modal {
-            dialog: Dialog::notice("Avisos de la conexión", &o.warnings, true),
+        p.modal = (!warnings.is_empty()).then(|| Modal {
+            dialog: Dialog::notice("Avisos de la conexión", &warnings, true),
             paste: None,
         });
-        p.conn = Some(o.conn);
+        p.conn = o.conn;
         p.out = Some(out);
         p.state = State::Live;
-        if let Some(e) = resize_err {
-            self.end_pane(id, Err(e));
-        }
     }
 
-    fn shell_event(&mut self, id: PaneId, ev: ShellEvent) {
+    fn stream_event(&mut self, id: PaneId, ev: StreamEvent) {
         let Some(p) = self.panes.get_mut(&id).filter(|p| !p.over()) else {
             return;
         };
         match ev {
-            ShellEvent::Data(d) => {
+            StreamEvent::Data(d) => {
                 if let Some(o) = p.out.as_mut() {
                     o.log.output(&d);
                 }
@@ -626,7 +716,7 @@ impl<'a> App<'a> {
         }
     }
 
-    fn reader_end(&mut self, id: PaneId, last: Option<ShellEvent>) {
+    fn reader_end(&mut self, id: PaneId, last: Option<StreamEvent>) {
         let exit = self.panes.get(&id).and_then(|p| p.exit);
         self.end_pane(id, finish(exit, last));
     }
@@ -950,11 +1040,13 @@ impl<'a> App<'a> {
         let line = match focus.and_then(|id| self.panes.get(&id)) {
             Some(p) => {
                 let state = self.state_text(p);
+                let forwards = p.forwards.join(", ");
                 let info = StatusInfo {
                     session: &p.session.name,
                     host: &p.host,
                     state: &state,
                     cipher: &p.cipher,
+                    forwards: &forwards,
                     legacy: p.legacy,
                     log_warn: p.out.as_ref().and_then(|o| o.log.warn.as_deref()),
                 };
@@ -1049,7 +1141,7 @@ impl<'a> App<'a> {
                 None
             }
             (state, Some(s)) => {
-                screen_to_buffer(s, f.buffer_mut(), area);
+                screen_to_buffer(s, f.buffer_mut(), area, &p.theme);
                 if let State::Ended(label) = state {
                     let row = area.height.saturating_sub(1);
                     note(

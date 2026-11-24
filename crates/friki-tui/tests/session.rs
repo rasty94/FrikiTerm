@@ -226,10 +226,13 @@ async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
     }
 }
 
-/// Ejecuta la TUI y un guion concurrente; devuelve el resultado y la pantalla final.
-async fn drive<F, Fut>(
-    e: &Env,
-    sessions: &[SessionConfig],
+/// Ejecuta la TUI con `initial` y un guion concurrente. `files` son ficheros de sesión
+/// (`nombre.toml`, contenido) del selector. Devuelve el resultado y la pantalla final.
+async fn run_tui<F, Fut>(
+    initial: SessionConfig,
+    known_hosts: PathBuf,
+    tag: &str,
+    files: &[(String, String)],
     exit_with_last: bool,
     script: F,
 ) -> (anyhow::Result<i32>, Shared)
@@ -237,28 +240,14 @@ where
     F: FnOnce(Keys, Shared) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let initial = session(e);
-    trust_host(e, &initial).await;
-    let dir = std::env::temp_dir().join(format!(
-        "friki-tui-test-{}-{}",
-        std::process::id(),
-        sessions.len()
-    ));
+    let dir = std::env::temp_dir().join(format!("friki-tui-test-{}-{tag}", std::process::id()));
     let sessions_dir = dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("dir de sesiones");
-    for s in sessions {
-        let toml = format!(
-            "name = {:?}\nhost = {:?}\nport = {}\nuser = {:?}\nauth = [\"public-key\"]\nidentity_files = [{:?}]\nconnect_timeout_secs = 10\nterm = \"xterm-256color\"\n",
-            s.name,
-            s.host,
-            s.port,
-            s.user.clone().unwrap_or_default(),
-            s.identity_files[0].display().to_string(),
-        );
-        std::fs::write(sessions_dir.join(format!("{}.toml", s.name)), toml).expect("sesión");
+    for (name, toml) in files {
+        std::fs::write(sessions_dir.join(name), toml).expect("sesión");
     }
     let paths = Paths {
-        known_hosts: e.known_hosts.clone(),
+        known_hosts,
         logs_dir: dir.join("logs"),
         sessions_dir,
     };
@@ -277,6 +266,60 @@ where
             .expect("la prueba se colgó");
     drop(keep);
     (res, shared)
+}
+
+/// Sesión SSH inicial más las `sessions` guardadas en el selector.
+async fn drive<F, Fut>(
+    e: &Env,
+    sessions: &[SessionConfig],
+    exit_with_last: bool,
+    script: F,
+) -> (anyhow::Result<i32>, Shared)
+where
+    F: FnOnce(Keys, Shared) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    drive_with(e, sessions, &[], exit_with_last, script).await
+}
+
+async fn drive_with<F, Fut>(
+    e: &Env,
+    sessions: &[SessionConfig],
+    extra: &[(String, String)],
+    exit_with_last: bool,
+    script: F,
+) -> (anyhow::Result<i32>, Shared)
+where
+    F: FnOnce(Keys, Shared) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let initial = session(e);
+    trust_host(e, &initial).await;
+    let mut files: Vec<(String, String)> = sessions
+        .iter()
+        .map(|s| {
+            let toml = format!(
+                "name = {:?}\nhost = {:?}\nport = {}\nuser = {:?}\nauth = [\"public-key\"]\nidentity_files = [{:?}]\nconnect_timeout_secs = 10\nterm = \"xterm-256color\"\n",
+                s.name,
+                s.host,
+                s.port,
+                s.user.clone().unwrap_or_default(),
+                s.identity_files[0].display().to_string(),
+            );
+            (format!("{}.toml", s.name), toml)
+        })
+        .collect();
+    files.extend_from_slice(extra);
+    let tag = format!("{}-{}", sessions.len(), extra.len());
+    run_tui(
+        initial,
+        e.known_hosts.clone(),
+        &tag,
+        &files,
+        exit_with_last,
+        script,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -372,4 +415,80 @@ async fn dos_paneles_a_la_misma_maquina_son_independientes() {
     // Dos paneles abiertos en total: al cerrar el último, 0.
     assert_eq!(res.expect("aplicación"), 0);
     drop(screen);
+}
+
+fn telnet_port() -> Option<u16> {
+    let p = std::env::var("FRIKI_TEST_TELNET_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    if p.is_none() {
+        assert!(
+            !required(),
+            "FRIKI_TEST_REQUIRED=1 y falta FRIKI_TEST_TELNET_PORT: scripts/test-telnetd.sh up"
+        );
+        eprintln!("SALTADA (no ejecutada): falta FRIKI_TEST_TELNET_PORT");
+    }
+    p
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH y telnetd de pruebas"]
+async fn un_panel_ssh_y_otro_telnet_a_la_vez() {
+    let (Some(e), Some(port)) = (env(), telnet_port()) else {
+        return;
+    };
+    let telnet = (
+        "tel.toml".to_string(),
+        format!(
+            "name = \"tel\"\nprotocol = \"telnet\"\nhost = \"127.0.0.1\"\nport = {port}\nconnect_timeout_secs = 10\n"
+        ),
+    );
+    let (res, screen) = drive_with(&e, &[], &[telnet], false, |keys, sc| async move {
+        wait_for("ssh conectado", || sc.text().contains("conectado")).await;
+        keys.typed("echo SSH$((20+22))\n");
+        wait_for("salida ssh", || sc.text().contains("SSH42")).await;
+        // Panel nuevo a la derecha con la sesión Telnet.
+        keys.prefixed('%');
+        wait_for("selector", || sc.text().contains("Abrir sesión")).await;
+        keys.typed("tel\n");
+        wait_for("telnet en el selector cerrado", || {
+            let t = sc.text();
+            !t.contains("Abrir sesión") && t.contains("telnet 127.0.0.1")
+        })
+        .await;
+        // El servidor Telnet muestra algo (banner o login) en el panel derecho.
+        wait_for("datos telnet", || {
+            sc.region(51, 100)
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .count()
+                > 8
+        })
+        .await;
+        assert!(sc.region(0, 50).contains("SSH42"), "se perdió el panel SSH");
+        assert!(!sc.region(51, 100).contains("SSH42"));
+        keys.prefixed('q');
+    })
+    .await;
+    assert_eq!(res.expect("aplicación"), 0);
+    drop(screen);
+}
+
+#[tokio::test]
+#[ignore = "requiere /bin/sh y un PTY local"]
+async fn panel_local_shell_termina_con_su_codigo() {
+    let initial = SessionConfig {
+        name: "local".into(),
+        protocol: friki_core::config::Protocol::LocalShell,
+        local_command: Some("echo hola; exit 4".into()),
+        ..SessionConfig::default()
+    };
+    let kh = std::env::temp_dir().join(format!("friki-tui-kh-{}", std::process::id()));
+    let (res, screen) = run_tui(initial, kh, "local", &[], true, |_keys, sc| async move {
+        wait_for("salida local", || sc.text().contains("hola")).await;
+    })
+    .await;
+    assert_eq!(res.expect("sesión"), 4);
+    let text = screen.text();
+    assert!(text.contains("hola"), "{text}");
 }

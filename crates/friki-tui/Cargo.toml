@@ -10,6 +10,9 @@ publish = false
 friki-core = { path = "../friki-core" }
 friki-ssh = { path = "../friki-ssh" }
 friki-term = { path = "../friki-term" }
+friki-telnet = { path = "../friki-telnet" }
+friki-serial = { path = "../friki-serial" }
+friki-pty = { path = "../friki-pty" }
 anyhow = "1"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
