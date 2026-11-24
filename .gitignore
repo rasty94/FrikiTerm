@@ -6,3 +6,4 @@ extracted/
 tmp/
 /target
 .claude/worktrees/
+/crates/friki-cli/assets/gen/

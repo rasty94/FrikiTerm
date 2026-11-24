@@ -1,0 +1,186 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            kind: unix
+            deb_arch: amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            kind: unix
+            deb_arch: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            kind: unix
+            deb_arch: ""
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            kind: unix
+            deb_arch: ""
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            kind: windows
+            deb_arch: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependencias de sistema (Linux, keyring/dbus)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - name: Compilar friki (release)
+        run: cargo build --release --locked -p friki-cli
+
+      - name: Generar página man y completions
+        run: cargo run --locked -p xtask -- assets
+
+      - name: Empaquetar (tar.gz)
+        if: matrix.kind == 'unix'
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+          COPYFILE_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          name="friki-${VERSION}-${TARGET}"
+          stage="${RUNNER_TEMP}/${name}"
+          mkdir -p "${stage}/completions" dist
+          cp target/release/friki README.md "${stage}/"
+          cp crates/friki-cli/assets/gen/friki.1 "${stage}/"
+          cp crates/friki-cli/assets/gen/completions/friki.bash crates/friki-cli/assets/gen/completions/_friki crates/friki-cli/assets/gen/completions/friki.fish "${stage}/completions/"
+          tar -C "${RUNNER_TEMP}" -czf "dist/${name}.tar.gz" "${name}"
+
+      - name: Empaquetar (zip)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "friki-${env:VERSION}-${env:TARGET}"
+          $stage = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage "completions"), "dist" | Out-Null
+          Copy-Item target/release/friki.exe, README.md -Destination $stage
+          Copy-Item crates/friki-cli/assets/gen/completions/_friki.ps1 -Destination (Join-Path $stage "completions")
+          Compress-Archive -Path $stage -DestinationPath "dist/$name.zip"
+
+      - name: Instalar cargo-deb
+        if: matrix.deb_arch != ''
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-deb@3.8.0
+
+      - name: Empaquetar .deb
+        if: matrix.deb_arch != ''
+        env:
+          VERSION: ${{ github.ref_name }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+        run: |
+          set -euo pipefail
+          deb_version="${VERSION#v}"
+          # $auto calcula las dependencias con dpkg-shlibdeps (libdbus-1-3 incluido).
+          cargo deb --no-build -p friki-cli --deb-version "${deb_version}" \
+            --output "dist/friki_${deb_version}_${DEB_ARCH}.deb"
+
+      - name: Subir artefactos
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Firmar, atestar y publicar
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Único job con id-token: el OIDC de GitHub se usa solo para la firma keyless y la atestación.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Descargar artefactos
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Instalar cosign
+        uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
+
+      - name: Generar SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -- *.tar.gz *.zip *.deb > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Firmar con cosign (keyless)
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for f in *.tar.gz *.zip *.deb SHA256SUMS; do
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "${f}"
+          done
+
+      - name: Comprobar firmas antes de publicar
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for f in *.tar.gz *.zip *.deb SHA256SUMS; do
+            cosign verify-blob \
+              --bundle "${f}.sigstore.json" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${f}"
+          done
+
+      - name: Atestación de procedencia
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.deb
+
+      - name: Crear release de GitHub
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+            --title "friki ${TAG}" --generate-notes \
+            ./*

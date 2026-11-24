@@ -21,3 +21,24 @@ clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 serde_json = "1"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
+
+# Paquete .deb (cargo-deb). Los assets man/completions los genera `cargo run -p xtask -- assets`
+# en `crates/friki-cli/assets/gen/` (ignorado por git); ejecutar antes de `cargo deb`.
+[package.metadata.deb]
+name = "friki"
+# ponytail: placeholder hasta fijar el mantenedor real del paquete (obligatorio en control de .deb).
+maintainer = "frikiSSH <noreply@invalid>"
+extended-description = "Cliente SSH y de terminal con sesiones TOML, known_hosts compatible con OpenSSH y llavero del sistema."
+section = "net"
+priority = "optional"
+# $auto: dependencias de shlibs calculadas con dpkg-shlibdeps (incluye libdbus-1-3 para el llavero).
+depends = "$auto"
+# Sin maintainer-scripts: el paquete no ejecuta nada como root al instalar/eliminar.
+assets = [
+    ["target/release/friki", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/friki/README.md", "644"],
+    ["assets/gen/friki.1", "usr/share/man/man1/friki.1", "644"],
+    ["assets/gen/completions/friki.bash", "usr/share/bash-completion/completions/friki", "644"],
+    ["assets/gen/completions/_friki", "usr/share/zsh/vendor-completions/_friki", "644"],
+    ["assets/gen/completions/friki.fish", "usr/share/fish/vendor_completions.d/friki.fish", "644"],
+]
