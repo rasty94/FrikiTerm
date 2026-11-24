@@ -11,14 +11,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::dialog::Dialog;
 
-pub const HELP: [&str; 5] = [
-    "Atajos (prefijo Ctrl+], como telnet):",
-    "  Ctrl+] q        cerrar la sesión",
-    "  Ctrl+] PgUp/PgDn  scrollback",
-    "  Ctrl+] Ctrl+]   enviar un Ctrl+] al remoto",
-    "  Ctrl+] ?        esta ayuda (cualquier tecla la cierra)",
-];
-
 fn color(c: TColor) -> Color {
     match c {
         TColor::Default => Color::Reset,
@@ -74,7 +66,7 @@ pub struct StatusInfo<'a> {
     pub log_warn: Option<&'a str>,
 }
 
-pub fn status_line(info: &StatusInfo, width: u16) -> Line<'static> {
+pub fn status_line(info: &StatusInfo, right: &str, width: u16) -> Line<'static> {
     let mut left = format!(" {} | {} | {}", info.session, info.host, info.state);
     if !info.cipher.is_empty() {
         left.push_str(" | ");
@@ -98,10 +90,9 @@ pub fn status_line(info: &StatusInfo, width: u16) -> Line<'static> {
         ));
     }
     let used: usize = spans.iter().map(Span::width).sum();
-    let right = " Ctrl+] q salir  PgUp/PgDn scroll  ? ayuda ";
     let pad = (width as usize).saturating_sub(used + right.width());
     spans.push(Span::raw(" ".repeat(pad)));
-    spans.push(Span::raw(right));
+    spans.push(Span::raw(right.to_string()));
     Line::from(spans).style(Style::default().fg(Color::Black).bg(Color::Gray))
 }
 
@@ -123,7 +114,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     r
 }
 
-fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'static>>, alert: bool) {
+pub fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'static>>, alert: bool) {
     let area = frame.area();
     let width = lines
         .iter()
@@ -158,42 +149,13 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line<'static>>, alert: bool)
     );
 }
 
-pub fn draw(
-    frame: &mut Frame,
-    screen: Option<&Screen>,
-    status: &StatusInfo,
-    dialog: Option<&Dialog>,
-    help: bool,
-) {
-    let area = frame.area();
-    if area.height == 0 {
-        return;
+/// Diálogo de conexión o aviso, centrado.
+pub fn draw_dialog(frame: &mut Frame, d: &Dialog) {
+    let mut lines: Vec<Line> = d.body.iter().map(|l| Line::from(l.clone())).collect();
+    for i in 0..d.fields.len() {
+        lines.push(Line::from(d.shown(i)));
     }
-    let [body, bar] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
-    if let Some(s) = screen {
-        screen_to_buffer(s, frame.buffer_mut(), body);
-    }
-    frame.render_widget(Paragraph::new(status_line(status, bar.width)), bar);
-    if let Some(d) = dialog {
-        let mut lines: Vec<Line> = d.body.iter().map(|l| Line::from(l.clone())).collect();
-        for i in 0..d.fields.len() {
-            lines.push(Line::from(d.shown(i)));
-        }
-        popup(frame, &d.title, lines, d.alert);
-    } else if help {
-        popup(
-            frame,
-            "Ayuda",
-            HELP.iter().map(|l| Line::from(*l)).collect(),
-            false,
-        );
-    } else if let Some(s) = screen
-        && s.cursor_visible
-        && s.cursor.0 < body.height
-        && s.cursor.1 < body.width
-    {
-        frame.set_cursor_position((body.x + s.cursor.1, body.y + s.cursor.0));
-    }
+    popup(frame, &d.title, lines, d.alert);
 }
 
 #[cfg(test)]
@@ -256,8 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_with_status_bar_and_cursor() {
-        let mut t = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
+    fn status_line_shows_flags() {
         let info = StatusInfo {
             session: "web",
             host: "h:22",
@@ -266,31 +227,22 @@ mod tests {
             legacy: true,
             log_warn: Some("sin registro"),
         };
-        t.draw(|f| draw(f, Some(&screen()), &info, None, false))
-            .expect("draw");
-        let buf = t.backend().buffer().clone();
-        let row0: String = (0..4).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-        assert!(row0.starts_with("AB"));
-        let last: String = (0..120).map(|x| buf[(x, 2)].symbol().to_string()).collect();
-        assert!(last.contains("web | h:22 | conectado"));
-        assert!(last.contains("Ctrl+] q"));
-        assert!(last.contains("chacha20-poly1305") && last.contains("LEGACY"));
-        assert!(last.contains("sin registro"));
-        t.backend_mut().assert_cursor_position((1, 0));
+        let line: String = status_line(&info, " ctrl+] q salir ", 120)
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(line.contains("web | h:22 | conectado"));
+        assert!(line.contains("ctrl+] q salir"));
+        assert!(line.contains("chacha20-poly1305") && line.contains("LEGACY"));
+        assert!(line.contains("sin registro"));
     }
 
     #[test]
-    fn draw_dialog_and_help() {
+    fn draw_dialog_shows_changed_key() {
         let mut t = Terminal::new(TestBackend::new(70, 14)).expect("terminal");
-        let info = StatusInfo {
-            session: "s",
-            host: "h",
-            state: "conectando",
-            ..Default::default()
-        };
         let d = Dialog::changed_host("h", 22, "ssh-ed25519", "SHA256:new", "SHA256:old");
-        t.draw(|f| draw(f, None, &info, Some(&d), false))
-            .expect("draw");
+        t.draw(|f| draw_dialog(f, &d)).expect("draw");
         let text: String = t
             .backend()
             .buffer()
@@ -303,14 +255,5 @@ mod tests {
                 && text.contains("SHA256:new")
                 && text.contains("SHA256:old")
         );
-        t.draw(|f| draw(f, None, &info, None, true)).expect("draw");
-        let text: String = t
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(text.contains("Ctrl+] q"));
     }
 }

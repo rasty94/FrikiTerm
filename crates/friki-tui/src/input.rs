@@ -59,63 +59,6 @@ fn translate_with(ev: &KeyEvent, altgr: bool) -> Option<(Key, Modifiers)> {
     Some((key, mods))
 }
 
-/// Resultado de pasar una tecla por la máquina de estados del prefijo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrefixOut {
-    /// Tecla normal: enviar al remoto.
-    Forward,
-    /// Se pulsó Ctrl+]: esperar la siguiente tecla.
-    Armed,
-    /// Ctrl+] Ctrl+]: enviar un Ctrl+] literal al remoto.
-    Literal,
-    Quit,
-    ScrollUp,
-    ScrollDown,
-    Help,
-    /// Tecla desconocida tras el prefijo: se descarta.
-    Cancel,
-}
-
-#[derive(Debug, Default)]
-pub struct Prefix {
-    armed: bool,
-}
-
-/// Ctrl+] llega como `Char(']')` (kitty) o como `Char('5')` (terminales clásicos, byte 0x1d).
-fn is_prefix(ev: &KeyEvent) -> bool {
-    ev.modifiers.contains(KeyModifiers::CONTROL) && matches!(ev.code, KeyCode::Char(']' | '5'))
-}
-
-impl Prefix {
-    pub fn feed(&mut self, ev: &KeyEvent) -> PrefixOut {
-        if !pressed(ev) || (ev.kind == KeyEventKind::Repeat && is_prefix(ev)) {
-            return PrefixOut::Cancel; // soltar o repetir el prefijo no cambia el estado
-        }
-        if !self.armed {
-            if is_prefix(ev) {
-                self.armed = true;
-                return PrefixOut::Armed;
-            }
-            return PrefixOut::Forward;
-        }
-        self.armed = false;
-        if is_prefix(ev) {
-            return PrefixOut::Literal;
-        }
-        match ev.code {
-            KeyCode::Char('q' | 'Q') => PrefixOut::Quit,
-            KeyCode::PageUp => PrefixOut::ScrollUp,
-            KeyCode::PageDown => PrefixOut::ScrollDown,
-            KeyCode::Char('?') => PrefixOut::Help,
-            _ => PrefixOut::Cancel,
-        }
-    }
-
-    pub fn is_armed(&self) -> bool {
-        self.armed
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,57 +108,5 @@ mod tests {
             bytes(k(KeyCode::Char('4'), KeyModifiers::NONE), false),
             b"4"
         );
-    }
-
-    #[test]
-    fn prefix_ignores_release_and_repeat_of_prefix() {
-        let mut p = Prefix::default();
-        let mut pre = k(KeyCode::Char(']'), KeyModifiers::CONTROL);
-        assert_eq!(p.feed(&pre), PrefixOut::Armed);
-        pre.kind = KeyEventKind::Repeat;
-        assert_eq!(p.feed(&pre), PrefixOut::Cancel);
-        assert!(p.is_armed());
-        pre.kind = KeyEventKind::Release;
-        assert_eq!(p.feed(&pre), PrefixOut::Cancel);
-        assert!(p.is_armed());
-    }
-
-    #[test]
-    fn prefix_state_machine() {
-        let mut p = Prefix::default();
-        let a = k(KeyCode::Char('a'), KeyModifiers::NONE);
-        let q = k(KeyCode::Char('q'), KeyModifiers::NONE);
-        let pre = k(KeyCode::Char(']'), KeyModifiers::CONTROL);
-        assert_eq!(p.feed(&a), PrefixOut::Forward);
-        // Sin prefijo, 'q' va al remoto.
-        assert_eq!(p.feed(&q), PrefixOut::Forward);
-        assert_eq!(p.feed(&pre), PrefixOut::Armed);
-        assert!(p.is_armed());
-        assert_eq!(p.feed(&q), PrefixOut::Quit);
-        assert!(!p.is_armed());
-        // Variante clásica Ctrl+5 (0x1d).
-        assert_eq!(
-            p.feed(&k(KeyCode::Char('5'), KeyModifiers::CONTROL)),
-            PrefixOut::Armed
-        );
-        assert_eq!(
-            p.feed(&k(KeyCode::PageUp, KeyModifiers::NONE)),
-            PrefixOut::ScrollUp
-        );
-        p.feed(&pre);
-        assert_eq!(
-            p.feed(&k(KeyCode::PageDown, KeyModifiers::NONE)),
-            PrefixOut::ScrollDown
-        );
-        p.feed(&pre);
-        assert_eq!(
-            p.feed(&k(KeyCode::Char('?'), KeyModifiers::NONE)),
-            PrefixOut::Help
-        );
-        p.feed(&pre);
-        assert_eq!(p.feed(&pre), PrefixOut::Literal);
-        p.feed(&pre);
-        assert_eq!(p.feed(&a), PrefixOut::Cancel);
-        assert_eq!(p.feed(&a), PrefixOut::Forward);
     }
 }
