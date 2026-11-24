@@ -101,7 +101,7 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 
 - [ ] Hostname TLS no comprobado con destino vacío (`docs/07`): aquí es imposible.
 - [ ] Mínimo de versión TLS decidido por flags del llamador: aquí es una constante.
-- [ ] Algoritmos débiles registrados en el código (RC4, 3DES, CBC, MD5, SHA-1, DH group1, DSA) sin garantía de que estén desactivados por defecto: aquí no se compilan, salvo `--features legacy`.
+- [ ] Algoritmos débiles registrados en el código (RC4, 3DES, CBC, MD5, SHA-1, DH group1, DSA) sin garantía de que estén desactivados por defecto: aquí **nunca se ofrecen** salvo `legacy_algorithms` con `--features legacy`, y una prueba falla si la lista segura contiene `none`, `-cbc`, `sha1`, `md5`, `group1` o `dss`. Nota: `russh` compila siempre CBC, SHA-1 y DH group1; la feature `legacy` solo añade 3DES y DSA, así que la barrera es la lista ofrecida, no la compilación.
 - [ ] Librerías propias con RELRO parcial (`docs/03`): compilar con RELRO completo, PIE y `-C control-flow-guard` en Windows.
 - [ ] Dependencias fuera de soporte empaquetadas (Python 2.7, zlib 1.2.11, `docs/15`): `cargo deny` bloquea las vulnerables y sin mantenimiento.
 - [ ] Ejecutable sin firma por binario en Linux: firmar releases (cosign) y publicar SHA-256.
