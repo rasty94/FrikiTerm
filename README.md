@@ -12,6 +12,8 @@ Análisis estático de SecureCRT/SecureFX 9.7.4 (VanDyke) con la skill `reverse-
 - [docs/06-cifrados-mac-y-autenticacion.md](docs/06-cifrados-mac-y-autenticacion.md): cifrados, MAC y autenticación (parcial)
 - [docs/07-tls-libtlscore.md](docs/07-tls-libtlscore.md): capa TLS y verificación de certificados
 - [docs/09-listas-por-defecto-y-compresion.md](docs/09-listas-por-defecto-y-compresion.md): filtro de algoritmos y compresión
+- [docs/12-api-de-scripting.md](docs/12-api-de-scripting.md): API de scripting Python, ayuda frente a binario
+- [docs/13-transferencias-y-cli.md](docs/13-transferencias-y-cli.md): transferencias, sincronización y herramientas CLI
 - [docs/08-mapa-de-modulos.md](docs/08-mapa-de-modulos.md): módulos, clases y dependencias
 
 ## Reproducir
