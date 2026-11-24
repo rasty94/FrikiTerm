@@ -1,0 +1,16 @@
+[package]
+name = "friki-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "friki"
+path = "src/main.rs"
+
+[dependencies]
+friki-core = { path = "../friki-core" }
+friki-ssh = { path = "../friki-ssh" }
+friki-term = { path = "../friki-term" }
+friki-tui = { path = "../friki-tui" }

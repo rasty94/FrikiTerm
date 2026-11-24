@@ -1,0 +1,12 @@
+[package]
+name = "friki-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+friki-core = { path = "../friki-core" }
+friki-ssh = { path = "../friki-ssh" }
+friki-term = { path = "../friki-term" }
+anyhow = "1"

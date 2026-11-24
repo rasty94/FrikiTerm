@@ -4,3 +4,4 @@
 *.exe
 extracted/
 tmp/
+/target
