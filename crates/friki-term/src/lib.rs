@@ -13,7 +13,7 @@ use std::io::Write;
 use std::num::NonZeroU16;
 use std::path::Path;
 
-use friki_core::config::LogConfig;
+use friki_core::config::{BackspaceMode, Emulation, LogConfig, TerminalProfile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Color {
@@ -105,8 +105,105 @@ fn conv_color(c: vt100::Color) -> Color {
 /// `end`, `pageup`, `pagedown`, `insert`, `delete`, `space`) o `f1`..`f12`. Sin distinguir
 /// mayúsculas en nombres y modificadores. `None` si no es válida.
 pub fn parse_chord(s: &str) -> Option<(Key, Modifiers)> {
-    let _ = s;
-    todo!("friki-term: parse_chord")
+    let (mods_part, key_part) = if s == "+" {
+        ("", "+")
+    } else if let Some(p) = s.strip_suffix("++") {
+        // "ctrl++": modificadores + la tecla `+`. "++" a secas no es válida.
+        if p.is_empty() {
+            return None;
+        }
+        (p, "+")
+    } else {
+        match s.rsplit_once('+') {
+            Some(("", _)) => return None,
+            Some(p) => p,
+            None => ("", s),
+        }
+    };
+    let mut mods = Modifiers::default();
+    if !mods_part.is_empty() {
+        for m in mods_part.split('+') {
+            match m.to_ascii_lowercase().as_str() {
+                "ctrl" => mods.ctrl = true,
+                "alt" => mods.alt = true,
+                "shift" => mods.shift = true,
+                _ => return None,
+            }
+        }
+    }
+    let lower = key_part.to_ascii_lowercase();
+    let key = match lower.as_str() {
+        "enter" => Key::Enter,
+        "tab" => Key::Tab,
+        "backtab" => Key::BackTab,
+        "esc" => Key::Esc,
+        "backspace" => Key::Backspace,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        "insert" => Key::Insert,
+        "delete" => Key::Delete,
+        "space" => Key::Char(' '),
+        _ => {
+            let mut it = key_part.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) => {
+                    // Ctrl+letra llega siempre en minúscula desde el terminal.
+                    let c = if mods.ctrl && c.is_ascii_alphabetic() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c
+                    };
+                    Key::Char(c)
+                }
+                _ => {
+                    let n: u8 = lower.strip_prefix('f')?.parse().ok()?;
+                    if !(1..=12).contains(&n) || lower != format!("f{n}") {
+                        return None;
+                    }
+                    Key::F(n)
+                }
+            }
+        }
+    };
+    Some((key, mods))
+}
+
+/// Equivalente privado de `friki_core::config::parse_key_bytes`: escapes `\e`, `\r`, `\n`,
+/// `\t`, `\\` y `\xNN`; error si es desconocido o incompleto.
+// ponytail: sustituir por friki_core::config::parse_key_bytes al integrar (en esta rama es todo!()).
+fn parse_key_bytes_local(s: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            let mut b = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+            continue;
+        }
+        match it.next() {
+            Some('e') => out.push(0x1b),
+            Some('r') => out.push(b'\r'),
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('\\') => out.push(b'\\'),
+            Some('x') => {
+                let h: String = it.by_ref().take(2).collect();
+                if h.len() != 2 {
+                    return Err(format!("\\x incompleto en {s:?}"));
+                }
+                out.push(u8::from_str_radix(&h, 16).map_err(|_| format!("\\x{h} no es hex"))?);
+            }
+            Some(o) => return Err(format!("escape desconocido \\{o} en {s:?}")),
+            None => return Err(format!("barra final sin escape en {s:?}")),
+        }
+    }
+    Ok(out)
 }
 
 /// Coincidencia de búsqueda. Filas en coordenadas absolutas del buffer: 0 es la línea más
@@ -124,18 +221,91 @@ pub type Pos = (usize, u16);
 
 pub struct Terminal {
     parser: vt100::Parser<TitleCb>,
+    emulation: Emulation,
+    backspace: BackspaceMode,
+    keymap: Vec<((Key, Modifiers), Vec<u8>)>,
+    warnings: Vec<String>,
+}
+
+/// Lectura de filas absolutas sobre una copia de la pantalla (así `&self` no toca la vista
+/// real). `set_scrollback` en la copia deja la fila pedida en la línea 0 visible.
+struct Grid {
+    s: vt100::Screen,
+    len: usize,
+    rows: usize,
+    cols: u16,
+}
+
+impl Grid {
+    fn new(s: &vt100::Screen) -> Self {
+        Self {
+            len: s.scrollback_len(),
+            rows: usize::from(s.size().0.get()),
+            cols: s.size().1.get(),
+            s: s.clone(),
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.len + self.rows
+    }
+
+    /// Sitúa `abs` en la fila visible devuelta.
+    fn goto(&mut self, abs: usize) -> u16 {
+        // `set_scrollback` cuesta O(filas): se reutiliza la ventana actual si contiene `abs`.
+        let top = self.len - self.s.scrollback();
+        if (top..top + self.rows).contains(&abs) {
+            return u16::try_from(abs - top).unwrap_or(u16::MAX);
+        }
+        if abs < self.len {
+            self.s.set_scrollback(self.len - abs);
+            0
+        } else {
+            self.s.set_scrollback(0);
+            u16::try_from(abs - self.len).unwrap_or(u16::MAX)
+        }
+    }
+
+    /// Texto de la fila y, por byte, columna de inicio/fin (exclusivo) de su celda.
+    /// Celdas vacías = espacio; se recortan las vacías del final.
+    fn line(&mut self, abs: usize, lower: bool) -> (String, Vec<u16>, Vec<u16>) {
+        let r = self.goto(abs);
+        let mut last = 0;
+        for c in 0..self.cols {
+            if self.s.cell(r, c).is_some_and(|x| x.has_contents()) {
+                last = c + 1;
+            }
+        }
+        let (mut text, mut st, mut en) = (String::new(), Vec::new(), Vec::new());
+        for c in 0..last {
+            let Some(x) = self.s.cell(r, c) else { continue };
+            if x.is_wide_continuation() {
+                continue;
+            }
+            let w = if x.is_wide() { 2 } else { 1 };
+            let t = if x.has_contents() { x.contents() } else { " " };
+            if lower {
+                text.extend(t.chars().flat_map(char::to_lowercase));
+            } else {
+                text.push_str(t);
+            }
+            st.resize(text.len(), c);
+            en.resize(text.len(), c + w);
+        }
+        (text, st, en)
+    }
 }
 
 impl Terminal {
     pub fn new(rows: u16, cols: u16, scrollback: usize) -> Self {
-        Self {
-            parser: vt100::Parser::new_with_callbacks(
-                nz(rows),
-                nz(cols),
+        Self::with_profile(
+            rows,
+            cols,
+            &TerminalProfile {
                 scrollback,
-                TitleCb::default(),
-            ),
-        }
+                ..TerminalProfile::default()
+            },
+        )
     }
 
     /// Igual que `new` con el perfil: scrollback, emulación (codificación de teclas),
@@ -146,45 +316,139 @@ impl Terminal {
         cols: u16,
         profile: &friki_core::config::TerminalProfile,
     ) -> Self {
-        let _ = (rows, cols, profile);
-        todo!("friki-term: with_profile")
+        let mut keymap: Vec<((Key, Modifiers), Vec<u8>)> = Vec::new();
+        let mut warnings = Vec::new();
+        for (chord, bytes) in &profile.keymap {
+            let Some(k) = parse_chord(chord) else {
+                warnings.push(format!("keymap: tecla no válida {chord:?}"));
+                continue;
+            };
+            match parse_key_bytes_local(bytes) {
+                Ok(b) => match keymap.iter_mut().find(|(kk, _)| *kk == k) {
+                    Some(e) => e.1 = b,
+                    None => keymap.push((k, b)),
+                },
+                Err(e) => warnings.push(format!("keymap {chord:?}: {e}")),
+            }
+        }
+        Self {
+            parser: vt100::Parser::new_with_callbacks(
+                nz(rows),
+                nz(cols),
+                profile.scrollback,
+                TitleCb::default(),
+            ),
+            emulation: profile.emulation,
+            backspace: profile.backspace,
+            keymap,
+            warnings,
+        }
     }
 
     /// Entradas del `keymap` del perfil que no se pudieron aplicar (tecla o bytes inválidos).
     pub fn profile_warnings(&self) -> Vec<String> {
-        todo!("friki-term: profile_warnings")
+        self.warnings.clone()
     }
 
     /// Valor de `TERM` que se anuncia al remoto para la emulación.
     pub fn term_name(emulation: friki_core::config::Emulation) -> &'static str {
-        let _ = emulation;
-        todo!("friki-term: term_name")
+        match emulation {
+            Emulation::Xterm => "xterm-256color",
+            Emulation::Vt100 => "vt100",
+            Emulation::Vt220 => "vt220",
+            Emulation::Linux => "linux",
+            Emulation::Ansi => "ansi",
+        }
     }
 
     /// Busca `needle` en scrollback + pantalla, de la más antigua a la más reciente.
     /// `case_sensitive = false` compara sin mayúsculas (Unicode simple). Cadena vacía = nada.
     pub fn search(&self, needle: &str, case_sensitive: bool) -> Vec<Match> {
-        let _ = (needle, case_sensitive);
-        todo!("friki-term: search")
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let needle: String = if case_sensitive {
+            needle.to_owned()
+        } else {
+            needle.chars().flat_map(char::to_lowercase).collect()
+        };
+        let mut g = Grid::new(self.parser.screen());
+        let mut out = Vec::new();
+        for row in 0..g.total() {
+            let (text, st, en) = g.line(row, !case_sensitive);
+            for (i, m) in text.match_indices(needle.as_str()) {
+                out.push(Match {
+                    row,
+                    start_col: st[i],
+                    end_col: en[i + m.len() - 1],
+                });
+            }
+        }
+        out
     }
 
-    /// Ajusta la vista para que `row` (absoluta) quede visible, centrada si se puede.
+    /// Ajusta la vista para que `row` (absoluta) quede visible, centrada si se puede
+    /// (acotada a [0, scrollback_len]). Filas fuera de rango = la última pantalla. En
+    /// pantalla alternativa no hay scrollback (`scrollback_len() == 0`): no hace nada.
     pub fn reveal_row(&mut self, row: usize) {
-        let _ = row;
-        todo!("friki-term: reveal_row")
+        let len = self.parser.screen().scrollback_len();
+        let rows = usize::from(self.parser.screen().size().0.get());
+        let top = row.saturating_sub(rows / 2).min(len);
+        self.parser.screen_mut().set_scrollback(len - top);
     }
 
     /// Fila absoluta que se ve en la línea 0 de la pantalla con el desplazamiento actual.
     pub fn top_row(&self) -> usize {
-        todo!("friki-term: top_row")
+        let s = self.parser.screen();
+        s.scrollback_len().saturating_sub(s.scrollback())
     }
 
     /// Texto entre dos posiciones absolutas (inclusive, en cualquier orden). Une líneas con
     /// `\n` salvo las que el remoto partió por ancho (wrap), quita espacios finales de cada
     /// línea y no corta caracteres anchos. `block = true`: selección rectangular.
     pub fn text_range(&self, from: Pos, to: Pos, block: bool) -> String {
-        let _ = (from, to, block);
-        todo!("friki-term: text_range")
+        let mut g = Grid::new(self.parser.screen());
+        let last_row = g.total() - 1;
+        let last_col = g.cols - 1;
+        let (a, b) = if from <= to { (from, to) } else { (to, from) };
+        let (r0, r1) = (a.0.min(last_row), b.0.min(last_row));
+        let (ca, cb) = (a.1.min(last_col), b.1.min(last_col));
+        let mut out = String::new();
+        for row in r0..=r1 {
+            let (lo, hi) = if block {
+                (ca.min(cb), ca.max(cb))
+            } else {
+                (
+                    if row == r0 { ca } else { 0 },
+                    if row == r1 { cb } else { last_col },
+                )
+            };
+            let r = g.goto(row);
+            // Empezar en la mitad de un ancho: incluir el carácter entero.
+            let lo = if lo > 0 && g.s.cell(r, lo).is_some_and(|x| x.is_wide_continuation()) {
+                lo - 1
+            } else {
+                lo
+            };
+            let mut line = String::new();
+            for c in lo..=hi {
+                match g.s.cell(r, c) {
+                    Some(x) if x.is_wide_continuation() => {}
+                    Some(x) if x.has_contents() => line.push_str(x.contents()),
+                    _ => line.push(' '),
+                }
+            }
+            let wrapped = !block && row != r1 && g.s.row_wrapped(r);
+            out.push_str(if wrapped {
+                &line
+            } else {
+                line.trim_end_matches(' ')
+            });
+            if row != r1 && !wrapped {
+                out.push('\n');
+            }
+        }
+        out
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
@@ -268,8 +532,17 @@ impl Terminal {
 
     /// Respeta el modo cursor de aplicación y el keypad.
     pub fn encode_key(&self, key: Key, mods: Modifiers) -> Vec<u8> {
+        if let Some((_, b)) = self.keymap.iter().find(|(k, _)| *k == (key, mods)) {
+            return b.clone();
+        }
         let app = self.parser.screen().application_cursor();
-        let m = 1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.ctrl);
+        let e = self.emulation;
+        // Solo xterm codifica modificadores en CSI (`ESC[1;5A`); el resto los ignora.
+        let m = if e == Emulation::Xterm {
+            1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.ctrl)
+        } else {
+            1
+        };
         let csi = |n: &str, fin: char| {
             if m == 1 {
                 format!("\x1b[{n}{fin}")
@@ -313,24 +586,53 @@ impl Terminal {
                 return alt(out);
             }
             Key::Enter => return alt(vec![b'\r']),
-            Key::Backspace => return alt(vec![0x7f]),
+            Key::Backspace => {
+                return alt(vec![match self.backspace {
+                    BackspaceMode::Delete => 0x7f,
+                    BackspaceMode::CtrlH => 0x08,
+                }]);
+            }
             Key::Tab => return alt(vec![b'\t']),
             Key::Esc => return alt(vec![0x1b]),
             _ => {}
         }
+        // Secuencias por emulación (fuente: `infocmp -x vt100 vt220 linux ansi` de ncurses):
+        // - vt100: sin Home/End/Ins/Del/PgUp/PgDn/BackTab; F1-F4 = PF1-PF4 `ESC O P..S`
+        //   (kf1..kf4); F5+ no existen.
+        // - vt220: kfnd/kslt (Find/Select) = Home `ESC[1~`, End `ESC[4~`; kich1 `ESC[2~`,
+        //   kdch1 `ESC[3~`, knp `ESC[6~`, kpp `ESC[5~`; kf1..kf4 `ESC O P..S`; kf6..kf12
+        //   `ESC[17~`..`ESC[24~`; kf5 no está en terminfo, se usa el habitual `ESC[15~`.
+        // - linux: kf1..kf5 `ESC[[A`..`ESC[[E`; kf6.. `ESC[17~`..; khome `ESC[1~`,
+        //   kend `ESC[4~`, kcbt `ESC[Z`.
+        // - ansi: khome `ESC[H`, kich1 `ESC[L`; el resto como xterm sin modificadores.
+        use Emulation::{Ansi, Linux, Vt100, Vt220};
         match key {
+            Key::BackTab if e == Vt100 => String::new(),
             Key::BackTab => "\x1b[Z".into(),
             Key::Up => cursor('A'),
             Key::Down => cursor('B'),
             Key::Right => cursor('C'),
             Key::Left => cursor('D'),
+            Key::Home | Key::End | Key::Insert | Key::Delete | Key::PageUp | Key::PageDown
+                if e == Vt100 =>
+            {
+                String::new()
+            }
+            Key::Home if matches!(e, Vt220 | Linux) => "\x1b[1~".into(),
+            Key::End if matches!(e, Vt220 | Linux) => "\x1b[4~".into(),
             Key::Home => cursor('H'),
             Key::End => cursor('F'),
+            Key::Insert if e == Ansi => "\x1b[L".into(),
             Key::Insert => tilde("2"),
             Key::Delete => tilde("3"),
             Key::PageUp => tilde("5"),
             Key::PageDown => tilde("6"),
+            Key::F(n) if e == Vt100 && n >= 5 => String::new(),
+            Key::F(n) if e == Linux && (1..=5).contains(&n) => {
+                format!("\x1b[[{}", ['A', 'B', 'C', 'D', 'E'][usize::from(n - 1)])
+            }
             Key::F(n @ 1..=4) => {
+                // vt100/vt220 (y xterm sin modificadores) usan SS3.
                 let fin = ['P', 'Q', 'R', 'S'][usize::from(n - 1)];
                 if m == 1 {
                     format!("\x1bO{fin}")
@@ -923,5 +1225,545 @@ mod tests {
         assert!(!t.alternate_screen());
         t.process(b"\x1b[?1049h");
         assert!(t.alternate_screen());
+    }
+
+    fn mods(ctrl: bool, alt: bool, shift: bool) -> Modifiers {
+        Modifiers { ctrl, alt, shift }
+    }
+
+    #[test]
+    fn chord_validos() {
+        let nm = Modifiers::default();
+        for (s, k) in [
+            ("enter", Key::Enter),
+            ("tab", Key::Tab),
+            ("backtab", Key::BackTab),
+            ("esc", Key::Esc),
+            ("backspace", Key::Backspace),
+            ("up", Key::Up),
+            ("down", Key::Down),
+            ("left", Key::Left),
+            ("right", Key::Right),
+            ("home", Key::Home),
+            ("end", Key::End),
+            ("pageup", Key::PageUp),
+            ("pagedown", Key::PageDown),
+            ("insert", Key::Insert),
+            ("delete", Key::Delete),
+            ("space", Key::Char(' ')),
+            ("f1", Key::F(1)),
+            ("f12", Key::F(12)),
+            ("]", Key::Char(']')),
+            ("%", Key::Char('%')),
+            ("+", Key::Char('+')),
+            ("x", Key::Char('x')),
+            ("ENTER", Key::Enter),
+            ("PageUp", Key::PageUp),
+            ("F5", Key::F(5)),
+            ("é", Key::Char('é')),
+        ] {
+            assert_eq!(parse_chord(s), Some((k, nm)), "{s}");
+        }
+        assert_eq!(
+            parse_chord("ctrl+]"),
+            Some((Key::Char(']'), mods(true, false, false)))
+        );
+        assert_eq!(
+            parse_chord("ctrl++"),
+            Some((Key::Char('+'), mods(true, false, false)))
+        );
+        assert_eq!(
+            parse_chord("Ctrl+Alt+Shift++"),
+            Some((Key::Char('+'), mods(true, true, true)))
+        );
+        assert_eq!(
+            parse_chord("CTRL+shift+T"),
+            Some((Key::Char('t'), mods(true, false, true)))
+        );
+        assert_eq!(
+            parse_chord("alt+F4"),
+            Some((Key::F(4), mods(false, true, false)))
+        );
+        assert_eq!(
+            parse_chord("alt+A"),
+            Some((Key::Char('A'), mods(false, true, false)))
+        );
+        assert_eq!(
+            parse_chord("ctrl+space"),
+            Some((Key::Char(' '), mods(true, false, false)))
+        );
+    }
+
+    #[test]
+    fn chord_invalidos() {
+        for s in [
+            "",
+            "++",
+            "+++",
+            "ctrl+",
+            "ctrl",
+            "+a",
+            "ctrl+ctrl2+a",
+            "meta+a",
+            "f0",
+            "f13",
+            "f01",
+            "ctrl+xx",
+            "enter+",
+            "ctrl+alt",
+            "foo",
+            "ctrl +a",
+            "ctrl+f1+",
+            "ctrl+,+a",
+        ] {
+            assert_eq!(parse_chord(s), None, "{s:?}");
+        }
+    }
+
+    fn prof(e: Emulation) -> TerminalProfile {
+        TerminalProfile {
+            emulation: e,
+            ..TerminalProfile::default()
+        }
+    }
+
+    fn enc_e(e: Emulation, k: Key, m: Modifiers) -> Vec<u8> {
+        Terminal::with_profile(5, 20, &prof(e)).encode_key(k, m)
+    }
+
+    #[test]
+    fn term_names() {
+        assert_eq!(Terminal::term_name(Emulation::Xterm), "xterm-256color");
+        assert_eq!(Terminal::term_name(Emulation::Vt100), "vt100");
+        assert_eq!(Terminal::term_name(Emulation::Vt220), "vt220");
+        assert_eq!(Terminal::term_name(Emulation::Linux), "linux");
+        assert_eq!(Terminal::term_name(Emulation::Ansi), "ansi");
+    }
+
+    #[test]
+    fn new_equivale_al_perfil_por_defecto() {
+        let a = Terminal::new(5, 20, 10_000);
+        let b = Terminal::with_profile(5, 20, &TerminalProfile::default());
+        assert!(a.profile_warnings().is_empty());
+        for k in [
+            Key::Up,
+            Key::Home,
+            Key::End,
+            Key::Insert,
+            Key::Delete,
+            Key::PageUp,
+            Key::F(1),
+            Key::F(5),
+            Key::F(12),
+            Key::BackTab,
+            Key::Backspace,
+            Key::Char('a'),
+        ] {
+            for m in [none(), mods(true, false, false), mods(false, true, true)] {
+                assert_eq!(a.encode_key(k, m), b.encode_key(k, m));
+            }
+        }
+        assert_eq!(a.encode_key(Key::Backspace, none()), vec![0x7f]);
+        assert_eq!(
+            a.encode_key(Key::Up, mods(true, false, false)),
+            b"\x1b[1;5A"
+        );
+        assert_eq!(a.encode_key(Key::F(3), none()), b"\x1bOR");
+    }
+
+    #[test]
+    fn vt100_teclas() {
+        let e = Emulation::Vt100;
+        assert_eq!(enc_e(e, Key::F(1), none()), b"\x1bOP");
+        assert_eq!(enc_e(e, Key::F(4), mods(true, false, false)), b"\x1bOS");
+        for k in [
+            Key::F(5),
+            Key::F(12),
+            Key::Home,
+            Key::End,
+            Key::Insert,
+            Key::Delete,
+            Key::PageUp,
+            Key::PageDown,
+            Key::BackTab,
+        ] {
+            assert!(enc_e(e, k, none()).is_empty(), "{k:?}");
+        }
+        assert_eq!(enc_e(e, Key::Up, mods(true, false, false)), b"\x1b[A");
+        let mut t = Terminal::with_profile(5, 20, &prof(e));
+        t.process(b"\x1b[?1h");
+        assert_eq!(t.encode_key(Key::Up, none()), b"\x1bOA");
+    }
+
+    #[test]
+    fn vt220_teclas() {
+        let e = Emulation::Vt220;
+        assert_eq!(enc_e(e, Key::F(1), none()), b"\x1bOP");
+        assert_eq!(enc_e(e, Key::F(4), mods(false, false, true)), b"\x1bOS");
+        assert_eq!(enc_e(e, Key::F(5), none()), b"\x1b[15~");
+        assert_eq!(enc_e(e, Key::F(6), none()), b"\x1b[17~");
+        assert_eq!(enc_e(e, Key::F(12), mods(true, false, false)), b"\x1b[24~");
+        assert_eq!(enc_e(e, Key::Home, none()), b"\x1b[1~");
+        assert_eq!(enc_e(e, Key::End, none()), b"\x1b[4~");
+        assert_eq!(enc_e(e, Key::Delete, none()), b"\x1b[3~");
+        assert_eq!(enc_e(e, Key::Right, mods(true, false, true)), b"\x1b[C");
+        assert_eq!(enc_e(e, Key::BackTab, none()), b"\x1b[Z");
+    }
+
+    #[test]
+    fn linux_teclas() {
+        let e = Emulation::Linux;
+        for (n, s) in [(1, "A"), (2, "B"), (3, "C"), (4, "D"), (5, "E")] {
+            assert_eq!(
+                enc_e(e, Key::F(n), none()),
+                format!("\x1b[[{s}").into_bytes()
+            );
+        }
+        assert_eq!(enc_e(e, Key::F(6), none()), b"\x1b[17~");
+        assert_eq!(enc_e(e, Key::F(12), none()), b"\x1b[24~");
+        assert_eq!(enc_e(e, Key::Home, none()), b"\x1b[1~");
+        assert_eq!(enc_e(e, Key::End, none()), b"\x1b[4~");
+        assert_eq!(enc_e(e, Key::Insert, none()), b"\x1b[2~");
+        assert_eq!(enc_e(e, Key::PageDown, none()), b"\x1b[6~");
+        assert_eq!(enc_e(e, Key::Up, mods(true, false, false)), b"\x1b[A");
+    }
+
+    #[test]
+    fn ansi_teclas() {
+        let e = Emulation::Ansi;
+        assert_eq!(enc_e(e, Key::Up, mods(true, false, false)), b"\x1b[A");
+        assert_eq!(enc_e(e, Key::Home, none()), b"\x1b[H");
+        assert_eq!(enc_e(e, Key::Insert, none()), b"\x1b[L");
+        assert_eq!(enc_e(e, Key::F(1), mods(false, false, true)), b"\x1bOP");
+        assert_eq!(enc_e(e, Key::F(5), mods(true, false, false)), b"\x1b[15~");
+        // Alt en caracteres sigue siendo prefijo ESC.
+        assert_eq!(enc_e(e, Key::Char('x'), mods(false, true, false)), b"\x1bx");
+    }
+
+    #[test]
+    fn xterm_conserva_modificadores() {
+        let e = Emulation::Xterm;
+        assert_eq!(enc_e(e, Key::Up, mods(false, true, false)), b"\x1b[1;3A");
+        assert_eq!(enc_e(e, Key::F(1), mods(true, false, false)), b"\x1b[1;5P");
+        assert_eq!(
+            enc_e(e, Key::Delete, mods(true, false, false)),
+            b"\x1b[3;5~"
+        );
+    }
+
+    #[test]
+    fn retroceso() {
+        let p = TerminalProfile {
+            backspace: BackspaceMode::CtrlH,
+            ..TerminalProfile::default()
+        };
+        let t = Terminal::with_profile(5, 20, &p);
+        assert_eq!(t.encode_key(Key::Backspace, none()), vec![0x08]);
+        assert_eq!(
+            t.encode_key(Key::Backspace, mods(false, true, false)),
+            vec![0x1b, 0x08]
+        );
+        assert_eq!(enc_e(Emulation::Linux, Key::Backspace, none()), vec![0x7f]);
+    }
+
+    #[test]
+    fn keymap_y_avisos() {
+        let mut p = TerminalProfile::default();
+        for (k, v) in [
+            ("ctrl+a", "\\eOP"),
+            ("F5", "A\\x42\\n\\t\\r\\\\"),
+            ("ctrl+Shift+t", "é"),
+            ("f13", "x"),
+            ("f2", "\\q"),
+            ("f3", "\\x4"),
+            ("f4", "abc\\"),
+            ("nope", "x"),
+        ] {
+            p.keymap.insert(k.into(), v.into());
+        }
+        let t = Terminal::with_profile(5, 20, &p);
+        assert_eq!(t.profile_warnings().len(), 5, "{:?}", t.profile_warnings());
+        // El keymap gana al comportamiento normal (ctrl+a sería 0x01).
+        assert_eq!(
+            t.encode_key(Key::Char('a'), mods(true, false, false)),
+            b"\x1bOP"
+        );
+        assert_eq!(t.encode_key(Key::F(5), none()), b"AB\n\t\r\\");
+        assert_eq!(
+            t.encode_key(Key::Char('t'), mods(true, false, true)),
+            "é".as_bytes()
+        );
+        // Sin entrada válida, lo de siempre.
+        assert_eq!(t.encode_key(Key::F(2), none()), b"\x1bOQ");
+        assert_eq!(t.encode_key(Key::Char('a'), none()), b"a");
+    }
+
+    #[test]
+    fn scrollback_del_perfil() {
+        let mut p = TerminalProfile {
+            scrollback: 3,
+            ..TerminalProfile::default()
+        };
+        let mut t = Terminal::with_profile(2, 10, &p);
+        t.process(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        assert_eq!(t.scrollback_len(), 3);
+        p.scrollback = 0;
+        let mut t = Terminal::with_profile(2, 10, &p);
+        t.process(b"1\r\n2\r\n3\r\n4");
+        assert_eq!(t.scrollback_len(), 0);
+    }
+
+    /// 3 filas x 10 columnas, líneas l0..l9: scrollback 7, pantalla l7..l9.
+    fn diez() -> Terminal {
+        let mut t = Terminal::new(3, 10, 100);
+        let s: Vec<String> = (0..10).map(|i| format!("l{i}")).collect();
+        t.process(s.join("\r\n").as_bytes());
+        t
+    }
+
+    fn m(row: usize, start_col: u16, end_col: u16) -> Match {
+        Match {
+            row,
+            start_col,
+            end_col,
+        }
+    }
+
+    #[test]
+    fn busca_en_scrollback_y_pantalla() {
+        let mut t = diez();
+        assert_eq!(t.scrollback_len(), 7);
+        assert_eq!(t.search("l0", true), vec![m(0, 0, 2)]);
+        assert_eq!(t.search("l9", true), vec![m(9, 0, 2)]);
+        assert_eq!(t.search("l", true).len(), 10);
+        let rows: Vec<usize> = t.search("l", true).iter().map(|x| x.row).collect();
+        assert_eq!(rows, (0..10).collect::<Vec<_>>());
+        // No altera la vista.
+        t.scroll_view(4);
+        let (off, top) = (t.scroll_offset(), t.top_row());
+        let before = t.screen();
+        assert_eq!(t.search("l2", true), vec![m(2, 0, 2)]);
+        assert_eq!((t.scroll_offset(), t.top_row()), (off, top));
+        assert_eq!(t.screen(), before);
+    }
+
+    #[test]
+    fn busca_mayusculas_y_varias_por_linea() {
+        let mut t = Terminal::new(3, 30, 10);
+        t.process(b"Hello hello HELLO");
+        let all = t.search("hello", false);
+        assert_eq!(all, vec![m(0, 0, 5), m(0, 6, 11), m(0, 12, 17)]);
+        assert_eq!(t.search("hello", true), vec![m(0, 6, 11)]);
+        assert_eq!(t.search("HELLO", true), vec![m(0, 12, 17)]);
+        assert_eq!(t.search("HeLLo", false).len(), 3);
+        // No solapadas.
+        let mut t = Terminal::new(2, 10, 0);
+        t.process(b"aaaa");
+        assert_eq!(t.search("aa", true), vec![m(0, 0, 2), m(0, 2, 4)]);
+        // Espacios internos sí; los de relleno al final no.
+        t.process(b"\r\nx y");
+        assert_eq!(t.search("x y", true), vec![m(1, 0, 3)]);
+        assert!(t.search("y ", true).is_empty());
+    }
+
+    #[test]
+    fn busca_con_anchos() {
+        let mut t = Terminal::new(2, 20, 0);
+        t.process("ab中文cd".as_bytes());
+        assert_eq!(t.search("中", true), vec![m(0, 2, 4)]);
+        assert_eq!(t.search("文c", true), vec![m(0, 4, 7)]);
+        assert_eq!(t.search("b中", true), vec![m(0, 1, 4)]);
+        assert_eq!(t.search("cd", true), vec![m(0, 6, 8)]);
+        assert_eq!(t.search("中文", true), vec![m(0, 2, 6)]);
+        let mut t = Terminal::new(2, 20, 0);
+        t.process("x😀y😀".as_bytes());
+        assert_eq!(t.search("y", true), vec![m(0, 3, 4)]);
+        assert_eq!(t.search("😀", true), vec![m(0, 1, 3), m(0, 4, 6)]);
+        // Minúsculas Unicode.
+        let mut t = Terminal::new(2, 20, 0);
+        t.process("ÁRBOL árbol".as_bytes());
+        assert_eq!(t.search("árbol", false).len(), 2);
+        assert_eq!(t.search("árbol", true), vec![m(0, 6, 11)]);
+    }
+
+    #[test]
+    fn busca_bordes() {
+        let t = Terminal::new(3, 10, 10);
+        assert!(t.search("x", true).is_empty());
+        assert!(t.search("", true).is_empty());
+        assert!(t.search(" ", false).is_empty());
+        // Scrollback 0: solo la pantalla, filas 0..rows.
+        let mut t = Terminal::new(3, 10, 0);
+        t.process(b"l0\r\nl1\r\nl2\r\nl3\r\nl4");
+        assert_eq!(t.scrollback_len(), 0);
+        assert!(t.search("l0", true).is_empty());
+        assert_eq!(t.search("l2", true), vec![m(0, 0, 2)]);
+        assert_eq!(t.search("l4", true), vec![m(2, 0, 2)]);
+        // Una línea partida por ancho no casa a través del corte (límite documentado).
+        let mut t = Terminal::new(3, 5, 0);
+        t.process(b"abcdefgh");
+        assert!(t.search("efg", true).is_empty());
+        assert_eq!(t.search("fgh", true), vec![m(1, 0, 3)]);
+    }
+
+    #[test]
+    fn busca_tras_redimensionar() {
+        let mut t = diez();
+        t.resize(3, 5);
+        for i in 0..10 {
+            let r = t.search(&format!("l{i}"), true);
+            assert_eq!(r.len(), 1, "l{i}: {r:?}");
+        }
+        t.resize(6, 20);
+        let total = t.scrollback_len() + 6;
+        for i in 0..10 {
+            let r = t.search(&format!("l{i}"), true);
+            assert_eq!(r.len(), 1, "l{i}: {r:?}");
+            assert!(r[0].row < total);
+        }
+        t.resize(1, 20);
+        assert_eq!(t.search("l9", true).len(), 1);
+        assert!(
+            t.text_range((0, 0), (usize::MAX, u16::MAX), false)
+                .contains("l9")
+        );
+    }
+
+    #[test]
+    fn reveal_y_top() {
+        let mut t = diez();
+        assert_eq!(t.top_row(), 7);
+        t.reveal_row(0);
+        assert_eq!((t.top_row(), t.scroll_offset()), (0, 7));
+        t.reveal_row(4);
+        assert_eq!(t.top_row(), 3); // centrada: 4 - 3/2
+        t.reveal_row(2);
+        assert_eq!(t.top_row(), 1);
+        assert_eq!(t.screen().cells[0].text, "l");
+        assert_eq!(t.screen().cells[1].text, "1");
+        t.reveal_row(9);
+        assert_eq!((t.top_row(), t.scroll_offset()), (7, 0));
+        t.reveal_row(1000);
+        assert_eq!(t.top_row(), 7);
+        t.reveal_row(8);
+        assert_eq!(t.top_row(), 7);
+        t.scroll_view(2);
+        assert_eq!(t.top_row(), 5);
+    }
+
+    #[test]
+    fn reveal_en_pantalla_alternativa_no_hace_nada() {
+        let mut t = diez();
+        t.process(b"\x1b[?1049h");
+        assert!(t.alternate_screen());
+        assert_eq!(t.top_row(), 0);
+        t.process(b"alt");
+        t.reveal_row(5);
+        assert_eq!((t.top_row(), t.scroll_offset()), (0, 0));
+        // Sin scrollback: solo se busca en la pantalla alternativa.
+        assert_eq!(t.search("alt", true), vec![m(0, 0, 3)]);
+        assert!(t.search("l0", true).is_empty());
+        t.process(b"\x1b[?1049l");
+        assert_eq!(t.search("l0", true), vec![m(0, 0, 2)]);
+    }
+
+    #[test]
+    fn reveal_sin_scrollback() {
+        let mut t = Terminal::new(3, 10, 0);
+        t.process(b"a");
+        t.reveal_row(2);
+        assert_eq!((t.top_row(), t.scroll_offset()), (0, 0));
+    }
+
+    #[test]
+    fn texto_basico() {
+        let mut t = Terminal::new(4, 10, 10);
+        t.process(b"foo   \r\nbar\r\n\r\nbaz");
+        assert_eq!(t.text_range((0, 0), (1, 2), false), "foo\nbar");
+        assert_eq!(t.text_range((1, 2), (0, 0), false), "foo\nbar");
+        assert_eq!(t.text_range((0, 1), (0, 1), false), "o");
+        assert_eq!(t.text_range((0, 1), (3, 1), false), "oo\nbar\n\nba");
+        assert_eq!(t.text_range((0, 0), (99, 99), false), "foo\nbar\n\nbaz");
+        assert_eq!(t.text_range((0, 4), (0, 9), false), "");
+        assert_eq!(t.text_range((2, 0), (2, 5), false), "");
+    }
+
+    #[test]
+    fn texto_bloque() {
+        let mut t = Terminal::new(3, 10, 0);
+        t.process(b"abcd\r\nefgh\r\nijkl");
+        assert_eq!(t.text_range((0, 1), (2, 2), true), "bc\nfg\njk");
+        assert_eq!(t.text_range((2, 2), (0, 1), true), "bc\nfg\njk");
+        assert_eq!(t.text_range((2, 1), (0, 2), true), "bc\nfg\njk");
+        assert_eq!(t.text_range((0, 3), (1, 6), true), "d\nh");
+        assert_eq!(t.text_range((1, 2), (1, 2), true), "g");
+        assert_eq!(t.text_range((0, 0), (2, 99), true), "abcd\nefgh\nijkl");
+    }
+
+    #[test]
+    fn texto_con_wrap_y_scrollback() {
+        let mut t = Terminal::new(2, 5, 10);
+        t.process(b"abcdefgh\r\nxy\r\nlast");
+        // abcde (wrap) fgh / xy / last: scrollback 2 filas.
+        assert_eq!(t.scrollback_len(), 2);
+        assert_eq!(t.text_range((0, 0), (3, 3), false), "abcdefgh\nxy\nlast");
+        assert_eq!(t.text_range((0, 3), (1, 1), false), "defg");
+        assert_eq!(t.text_range((1, 0), (2, 1), false), "fgh\nxy");
+        // El bloque no une líneas partidas.
+        assert_eq!(t.text_range((0, 0), (1, 1), true), "ab\nfg");
+        // Una vista desplazada no cambia el resultado.
+        t.scroll_view(2);
+        assert_eq!(t.text_range((0, 0), (3, 3), false), "abcdefgh\nxy\nlast");
+        assert_eq!(t.scroll_offset(), 2);
+    }
+
+    #[test]
+    fn texto_con_anchos() {
+        let mut t = Terminal::new(2, 10, 0);
+        t.process("中文a😀".as_bytes());
+        // cols: 中 0-1, 文 2-3, a 4, 😀 5-6
+        assert_eq!(t.text_range((0, 0), (0, 0), false), "中");
+        assert_eq!(t.text_range((0, 1), (0, 1), false), "中");
+        assert_eq!(t.text_range((0, 1), (0, 2), false), "中文");
+        assert_eq!(t.text_range((0, 3), (0, 4), false), "文a");
+        assert_eq!(t.text_range((0, 0), (0, 9), false), "中文a😀");
+        assert_eq!(t.text_range((0, 6), (0, 6), false), "😀");
+        assert_eq!(t.text_range((0, 3), (0, 3), true), "文");
+        assert_eq!(t.text_range((0, 1), (0, 4), true), "中文a");
+    }
+
+    #[test]
+    fn texto_buffer_vacio() {
+        let t = Terminal::new(2, 5, 0);
+        assert_eq!(t.text_range((0, 0), (0, 4), false), "");
+        assert_eq!(t.text_range((0, 0), (1, 4), false), "\n");
+        assert_eq!(t.text_range((0, 0), (0, 4), true), "");
+    }
+
+    /// Rendimiento: `cargo test -p friki-term --release -- --ignored --nocapture busca_rapido`.
+    /// Medido en release (Apple Silicon, 10 040 filas x 120 cols, sin distinguir mayúsculas,
+    /// 10 039 coincidencias, incluye clonar la pantalla): ~26 ms. Umbral: 50 ms.
+    #[test]
+    #[ignore]
+    fn busca_rapido() {
+        let mut t = Terminal::new(40, 120, 10_000);
+        let mut s = String::new();
+        for i in 0..10_040 {
+            s.push_str(&format!(
+                "{i:05} línea de prueba con texto largo para rellenar la fila ok\r\n"
+            ));
+        }
+        t.process(s.as_bytes());
+        assert_eq!(t.scrollback_len(), 10_000);
+        let t0 = std::time::Instant::now();
+        let r = t.search("rellenar", false);
+        let dt = t0.elapsed();
+        eprintln!(
+            "buscar en {} filas: {dt:?} ({} coincidencias)",
+            t.scrollback_len() + 40,
+            r.len()
+        );
+        assert!(r.len() >= 10_000);
+        assert!(dt < std::time::Duration::from_millis(50), "{dt:?}");
     }
 }
