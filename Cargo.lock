@@ -1564,11 +1564,16 @@ dependencies = [
  "async-trait",
  "clap",
  "friki-core",
+ "friki-script",
+ "friki-serial",
  "friki-ssh",
  "friki-term",
  "friki-tui",
+ "friki-xfer",
  "rpassword",
+ "russh-sftp",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
