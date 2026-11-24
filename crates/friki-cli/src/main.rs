@@ -2,16 +2,19 @@
 //! 0 correcto, 250 uso, 251 red, 252 autenticación, 253 clave de host, 254 otros.
 //! Caben en 8 bits (Unix trunca módulo 256) y no chocan con los códigos habituales.
 
-use std::io::{IsTerminal, Write};
+use std::future::Future;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
 use friki_core::config::{self, SessionConfig};
-use friki_core::known_hosts::{HostKey, HostKeyStatus, KnownHosts};
+use friki_core::known_hosts::{HostKey, HostKeyStatus};
 use friki_core::paths;
-use friki_ssh::{AuthPrompter, Connection, HostKeyDecision, HostKeyVerifier};
+use friki_ssh::{AuthPrompter, Connection, HostKeyDecision, KnownHostsVerifier, Zeroizing};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Parser)]
 #[command(name = "friki", version, about = "Cliente SSH de terminal")]
@@ -84,7 +87,7 @@ struct ExecArgs {
     /// Comando remoto; se une con espacios.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
-    /// Imprime `{"stdout","stderr","exit_status"}` en vez de la salida cruda.
+    /// Imprime `{"stdout","stderr","exit_status","exit_signal"}` en vez de la salida cruda.
     #[arg(long)]
     json: bool,
 }
@@ -138,10 +141,32 @@ async fn main() {
     match run(cli).await {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            eprintln!("friki: {err:#}");
+            eprintln!("friki: {}", sanitize_remote(&format!("{err:#}")));
             std::process::exit(exit_code(&err));
         }
     }
+}
+
+/// Error de uso (destino o argumentos no válidos): sale con `EXIT_USAGE`.
+#[derive(Debug)]
+struct UsageError(String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+/// Quita del texto remoto (nombres, instrucciones, prompts, avisos) los caracteres
+/// de control C0, DEL y C1, para que un servidor no inyecte secuencias de escape en
+/// la terminal. Cada control se sustituye por un espacio, así `\n` no rompe la línea.
+fn sanitize_remote(texto: &str) -> String {
+    texto
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 async fn run(cli: Cli) -> anyhow::Result<i32> {
@@ -161,6 +186,9 @@ const EXIT_OTHER: i32 = 254;
 
 /// Código de salida de la CLI según el error (ARCHITECTURE.md).
 pub fn exit_code(err: &anyhow::Error) -> i32 {
+    if err.downcast_ref::<UsageError>().is_some() {
+        return EXIT_USAGE;
+    }
     if let Some(e) = err.downcast_ref::<friki_ssh::Error>() {
         return match e {
             friki_ssh::Error::Network(_) => EXIT_NETWORK,
@@ -183,7 +211,12 @@ fn home_dir() -> anyhow::Result<PathBuf> {
 
 fn load_target(target: &str) -> anyhow::Result<SessionConfig> {
     let sessions = config::load_sessions(&paths::sessions_dir())?;
-    config::resolve_target(&sessions, target).ok_or_else(|| anyhow!("destino no válido: {target}"))
+    resolver_destino(&sessions, target)
+}
+
+fn resolver_destino(sessions: &[SessionConfig], target: &str) -> anyhow::Result<SessionConfig> {
+    config::resolve_target(sessions, target)
+        .ok_or_else(|| UsageError(format!("destino no válido: {target}")).into())
 }
 
 async fn ssh(args: SshArgs) -> anyhow::Result<i32> {
@@ -192,27 +225,25 @@ async fn ssh(args: SshArgs) -> anyhow::Result<i32> {
     friki_tui::run(cfg).await
 }
 
-/// Acepta solo claves ya conocidas en `known_hosts`; desconocidas o cambiadas se rechazan.
-struct StrictVerifier {
-    known: KnownHosts,
-}
-
-#[async_trait::async_trait]
-impl HostKeyVerifier for StrictVerifier {
-    async fn verify(&self, host: &str, port: u16, key: &HostKey) -> HostKeyDecision {
-        match self.known.check(host, port, key) {
-            HostKeyStatus::Known => HostKeyDecision::AcceptOnce,
-            status => {
-                let motivo = match status {
-                    HostKeyStatus::Changed { .. } => "clave cambiada",
-                    HostKeyStatus::Revoked => "clave revocada",
-                    _ => "clave desconocida",
-                };
-                eprintln!("friki: {motivo} para {host} ({})", key.fingerprint_sha256());
-                HostKeyDecision::Reject
-            }
-        }
-    }
+/// Verificador de claves de host sin diálogo: `known_hosts` acepta lo conocido y
+/// `ask` rechaza siempre lo desconocido o cambiado (la CLI no pregunta).
+fn rechazar_clave(
+    host: &str,
+    port: u16,
+    key: &HostKey,
+    estado: HostKeyStatus,
+) -> Pin<Box<dyn Future<Output = HostKeyDecision> + Send>> {
+    let motivo = if matches!(estado, HostKeyStatus::Changed { .. }) {
+        "clave cambiada"
+    } else {
+        "clave desconocida"
+    };
+    eprintln!(
+        "friki: {motivo} para {}:{port} ({})",
+        sanitize_remote(host),
+        key.fingerprint_sha256()
+    );
+    Box::pin(async { HostKeyDecision::Reject })
 }
 
 /// Pide secretos por terminal sin eco; sin TTY no pregunta nada.
@@ -221,15 +252,19 @@ struct TerminalPrompter {
 }
 
 /// Lee una línea (con eco) o una contraseña (sin eco) fuera del runtime async.
-async fn ask(text: String, echo: bool) -> Option<String> {
+/// El texto (que puede venir del servidor) se sanea antes de mostrarlo.
+async fn ask(text: &str, echo: bool) -> Option<Zeroizing<String>> {
+    let text = sanitize_remote(text);
     tokio::task::spawn_blocking(move || {
         if echo {
             eprint!("{text}");
-            let mut line = String::new();
+            let mut line = Zeroizing::new(String::new());
             std::io::stdin().read_line(&mut line).ok()?;
-            Some(line.trim_end_matches(['\r', '\n']).to_string())
+            Some(Zeroizing::new(
+                line.trim_end_matches(['\r', '\n']).to_string(),
+            ))
         } else {
-            rpassword::prompt_password(text).ok()
+            rpassword::prompt_password(text).ok().map(Zeroizing::new)
         }
     })
     .await
@@ -239,18 +274,18 @@ async fn ask(text: String, echo: bool) -> Option<String> {
 
 #[async_trait::async_trait]
 impl AuthPrompter for TerminalPrompter {
-    async fn password(&self, user: &str, host: &str) -> Option<String> {
+    async fn password(&self, user: &str, host: &str) -> Option<Zeroizing<String>> {
         if !self.interactive {
             return None;
         }
-        ask(format!("{user}@{host}'s password: "), false).await
+        ask(&format!("{user}@{host}'s password: "), false).await
     }
 
-    async fn passphrase(&self, key_path: &Path) -> Option<String> {
+    async fn passphrase(&self, key_path: &Path) -> Option<Zeroizing<String>> {
         if !self.interactive {
             return None;
         }
-        ask(format!("Passphrase for {}: ", key_path.display()), false).await
+        ask(&format!("Passphrase for {}: ", key_path.display()), false).await
     }
 
     async fn keyboard_interactive(
@@ -258,19 +293,19 @@ impl AuthPrompter for TerminalPrompter {
         name: &str,
         instructions: &str,
         prompts: &[(String, bool)],
-    ) -> Option<Vec<String>> {
+    ) -> Option<Vec<Zeroizing<String>>> {
         if !self.interactive {
             return None;
         }
         if !name.is_empty() {
-            eprintln!("{name}");
+            eprintln!("{}", sanitize_remote(name));
         }
         if !instructions.is_empty() {
-            eprintln!("{instructions}");
+            eprintln!("{}", sanitize_remote(instructions));
         }
         let mut answers = Vec::with_capacity(prompts.len());
         for (text, echo) in prompts {
-            answers.push(ask(text.clone(), *echo).await?);
+            answers.push(ask(text, *echo).await?);
         }
         Some(answers)
     }
@@ -279,32 +314,61 @@ impl AuthPrompter for TerminalPrompter {
 async fn exec(args: ExecArgs) -> anyhow::Result<i32> {
     let mut cfg = load_target(&args.target)?;
     args.conn.apply(&mut cfg);
-    let known = KnownHosts::load(&paths::known_hosts_file())?;
-    let verifier = Arc::new(StrictVerifier { known });
+    let verifier = Arc::new(KnownHostsVerifier::new(
+        paths::known_hosts_file(),
+        rechazar_clave,
+    ));
     let prompter = Arc::new(TerminalPrompter {
         interactive: std::io::stdin().is_terminal(),
     });
 
     let conn = Connection::connect(&cfg, verifier, prompter).await?;
-    let out = conn.exec(&args.command.join(" ")).await?;
-    let _ = conn.disconnect().await;
-
-    if args.json {
+    for aviso in conn.warnings() {
+        eprintln!("friki: aviso: {}", sanitize_remote(&aviso));
+    }
+    let comando = args.command.join(" ");
+    let (exit_status, exit_signal) = if args.json {
+        let out = conn.exec(&comando).await?;
         let doc = serde_json::json!({
             "stdout": String::from_utf8_lossy(&out.stdout),
             "stderr": String::from_utf8_lossy(&out.stderr),
             "exit_status": out.exit_status,
+            "exit_signal": out.exit_signal,
         });
         println!("{doc}");
+        (out.exit_status, out.exit_signal)
     } else {
-        std::io::stdout().write_all(&out.stdout)?;
-        std::io::stderr().write_all(&out.stderr)?;
-    }
+        // Con stdin de terminal no se reenvía nada: el remoto recibe EOF de inmediato.
+        let mut stdout = tokio::io::stdout();
+        let mut stderr = tokio::io::stderr();
+        let st = if std::io::stdin().is_terminal() {
+            conn.exec_streaming(&comando, tokio::io::empty(), &mut stdout, &mut stderr)
+                .await?
+        } else {
+            conn.exec_streaming(&comando, tokio::io::stdin(), &mut stdout, &mut stderr)
+                .await?
+        };
+        stdout.flush().await?;
+        stderr.flush().await?;
+        (st.exit_status, st.exit_signal)
+    };
+    let _ = conn.disconnect().await;
+    codigo_remoto(exit_status, exit_signal.as_deref())
+}
 
-    match out.exit_status {
+/// Código de salida de un comando remoto: su estado, o 128+N si lo mató la señal N.
+/// Sin estado ni señal el servidor cerró sin decir nada: error de red (251).
+fn codigo_remoto(exit_status: Option<u32>, exit_signal: Option<&str>) -> anyhow::Result<i32> {
+    if let Some(signal) = exit_signal {
+        return Ok(friki_ssh::exit_code_for_signal(signal));
+    }
+    match exit_status {
         // Los estados de salida de POSIX son de 8 bits.
         Some(status) => Ok((status & 0xff) as i32),
-        None => bail!("el servidor no envió estado de salida"),
+        None => Err(friki_ssh::Error::Network(
+            "el servidor no envió estado de salida ni señal".into(),
+        )
+        .into()),
     }
 }
 
@@ -334,8 +398,7 @@ fn sessions(action: SessionsAction) -> anyhow::Result<()> {
             if config::load_sessions(&dir)?.iter().any(|s| s.name == name) {
                 bail!("la sesión '{name}' ya existe");
             }
-            let mut session = config::resolve_target(&[], &target)
-                .ok_or_else(|| anyhow!("destino no válido: {target}"))?;
+            let mut session = resolver_destino(&[], &target)?;
             session.name = name.clone();
             let path = config::save_session(&dir, &session)?;
             println!("Sesión '{name}' guardada en {}", path.display());
@@ -345,7 +408,10 @@ fn sessions(action: SessionsAction) -> anyhow::Result<()> {
                 Some(p) => p,
                 None => home_dir()?.join(".ssh").join("config"),
             };
-            let imported = config::import_ssh_config(&path)?;
+            let (imported, avisos) = config::import_ssh_config_report(&path)?;
+            for aviso in avisos {
+                eprintln!("friki: aviso: {}", sanitize_remote(&aviso));
+            }
             let existing: Vec<String> = config::load_sessions(&dir)?
                 .into_iter()
                 .map(|s| s.name)
@@ -415,25 +481,25 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_red_es_100() {
+    fn exit_code_red_es_251() {
         let e = anyhow::Error::from(friki_ssh::Error::Network("x".into()));
         assert_eq!(exit_code(&e), EXIT_NETWORK);
     }
 
     #[test]
-    fn exit_code_auth_es_200() {
+    fn exit_code_auth_es_252() {
         let e = anyhow::Error::from(friki_ssh::Error::Auth("x".into()));
         assert_eq!(exit_code(&e), EXIT_AUTH);
     }
 
     #[test]
-    fn exit_code_clave_de_host_es_300() {
+    fn exit_code_clave_de_host_es_253() {
         let e = anyhow::Error::from(friki_ssh::Error::HostKey("x".into()));
         assert_eq!(exit_code(&e), EXIT_HOST_KEY);
     }
 
     #[test]
-    fn exit_code_negociacion_y_otros_son_400() {
+    fn exit_code_negociacion_y_otros_son_254() {
         let neg = anyhow::Error::from(friki_ssh::Error::Negotiation("x".into()));
         let otro = anyhow::Error::from(friki_ssh::Error::Other("x".into()));
         assert_eq!(exit_code(&neg), EXIT_OTHER);
@@ -441,13 +507,13 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_error_de_core_es_400() {
+    fn exit_code_error_de_core_es_254() {
         let e = anyhow::Error::from(friki_core::Error::Secret("x".into()));
         assert_eq!(exit_code(&e), EXIT_OTHER);
     }
 
     #[test]
-    fn exit_code_error_ajeno_es_400() {
+    fn exit_code_error_ajeno_es_254() {
         assert_eq!(exit_code(&anyhow!("otro")), EXIT_OTHER);
     }
 
@@ -455,6 +521,50 @@ mod tests {
     fn exit_code_atraviesa_contexto() {
         let e = anyhow::Error::from(friki_ssh::Error::Auth("x".into())).context("conectando");
         assert_eq!(exit_code(&e), EXIT_AUTH);
+    }
+
+    #[test]
+    fn error_de_uso_es_250() {
+        let e = anyhow::Error::from(UsageError("destino no válido: host:abc".into()));
+        assert_eq!(exit_code(&e), EXIT_USAGE);
+    }
+
+    #[test]
+    fn destino_no_valido_es_error_de_uso() {
+        let err = resolver_destino(&[], "host:abc").expect_err("puerto no numérico");
+        assert_eq!(exit_code(&err), EXIT_USAGE);
+    }
+
+    #[test]
+    fn sanitize_quita_escapes_y_controles() {
+        assert_eq!(sanitize_remote("ok\x1b[2Jx"), "ok [2Jx");
+        assert_eq!(sanitize_remote("a\rb\x07c\x00d"), "a b c d");
+        assert_eq!(sanitize_remote("\x7f"), " ");
+    }
+
+    #[test]
+    fn sanitize_quita_c1_y_respeta_texto_normal() {
+        assert_eq!(sanitize_remote("\u{9b}31mrojo"), " 31mrojo");
+        assert_eq!(sanitize_remote("Contraseña: ñ 日本"), "Contraseña: ñ 日本");
+    }
+
+    #[test]
+    fn sanitize_sustituye_saltos_de_linea() {
+        assert_eq!(sanitize_remote("Introduce\nPIN:"), "Introduce PIN:");
+    }
+
+    #[test]
+    fn codigo_remoto_estado_y_senal() {
+        assert_eq!(codigo_remoto(Some(0), None).ok(), Some(0));
+        assert_eq!(codigo_remoto(Some(300), None).ok(), Some(44));
+        assert_eq!(codigo_remoto(None, Some("KILL")).ok(), Some(137));
+        assert_eq!(codigo_remoto(None, Some("SIGTERM")).ok(), Some(143));
+    }
+
+    #[test]
+    fn codigo_remoto_sin_estado_ni_senal_es_red() {
+        let e = codigo_remoto(None, None).expect_err("sin estado");
+        assert_eq!(exit_code(&e), EXIT_NETWORK);
     }
 
     #[test]
