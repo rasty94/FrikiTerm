@@ -134,6 +134,28 @@ impl Terminal {
         s.set_scrollback(usize::try_from(target).unwrap_or(0));
     }
 
+    /// Líneas que la vista está desplazada hacia atrás (0 = al final).
+    pub fn scroll_offset(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    /// Líneas de historial disponibles.
+    pub fn scrollback_len(&self) -> usize {
+        self.parser.screen().scrollback_len()
+    }
+
+    /// El remoto está en la pantalla alternativa (vim, less...; sin scrollback).
+    pub fn alternate_screen(&self) -> bool {
+        self.parser.screen().alternate_screen()
+    }
+
+    /// `true` si el texto tiene varias líneas y el remoto no activó bracketed
+    /// paste: la TUI debe pedir confirmación antes de enviarlo.
+    pub fn paste_needs_confirmation(&self, text: &str) -> bool {
+        text.trim_end_matches(['\n', '\r']).contains(['\n', '\r'])
+            && !self.parser.screen().bracketed_paste()
+    }
+
     pub fn screen(&self) -> Screen {
         let s = self.parser.screen();
         let (rows, cols) = (s.size().0.get(), s.size().1.get());
@@ -166,7 +188,9 @@ impl Terminal {
             cells,
             cursor: s.cursor_position(),
             cursor_visible: !s.hide_cursor() && s.scrollback() == 0,
-            title: self.parser.callbacks().title.clone(),
+            title: (self.parser.callbacks().title.chars())
+                .filter(|c| !c.is_control())
+                .collect(),
         }
     }
 
@@ -250,10 +274,14 @@ impl Terminal {
         .into_bytes()
     }
 
-    /// Usa bracketed paste si el remoto lo activó. Se elimina ESC del texto para
-    /// que no pueda cerrar el modo (`ESC[201~`) ni inyectar secuencias.
+    /// Usa bracketed paste si el remoto lo activó. Se eliminan todos los
+    /// controles (C0 salvo tab/LF/CR, DEL y C1) para que no puedan cerrar el modo
+    /// (`ESC[201~`), enviar Ctrl+C ni inyectar secuencias.
     pub fn encode_paste(&self, text: &str) -> Vec<u8> {
-        let clean = text.replace('\x1b', "");
+        let clean: String = text
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+            .collect();
         if self.parser.screen().bracketed_paste() {
             format!("\x1b[200~{clean}\x1b[201~").into_bytes()
         } else {
@@ -262,13 +290,18 @@ impl Terminal {
     }
 }
 
-const PROMPTS: [&str; 9] = [
+const PROMPTS: [&str; 14] = [
     "password",
     "passphrase",
+    "passcode",
     "contraseña",
+    "clave",
     "passwort",
+    "kennwort",
     "mot de passe",
     "senha",
+    "secret",
+    "token",
     "verification code",
     "pin",
     "otp",
@@ -296,39 +329,134 @@ enum St {
     StrEsc,
 }
 
+/// Quita secuencias de escape y controles (salvo `\t` y `\n`), byte a byte.
+struct Filter(St);
+
+impl Filter {
+    fn feed(&mut self, b: u8, out: &mut Vec<u8>) {
+        match self.0 {
+            St::Text => match b {
+                0x1b => self.0 = St::Esc,
+                b'\t' | b'\n' | 0x20..=0x7e | 0x80..=0xff => out.push(b),
+                _ => {}
+            },
+            St::Esc => {
+                self.0 = match b {
+                    b'[' => St::Csi,
+                    b']' | b'P' | b'X' | b'^' | b'_' => St::Str,
+                    0x20..=0x2f => St::Esc,
+                    _ => St::Text,
+                }
+            }
+            St::Csi => {
+                if (0x40..=0x7e).contains(&b) {
+                    self.0 = St::Text;
+                }
+            }
+            St::Str => match b {
+                0x07 => self.0 = St::Text,
+                0x1b => self.0 = St::StrEsc,
+                _ => {}
+            },
+            St::StrEsc => self.0 = if b == b'\\' { St::Text } else { St::Str },
+        }
+    }
+}
+
 /// Registro de sesión. La salida se registra siempre; la entrada solo si
-/// `log_input`, y nunca la línea que sigue a un aviso de contraseña o
-/// passphrase visto en la salida (se escribe `[entrada oculta]`).
+/// `log_input`, y nunca la entrada tras un aviso de contraseña/passphrase visto
+/// en la salida (se escribe `[entrada oculta]`) hasta el siguiente Enter.
+///
+/// Límite conocido: no se detecta una contraseña por falta de eco del remoto
+/// (el eco llega de forma asíncrona respecto a la entrada, la heurística no es
+/// fiable); solo se detecta por el texto del aviso.
 pub struct SessionLogger {
     file: File,
     log_input: bool,
-    esc: St,
-    /// Última línea de salida sin terminar (ya sin secuencias de escape).
+    out_filter: Filter,
+    in_filter: Filter,
+    /// Línea de salida en curso (ya sin secuencias de escape).
     line: Vec<u8>,
-    hidden: bool,
+    /// Última línea de salida no vacía y terminada.
+    last: Vec<u8>,
+    /// Se ha visto un aviso desde el último Enter de la entrada.
+    armed: bool,
+    /// Ya se escribió el marcador de entrada oculta en esta línea.
+    marked: bool,
+}
+
+/// Fecha local AAAA-MM-DD. `time` rechaza obtener el desfase local si hay
+/// varios hilos (evita la carrera de `localtime_r`/`setenv`); en ese caso UTC.
+fn today() -> String {
+    let d = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+}
+
+/// Solo `[A-Za-z0-9._-]`; `.`, `..` y vacío pasan a `_`.
+fn safe_name(s: &str) -> String {
+    let r: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if r.is_empty() || r == "." || r == ".." {
+        "_".into()
+    } else {
+        r
+    }
+}
+
+fn invalid(msg: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, msg.to_owned())
 }
 
 impl SessionLogger {
-    /// Expande `%S`, `%H` y `%D` en `cfg.path`, relativo a `base_dir`.
+    /// Expande `%S`, `%H` y `%D` en `cfg.path`, relativo a `base_dir`. Rechaza
+    /// rutas absolutas, con `..` o que acaben fuera de `base_dir`.
     pub fn open(
         cfg: &LogConfig,
         base_dir: &Path,
         session: &str,
         host: &str,
     ) -> std::io::Result<Self> {
-        let clean = |s: &str| s.replace(['/', '\\', ':', '\0'], "_").replace("..", "_");
-        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        use std::path::Component;
+        if !cfg
+            .path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(invalid("ruta de log fuera del directorio base"));
+        }
         let raw = cfg.path.to_string_lossy();
         let expanded = raw
-            .replace("%S", &clean(session))
-            .replace("%H", &clean(host))
-            .replace("%D", &date);
+            .replace("%S", &safe_name(session))
+            .replace("%H", &safe_name(host))
+            .replace("%D", &today());
         let path = base_dir.join(expanded);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+        let Some(dir) = path.parent() else {
+            return Err(invalid("ruta de log sin directorio"));
+        };
+        let mut db = std::fs::DirBuilder::new();
+        db.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut db, 0o700);
+        db.create(dir)?;
+        // Un enlace simbólico en un directorio intermedio no debe sacarnos de base_dir.
+        if !dir.canonicalize()?.starts_with(base_dir.canonicalize()?) {
+            return Err(invalid("ruta de log fuera del directorio base"));
         }
         let mut oo = std::fs::OpenOptions::new();
         oo.create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            oo.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
         if cfg.append {
             oo.append(true);
         } else {
@@ -337,51 +465,43 @@ impl SessionLogger {
         Ok(Self {
             file: oo.open(path)?,
             log_input: cfg.log_input,
-            esc: St::Text,
+            out_filter: Filter(St::Text),
+            in_filter: Filter(St::Text),
             line: Vec::new(),
-            hidden: false,
+            last: Vec::new(),
+            armed: false,
+            marked: false,
         })
     }
 
     pub fn log_output(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut out = Vec::with_capacity(bytes.len());
         for &b in bytes {
-            match self.esc {
-                St::Text => match b {
-                    0x1b => self.esc = St::Esc,
-                    b'\n' => {
-                        out.push(b);
-                        self.line.clear();
-                    }
-                    b'\t' | 0x20..=0x7e | 0x80..=0xff => {
-                        out.push(b);
-                        self.line.push(b);
-                    }
-                    _ => {}
-                },
-                St::Esc => {
-                    self.esc = match b {
-                        b'[' => St::Csi,
-                        b']' | b'P' | b'X' | b'^' | b'_' => St::Str,
-                        0x20..=0x2f => St::Esc,
-                        _ => St::Text,
-                    }
+            let n = out.len();
+            self.out_filter.feed(b, &mut out);
+            if out.len() == n {
+                continue;
+            }
+            if b == b'\n' {
+                if !self.line.iter().all(u8::is_ascii_whitespace) {
+                    self.last = std::mem::take(&mut self.line);
                 }
-                St::Csi => {
-                    if (0x40..=0x7e).contains(&b) {
-                        self.esc = St::Text;
-                    }
-                }
-                St::Str => match b {
-                    0x07 => self.esc = St::Text,
-                    0x1b => self.esc = St::StrEsc,
-                    _ => {}
-                },
-                St::StrEsc => self.esc = if b == b'\\' { St::Text } else { St::Str },
+                self.line.clear();
+            } else {
+                self.line.push(b);
             }
         }
         if self.line.len() > 512 {
             self.line.drain(..self.line.len() - 256);
+        }
+        // Aviso en la línea inacabada, o en la última no vacía (`Password:\r\n`).
+        let ctx = if self.line.iter().all(u8::is_ascii_whitespace) {
+            &self.last
+        } else {
+            &self.line
+        };
+        if is_password_prompt(&String::from_utf8_lossy(ctx)) {
+            self.armed = true;
         }
         self.file.write_all(&out)
     }
@@ -390,19 +510,27 @@ impl SessionLogger {
         if !self.log_input {
             return Ok(());
         }
-        if !self.hidden && is_password_prompt(&String::from_utf8_lossy(&self.line)) {
-            self.hidden = true;
-            self.file.write_all("[entrada oculta]".as_bytes())?;
-        }
-        if self.hidden {
-            if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
-                self.hidden = false;
-                self.line.clear();
-                self.file.write_all(b"\n")?;
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            let enter = b == b'\r' || b == b'\n';
+            if self.armed {
+                if !self.marked {
+                    self.marked = true;
+                    out.extend_from_slice("[entrada oculta]".as_bytes());
+                }
+                if enter {
+                    self.armed = false;
+                    self.marked = false;
+                    self.last.clear();
+                    out.push(b'\n');
+                }
+            } else if enter {
+                out.push(b'\n');
+            } else {
+                self.in_filter.feed(b, &mut out);
             }
-            return Ok(());
         }
-        self.file.write_all(bytes)
+        self.file.write_all(&out)
     }
 }
 
@@ -592,7 +720,7 @@ mod tests {
                 "{prompt}: {r}"
             );
             assert!(r.contains("[entrada oculta]"), "{prompt}");
-            assert!(r.ends_with("ls\r"), "{prompt}: {r:?}");
+            assert!(r.ends_with("ls\n"), "{prompt}: {r:?}");
             let _ = std::fs::remove_dir_all(&d);
         }
     }
@@ -601,5 +729,127 @@ mod tests {
     fn prompt_normal_no_oculta() {
         assert!(!is_password_prompt("user@host:~/shopping$ "));
         assert!(is_password_prompt("user@host's PASSWORD: "));
+    }
+
+    #[test]
+    fn prompt_con_salto_de_linea() {
+        let d = tmp("nl");
+        let mut l = logger(&d, true);
+        l.log_output(b"Password:\r\n").unwrap();
+        l.log_input(b"hunter2\r").unwrap();
+        l.log_output(b"$ ").unwrap();
+        l.log_input(b"ls\r").unwrap();
+        let r = read(&d);
+        assert!(!r.contains("hunter2"), "{r:?}");
+        assert!(r.ends_with("[entrada oculta]\n$ ls\n"), "{r:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entrada_antes_del_aviso_y_palabras_nuevas() {
+        let d = tmp("pre");
+        let mut l = logger(&d, true);
+        l.log_input(b"abc").unwrap();
+        l.log_output(b"Enter token: ").unwrap();
+        l.log_input(b"hunter2\r").unwrap();
+        assert!(!read(&d).contains("hunter2"));
+        for p in ["Passcode:", "Clave:", "Kennwort:", "secret> "] {
+            assert!(is_password_prompt(p), "{p}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn entrada_filtrada() {
+        let d = tmp("esc");
+        let mut l = logger(&d, true);
+        l.log_input(b"a\x1b]0;x\x07b\x07c\x1b[Ad\r").unwrap();
+        assert_eq!(read(&d), "abcd\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn host_malicioso_y_rutas() {
+        let d = tmp("path");
+        let cfg = |p: &str| LogConfig {
+            path: p.into(),
+            append: true,
+            log_input: false,
+        };
+        SessionLogger::open(&cfg("%H.log"), &d, "s", "a\n../b\x1b").unwrap();
+        let names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["a_.._b_.log"]);
+        assert_eq!(safe_name(".."), "_");
+        assert_eq!(safe_name(""), "_");
+        for bad in ["/tmp/x.log", "../x.log", "a/../../x.log"] {
+            let e = SessionLogger::open(&cfg(bad), &d, "s", "h").err().unwrap();
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permisos_y_symlink() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let d = tmp("perm");
+        let _l = logger(&d, false);
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().mode() & 0o777;
+        assert_eq!(mode(&d.join("sub")), 0o700);
+        let f = std::fs::read_dir(d.join("sub")).unwrap().next().unwrap();
+        assert_eq!(mode(&f.unwrap().path()), 0o600);
+        // Enlace simbólico como fichero final: O_NOFOLLOW lo rechaza.
+        let cfg = LogConfig {
+            path: "ln.log".into(),
+            append: true,
+            log_input: false,
+        };
+        symlink(d.join("objetivo"), d.join("ln.log")).unwrap();
+        assert!(SessionLogger::open(&cfg, &d, "s", "h").is_err());
+        // Directorio enlazado hacia fuera de base_dir.
+        let fuera = tmp("fuera");
+        std::fs::create_dir_all(&fuera).unwrap();
+        symlink(&fuera, d.join("d")).unwrap();
+        let cfg = LogConfig {
+            path: "d/x.log".into(),
+            ..cfg
+        };
+        assert!(SessionLogger::open(&cfg, &d, "s", "h").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&fuera);
+    }
+
+    #[test]
+    fn pegado_sin_controles() {
+        let t = Terminal::new(5, 20, 0);
+        assert_eq!(t.encode_paste("a\x03b\u{9b}c\x7fd\te\r\n"), b"abcd\te\r\n");
+        assert!(t.paste_needs_confirmation("a\nb"));
+        assert!(!t.paste_needs_confirmation("a\n"));
+        assert!(!t.paste_needs_confirmation("a"));
+        let mut t = t;
+        t.process(b"\x1b[?2004h");
+        assert!(!t.paste_needs_confirmation("a\nb"));
+    }
+
+    #[test]
+    fn titulo_sin_c1() {
+        assert_eq!(term("\x1b]0;a\u{9b}b\x01c\x07").title, "abc");
+    }
+
+    #[test]
+    fn scroll_y_pantalla_alternativa() {
+        let mut t = Terminal::new(2, 10, 50);
+        t.process(b"uno\r\ndos\r\ntres\r\ncuatro");
+        assert_eq!((t.scroll_offset(), t.scrollback_len()), (0, 2));
+        t.scroll_view(1);
+        assert_eq!(t.scroll_offset(), 1);
+        t.scroll_view(99);
+        assert_eq!(t.scroll_offset(), 2);
+        assert!(!t.alternate_screen());
+        t.process(b"\x1b[?1049h");
+        assert!(t.alternate_screen());
     }
 }

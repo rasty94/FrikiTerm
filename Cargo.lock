@@ -1396,8 +1396,9 @@ dependencies = [
 name = "friki-term"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "friki-core",
+ "libc",
+ "time",
  "vt100",
 ]
 
