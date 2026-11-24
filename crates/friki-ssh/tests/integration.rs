@@ -163,11 +163,11 @@ async fn contrasena_mala_se_repite_hasta_agotar_intentos() {
     assert_eq!(p.1.load(Ordering::SeqCst), c.max_auth_attempts as usize);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "requiere OpenSSH de pruebas"]
 async fn clave_con_permisos_abiertos_se_ignora_con_aviso() {
     let Some(e) = env() else { return };
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
