@@ -1,6 +1,8 @@
 //! Sincronización de carpetas: comparación y plan de acciones con filtros (TODO.md §5).
 
-use crate::{RemoteFs, Result};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{Entry, Error, Kind, RemoteFs, Result, join, safe_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncMode {
@@ -55,8 +57,134 @@ pub enum Action {
     },
 }
 
+/// Clave de la caché para un par de raíces; el llamador guarda con ella el estado tras
+/// sincronizar (`DirCache::store`), p. ej. las entradas de ficheros de un lado.
+pub fn cache_key(
+    local: &dyn RemoteFs,
+    local_root: &str,
+    remote: &dyn RemoteFs,
+    remote_root: &str,
+) -> String {
+    format!(
+        "{}{}|{}{}",
+        local.label(),
+        local_root,
+        remote.label(),
+        remote_root
+    )
+}
+
+struct Pat {
+    glob: globset::GlobMatcher,
+    dir_only: bool,
+    base_only: bool,
+}
+
+/// Patrones: `x/` solo directorios; sin `/` interior se compara también con el nombre base.
+fn compile(pats: &[String]) -> Result<Vec<Pat>> {
+    pats.iter()
+        .map(|p| {
+            let dir_only = p.ends_with('/');
+            let t = p.trim_end_matches('/').trim_start_matches('/');
+            let glob = globset::Glob::new(t)
+                .map_err(|e| Error::Protocol(format!("patrón `{p}`: {e}")))?
+                .compile_matcher();
+            Ok(Pat {
+                glob,
+                dir_only,
+                base_only: !t.contains('/'),
+            })
+        })
+        .collect()
+}
+
+fn hit(pats: &[Pat], rel: &str, is_dir: bool) -> bool {
+    let base = rel.rsplit('/').next().unwrap_or(rel);
+    pats.iter().any(|p| {
+        (!p.dir_only || is_dir) && (p.glob.is_match(rel) || p.base_only && p.glob.is_match(base))
+    })
+}
+
+struct Filter {
+    inc: Vec<Pat>,
+    exc: Vec<Pat>,
+}
+
+impl Filter {
+    fn excluded(&self, rel: &str, is_dir: bool) -> bool {
+        hit(&self.exc, rel, is_dir)
+    }
+    /// `include` solo filtra ficheros; también vale que un directorio ascendente coincida.
+    fn included(&self, rel: &str) -> bool {
+        if self.inc.is_empty() || hit(&self.inc, rel, false) {
+            return true;
+        }
+        let mut p = rel;
+        while let Some((parent, _)) = p.rsplit_once('/') {
+            if hit(&self.inc, parent, true) {
+                return true;
+            }
+            p = parent;
+        }
+        false
+    }
+}
+
+type Tree = BTreeMap<String, Entry>;
+
+/// Recorre `root` (solo ficheros y directorios; nombres inseguros y excluidos se ignoran).
+async fn walk(fs: &dyn RemoteFs, root: &str, f: &Filter) -> Result<Tree> {
+    let mut out = Tree::new();
+    let mut stack = vec![String::new()];
+    while let Some(rel) = stack.pop() {
+        let dir = if rel.is_empty() {
+            root.to_string()
+        } else {
+            join(root, &rel)
+        };
+        let list = match fs.list(&dir).await {
+            Err(Error::NotFound(_)) if rel.is_empty() => continue,
+            r => r?,
+        };
+        for mut e in list {
+            if !safe_name(&e.name) || !matches!(e.kind, Kind::File | Kind::Dir) {
+                continue;
+            }
+            let p = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            let is_dir = e.kind == Kind::Dir;
+            if f.excluded(&p, is_dir) || (!is_dir && !f.included(&p)) {
+                continue;
+            }
+            if is_dir {
+                stack.push(p.clone());
+            }
+            e.path = p.clone();
+            out.insert(p, e);
+        }
+    }
+    Ok(out)
+}
+
+fn differs(a: &Entry, b: &Entry, tol: i64) -> bool {
+    a.size != b.size || matches!((a.mtime, b.mtime), (Some(x), Some(y)) if (x - y).abs() > tol)
+}
+
+fn is_dir(e: &Entry) -> bool {
+    e.kind == Kind::Dir
+}
+
 /// Compara `local_root` y `remote_root` y devuelve el plan sin ejecutar nada.
 /// Rutas del plan relativas a las raíces. Nombres remotos no seguros se ignoran.
+///
+/// Orden aplicable: creaciones y copias en orden de ruta (un directorio antes que su
+/// contenido), y al final los borrados (ficheros, luego directorios del más profundo al
+/// más superficial). Un mismo nombre que es fichero en un lado y directorio en el otro
+/// se informa como `Conflict`. En `Both` con caché, la caché debe contener el estado de
+/// ficheros de la última sincronización (clave: [`cache_key`]).
 pub async fn plan(
     local: &dyn RemoteFs,
     local_root: &str,
@@ -65,6 +193,90 @@ pub async fn plan(
     opts: &SyncOptions,
     cache: Option<&crate::cache::DirCache>,
 ) -> Result<Vec<Action>> {
-    let _ = (local, local_root, remote, remote_root, opts, cache);
-    todo!("friki-xfer: sync::plan")
+    let f = Filter {
+        inc: compile(&opts.filters.include)?,
+        exc: compile(&opts.filters.exclude)?,
+    };
+    let l = walk(local, local_root, &f).await?;
+    let r = walk(remote, remote_root, &f).await?;
+    let tol = opts.mtime_tolerance;
+    let mut acts = Vec::new();
+    let mut dels: Vec<(bool, Action)> = Vec::new(); // (es directorio, acción)
+
+    // `up`: el origen es el lado local.
+    let up_act = |up: bool, path: String, dir: bool| match (up, dir) {
+        (true, false) => Action::Upload { path },
+        (false, false) => Action::Download { path },
+        (true, true) => Action::MkdirRemote { path },
+        (false, true) => Action::MkdirLocal { path },
+    };
+
+    if opts.mode == SyncMode::Both {
+        let last: Tree = match cache {
+            Some(c) => c
+                .load(&cache_key(local, local_root, remote, remote_root))?
+                .into_iter()
+                .map(|e| (e.path.clone(), e))
+                .collect(),
+            None => Tree::new(),
+        };
+        let paths: BTreeSet<&String> = l.keys().chain(r.keys()).collect();
+        for p in paths {
+            let path = p.clone();
+            match (l.get(p), r.get(p)) {
+                (Some(a), None) => acts.push(up_act(true, path, is_dir(a))),
+                (None, Some(b)) => acts.push(up_act(false, path, is_dir(b))),
+                (Some(a), Some(b)) if is_dir(a) != is_dir(b) => {
+                    acts.push(Action::Conflict { path })
+                }
+                (Some(a), Some(_)) if is_dir(a) => {}
+                (Some(a), Some(b)) => {
+                    if !differs(a, b, tol) {
+                        continue;
+                    }
+                    let (lc, rc) = match last.get(p) {
+                        Some(c) => (differs(a, c, tol), differs(b, c, tol)),
+                        None => (true, true),
+                    };
+                    acts.push(match (lc, rc) {
+                        (true, false) => Action::Upload { path },
+                        (false, true) => Action::Download { path },
+                        _ if last.contains_key(p) && lc && rc => Action::Conflict { path },
+                        _ => match (a.mtime, b.mtime) {
+                            (Some(x), Some(y)) if x > y => Action::Upload { path },
+                            (Some(x), Some(y)) if y > x => Action::Download { path },
+                            _ => Action::Conflict { path },
+                        },
+                    });
+                }
+                (None, None) => {}
+            }
+        }
+    } else {
+        let up = opts.mode == SyncMode::Upload;
+        let (src, dst) = if up { (&l, &r) } else { (&r, &l) };
+        for (p, s) in src {
+            let path = p.clone();
+            match dst.get(p) {
+                None => acts.push(up_act(up, path, is_dir(s))),
+                Some(d) if is_dir(d) != is_dir(s) => acts.push(Action::Conflict { path }),
+                Some(d) if !is_dir(s) && differs(s, d, tol) => acts.push(up_act(up, path, false)),
+                Some(_) => {}
+            }
+        }
+        if opts.delete {
+            for (p, d) in dst.iter().filter(|(p, _)| !src.contains_key(*p)) {
+                let path = p.clone();
+                let a = match up {
+                    true => Action::DeleteRemote { path },
+                    false => Action::DeleteLocal { path },
+                };
+                dels.push((is_dir(d), a));
+            }
+        }
+    }
+    // Ficheros primero; directorios después, del más profundo al más superficial.
+    acts.extend(dels.iter().filter(|(d, _)| !d).map(|(_, a)| a.clone()));
+    acts.extend(dels.into_iter().rev().filter(|(d, _)| *d).map(|(_, a)| a));
+    Ok(acts)
 }
