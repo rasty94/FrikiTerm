@@ -403,16 +403,9 @@ fn compact(name: &str) -> String {
     clean(name.split('@').next().unwrap_or(name))
 }
 
-/// Algoritmos que la política segura nunca ofrece (equivale a `Negotiated::weak`).
+/// Algoritmos que la política segura nunca ofrece.
 fn is_legacy(n: &Negotiated) -> bool {
-    [&n.kex, &n.cipher, &n.mac, &n.host_key]
-        .into_iter()
-        .any(|a| {
-            ["3des", "-cbc", "sha1", "md5", "group1-", "dss"]
-                .iter()
-                .any(|d| a.contains(d))
-                || a == "ssh-rsa"
-        })
+    !n.weak().is_empty()
 }
 
 /// Diálogo modal durante la sesión; con `paste`, el texto a enviar si se confirma.

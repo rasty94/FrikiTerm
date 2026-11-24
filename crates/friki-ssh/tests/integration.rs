@@ -350,6 +350,8 @@ async fn el_dialogo_de_clave_no_consume_el_timeout() {
     conn.disconnect().await.expect("disconnect");
 }
 
+// Con la feature `legacy` el aviso esperado es otro (algoritmos heredados habilitados).
+#[cfg(not(feature = "legacy"))]
 #[tokio::test]
 #[ignore = "requiere OpenSSH de pruebas"]
 async fn legacy_sin_la_feature_avisa() {

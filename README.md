@@ -46,3 +46,22 @@ Solo análisis estático: no se ejecutó ningún binario del producto.
 - **Prueba real:** decompilar `SSH2::Init` tarda unos 46 s en frío, frente a unos 2 min en Docker emulado, con el mismo resultado (mismos manejadores de KEX).
 - **Uso:** `GHIDRA_INSTALL_DIR=~/tools/ghidra JAVA_HOME=/opt/homebrew/opt/openjdk npx -y rea-agents@latest decompile <binario> <dirección> --json`
 - **Registro MCP actual:** `claude mcp add -s user rea -e GHIDRA_INSTALL_DIR=$HOME/tools/ghidra -e JAVA_HOME=/opt/homebrew/opt/openjdk -- npx -y rea-agents@latest mcp`. La opción de Docker de arriba sigue siendo válida si no quieres compilar nada.
+
+## Cliente frikiSSH (Rust)
+
+Cliente SSH/terminal propio, escrito desde cero a partir de los RFC y de los requisitos de [TODO.md](TODO.md) (sala limpia: no usa nada de los binarios analizados). Arquitectura y contrato entre crates en [ARCHITECTURE.md](ARCHITECTURE.md).
+
+```sh
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+cargo run -p friki-cli -- ssh usuario@host          # sesión interactiva (Ctrl+] q para salir)
+cargo run -p friki-cli -- exec usuario@host uname -a
+cargo run -p friki-cli -- sessions import-ssh-config
+```
+
+Pruebas contra un OpenSSH real en Docker:
+
+```sh
+eval "$(scripts/test-sshd.sh up)"
+FRIKI_TEST_REQUIRED=1 cargo test --workspace -- --include-ignored
+scripts/test-sshd.sh down
+```

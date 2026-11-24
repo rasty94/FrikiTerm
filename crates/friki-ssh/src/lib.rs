@@ -177,7 +177,7 @@ pub struct Negotiated {
 
 impl Negotiated {
     /// Los que la política segura nunca ofrece (3DES, CBC, SHA-1, group1, DSA, ssh-rsa).
-    fn weak(&self) -> Vec<String> {
+    pub fn weak(&self) -> Vec<String> {
         let mut w = Vec::new();
         for (kind, n) in [
             ("kex", &self.kex),

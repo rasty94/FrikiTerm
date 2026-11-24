@@ -21,3 +21,7 @@ UsePAM yes
 PermitEmptyPasswords no
 
 Subsystem sftp internal-sftp
+
+# Las pruebas abren muchas conexiones a la vez; con el valor por defecto
+# (10:30:100) sshd descarta al azar el 30% y las pruebas fallan de forma intermitente.
+MaxStartups 100
