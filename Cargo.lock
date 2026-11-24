@@ -1609,14 +1609,11 @@ dependencies = [
  "async-trait",
  "friki-core",
  "friki-ssh",
-<<<<<<< HEAD
  "globset",
  "rusqlite",
-=======
  "russh-sftp",
  "rustls-native-certs",
  "suppaftp",
->>>>>>> worktree-agent-a38d4553e727744cc
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -1795,7 +1792,6 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
 name = "globset"
 version = "0.4.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1806,7 +1802,9 @@ dependencies = [
  "log",
  "regex-automata",
  "regex-syntax",
-=======
+]
+
+[[package]]
 name = "gloo-timers"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1816,7 +1814,6 @@ dependencies = [
  "futures-core",
  "js-sys",
  "wasm-bindgen",
->>>>>>> worktree-agent-a38d4553e727744cc
 ]
 
 [[package]]
@@ -1835,12 +1832,9 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-<<<<<<< HEAD
 dependencies = [
  "ahash",
 ]
-=======
->>>>>>> worktree-agent-a38d4553e727744cc
 
 [[package]]
 name = "hashbrown"
@@ -2995,7 +2989,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
-<<<<<<< HEAD
+name = "portable-atomic-util"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
+dependencies = [
+ "portable-atomic",
+]
+
+[[package]]
 name = "portable-pty"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3014,14 +3016,6 @@ dependencies = [
  "shell-words",
  "winapi",
  "winreg",
-=======
-name = "portable-atomic-util"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
-dependencies = [
- "portable-atomic",
->>>>>>> worktree-agent-a38d4553e727744cc
 ]
 
 [[package]]
@@ -3350,15 +3344,12 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
 name = "roff"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
-=======
->>>>>>> worktree-agent-a38d4553e727744cc
 name = "rpassword"
 version = "7.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3565,14 +3556,10 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
-<<<<<<< HEAD
- "once_cell",
- "ring",
-=======
  "aws-lc-rs",
  "log",
  "once_cell",
->>>>>>> worktree-agent-a38d4553e727744cc
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -3606,10 +3593,7 @@ version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
-<<<<<<< HEAD
-=======
  "aws-lc-rs",
->>>>>>> worktree-agent-a38d4553e727744cc
  "ring",
  "rustls-pki-types",
  "untrusted",
@@ -4396,8 +4380,6 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
-=======
 name = "tokio-util"
 version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4412,7 +4394,6 @@ dependencies = [
 ]
 
 [[package]]
->>>>>>> worktree-agent-a38d4553e727744cc
 name = "toml"
 version = "1.2.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
