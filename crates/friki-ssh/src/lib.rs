@@ -337,6 +337,38 @@ impl ShellReader {
     }
 }
 
+/// Código de salida para un proceso remoto terminado por señal, como hacen los
+/// shells: 128 + número POSIX. Señal desconocida = 255.
+pub fn exit_code_for_signal(signal: &str) -> i32 {
+    let n = match signal.trim_start_matches("SIG") {
+        "HUP" => 1,
+        "INT" => 2,
+        "QUIT" => 3,
+        "ILL" => 4,
+        "ABRT" => 6,
+        "FPE" => 8,
+        "KILL" => 9,
+        "USR1" => 10,
+        "SEGV" => 11,
+        "USR2" => 12,
+        "PIPE" => 13,
+        "ALRM" => 14,
+        "TERM" => 15,
+        _ => return 255,
+    };
+    128 + n
+}
+
+#[cfg(test)]
+mod signal_tests {
+    #[test]
+    fn senales_conocidas_y_desconocidas() {
+        assert_eq!(super::exit_code_for_signal("KILL"), 137);
+        assert_eq!(super::exit_code_for_signal("SIGTERM"), 143);
+        assert_eq!(super::exit_code_for_signal("RARA"), 255);
+    }
+}
+
 pub mod keys {
     use std::io::Write;
     use std::path::{Path, PathBuf};
