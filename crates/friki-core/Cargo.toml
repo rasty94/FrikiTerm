@@ -6,5 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.23.1"
+directories = "6.0.0"
+hmac = "0.13.0"
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 serde = { version = "1", features = ["derive"] }
+sha1 = "0.11.0"
+sha2 = "0.11.0"
 thiserror = "2"
+tempfile = "3.27.0"
+toml = "1.2.2"

@@ -2,6 +2,7 @@
 //! No depende de ningún otro crate del workspace.
 
 pub mod config;
+mod fsutil;
 pub mod known_hosts;
 pub mod paths;
 pub mod secrets;
