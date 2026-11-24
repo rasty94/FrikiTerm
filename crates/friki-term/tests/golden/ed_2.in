@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, ED "CSI Ps J" con Ps=2: borra toda la pantalla; el cursor no se mueve
+# size: 5 10
+1234567890\r\n1234567890\r\n1234567890\r\n1234567890\r\n1234567890\e[2;4H\e[2J

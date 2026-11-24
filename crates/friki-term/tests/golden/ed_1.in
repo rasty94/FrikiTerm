@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, ED "CSI Ps J" con Ps=1: borra desde el inicio de pantalla hasta el cursor, incluido
+# size: 5 10
+1234567890\r\n1234567890\r\n1234567890\r\n1234567890\r\n1234567890\e[2;4H\e[1J

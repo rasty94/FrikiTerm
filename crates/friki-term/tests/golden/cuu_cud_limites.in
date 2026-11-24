@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, CUU "CSI Ps A" y CUD "CSI Ps B": se detienen en el borde de la pantalla (o del margen si el cursor esta dentro de la region)
+# size: 5 10
+\e[3;5H\e[9AU\e[9BD

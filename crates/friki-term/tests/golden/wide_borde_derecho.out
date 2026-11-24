@@ -1,0 +1,10 @@
+size 3x5
+cursor 1,4 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|abcd|
+01|中 ok|
+02||
+attrs: ninguno

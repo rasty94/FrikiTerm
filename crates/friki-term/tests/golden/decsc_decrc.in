@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, DECSC "ESC 7" y DECRC "ESC 8": guardan y restauran posicion del cursor
+# size: 5 10
+\e[2;5H\e7\e[4;1Hx\e8y

@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, "ESC ( C" con C=0: DEC Special Character and Line Drawing Set en G0; "ESC ( B": ASCII
+# size: 3 6
+\e(0lqqk\r\nx\e(B x

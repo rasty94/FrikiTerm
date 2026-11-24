@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs: el scroll por LF en el borde inferior manda la linea al historial si no hay region
+# size: 2 4
+1\r\n2\r\n3

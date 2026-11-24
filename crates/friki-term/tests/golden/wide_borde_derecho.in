@@ -1,0 +1,3 @@
+# fuente: Unicode UAX #11 (ancho 2) y xterm ctlseqs: un caracter ancho que no cabe en la ultima columna pasa a la linea siguiente y la columna queda en blanco
+# size: 3 5
+abcd中ok

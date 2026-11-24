@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, CUF "CSI Ps C" y CUB "CSI Ps D": se acotan a los bordes izquierdo y derecho
+# size: 3 10
+\e[1;5H\e[99CR\e[99DL

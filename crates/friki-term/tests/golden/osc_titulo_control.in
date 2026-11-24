@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, OSC 2: el titulo no debe contener caracteres de control
+# size: 2 10
+\e]2;a\x01b\a

@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, OSC "ESC ] Ps ; Pt BEL/ST": Ps 0 y 2 cambian el titulo de ventana; Ps 1 solo el nombre de icono
+# size: 2 10
+\e]0;uno\a\e]1;icono\a\e]2;dos\e\\

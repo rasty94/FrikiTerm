@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, DECAWM "CSI ? 7 l": sin ajuste de linea, los caracteres sobrescriben la ultima columna
+# size: 3 8
+\e[?7lABCDEFGHIJ

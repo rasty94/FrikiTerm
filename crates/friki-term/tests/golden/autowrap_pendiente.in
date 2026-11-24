@@ -1,0 +1,3 @@
+# fuente: VT510 (DECAWM, "wraparound"): al escribir en la ultima columna el cursor queda pendiente de ajuste; el siguiente caracter pasa a la linea siguiente
+# size: 3 8
+ABCDEFGHIJ

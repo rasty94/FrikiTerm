@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, SGR: 30-37/90-97 colores basicos y brillantes, 38;5;n y 48;5;n (256), 38;2;r;g;b y 48;2;r;g;b (truecolor); 39/49 color por defecto
+# size: 2 12
+\e[31mA\e[42mB\e[38;5;196mC\e[48;2;10;20;30mD\e[39mE\e[91mF\e[38;2;255;0;128mG

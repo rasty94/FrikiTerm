@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, ICH "CSI Ps @": inserta blancos en el cursor, desplaza a la derecha y descarta lo que sale de la linea
+# size: 3 10
+ABCDEFGHIJ\e[1;4H\e[2@

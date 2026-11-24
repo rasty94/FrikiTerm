@@ -1,0 +1,9 @@
+size 2x80
+cursor 1,1 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|
+01|B|
+attrs: ninguno

@@ -1,0 +1,3 @@
+# fuente: xterm ctlseqs, CUP: Ps 0 equivale a 1; posiciones fuera de pantalla se acotan al borde
+# size: 5 10
+\e[0;0HA\e[99;99HZ\e[99999999999999999999;1HW
