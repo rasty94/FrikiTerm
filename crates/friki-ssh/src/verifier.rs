@@ -7,16 +7,6 @@ use friki_core::known_hosts::{HostKey, HostKeyStatus, KnownHosts};
 
 use crate::{HostKeyDecision, HostKeyVerifier};
 
-/// Algoritmos de clave de host que se buscan en `known_hosts` para ordenar la oferta.
-const PROBE_ALGORITHMS: &[&str] = &[
-    "ssh-ed25519",
-    "ecdsa-sha2-nistp256",
-    "ecdsa-sha2-nistp384",
-    "ecdsa-sha2-nistp521",
-    "ssh-rsa",
-    "ssh-dss",
-];
-
 /// Verificador por defecto (y único) basado en `friki_core::known_hosts`.
 ///
 /// Política: `Known` acepta sin preguntar; `Revoked` rechaza sin preguntar;
@@ -122,27 +112,10 @@ where
         decision
     }
 
-    // TODO: sustituir por `KnownHosts::algorithms_for(host, port)` cuando exista en
-    // friki-core. Mientras, se sondea con una clave imposible de cada algoritmo:
-    // `Changed` indica que hay una entrada de ese algoritmo para el host.
     fn known_algorithms(&self, host: &str, port: u16) -> Vec<String> {
-        let Ok(known) = KnownHosts::load(&self.path) else {
-            return Vec::new();
-        };
-        PROBE_ALGORITHMS
-            .iter()
-            .filter(|a| {
-                let probe = HostKey {
-                    algorithm: (**a).to_string(),
-                    base64: "AAAA".into(),
-                };
-                matches!(
-                    known.check(host, port, &probe),
-                    HostKeyStatus::Changed { .. }
-                )
-            })
-            .map(|a| (*a).to_string())
-            .collect()
+        KnownHosts::load(&self.path)
+            .map(|known| known.algorithms_for(host, port))
+            .unwrap_or_default()
     }
 
     fn warnings(&self) -> Vec<String> {
