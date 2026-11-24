@@ -1,7 +1,16 @@
-//! Emulación de terminal sobre un crate existente (`vt100`, `alacritty_terminal`
-//! o `termwiz`) y registro de sesión con enmascarado de contraseñas.
+//! Emulación de terminal y registro de sesión con enmascarado de contraseñas.
 //! No conoce SSH ni la interfaz: entra `&[u8]`, sale `Screen`.
+//!
+//! Motor elegido: `vt100` 0.18. Cubre xterm-256color/VT220 (truecolor, cursor de
+//! aplicación, bracketed paste, título OSC vía callback, caracteres anchos con
+//! celda de continuación) y trae scrollback con vista desplazable. Se mantiene
+//! activo y solo depende de `vte` y `unicode-width`. `alacritty_terminal` y
+//! `termwiz` son más completos pero mucho más pesados y con API inestable; no
+//! compensa para un cliente que solo necesita una rejilla de celdas.
 
+use std::fs::File;
+use std::io::Write;
+use std::num::NonZeroU16;
 use std::path::Path;
 
 use friki_core::config::LogConfig;
@@ -66,70 +75,531 @@ pub struct Modifiers {
     pub shift: bool,
 }
 
+/// Recoge el título OSC 0/2 que `vt100` solo expone por callback.
+#[derive(Default)]
+struct TitleCb {
+    title: String,
+}
+
+impl vt100::Callbacks for TitleCb {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = String::from_utf8_lossy(title).into_owned();
+    }
+}
+
+fn nz(n: u16) -> NonZeroU16 {
+    NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN)
+}
+
+fn conv_color(c: vt100::Color) -> Color {
+    match c {
+        vt100::Color::Default => Color::Default,
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
 pub struct Terminal {
-    _private: (),
+    parser: vt100::Parser<TitleCb>,
 }
 
 impl Terminal {
     pub fn new(rows: u16, cols: u16, scrollback: usize) -> Self {
-        let _ = (rows, cols, scrollback);
-        todo!("friki-term: Terminal::new")
+        Self {
+            parser: vt100::Parser::new_with_callbacks(
+                nz(rows),
+                nz(cols),
+                scrollback,
+                TitleCb::default(),
+            ),
+        }
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
-        let _ = bytes;
-        todo!("friki-term: Terminal::process")
+        self.parser.process(bytes);
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        let _ = (rows, cols);
-        todo!("friki-term: Terminal::resize")
+        self.parser.set_size(nz(rows), nz(cols));
     }
 
     /// Desplaza la vista del scrollback (positivo = hacia arriba). 0 vuelve al final.
     pub fn scroll_view(&mut self, lines: i32) {
-        let _ = lines;
-        todo!("friki-term: Terminal::scroll_view")
+        let s = self.parser.screen_mut();
+        if lines == 0 {
+            s.set_scrollback(0);
+            return;
+        }
+        let target = (s.scrollback() as i64 + i64::from(lines)).max(0);
+        s.set_scrollback(usize::try_from(target).unwrap_or(0));
     }
 
     pub fn screen(&self) -> Screen {
-        todo!("friki-term: Terminal::screen")
+        let s = self.parser.screen();
+        let (rows, cols) = (s.size().0.get(), s.size().1.get());
+        let mut cells = Vec::with_capacity(usize::from(rows) * usize::from(cols));
+        for r in 0..rows {
+            for c in 0..cols {
+                cells.push(match s.cell(r, c) {
+                    Some(x) if !x.is_wide_continuation() => Cell {
+                        text: x.contents().to_owned(),
+                        fg: conv_color(x.fgcolor()),
+                        bg: conv_color(x.bgcolor()),
+                        bold: x.bold(),
+                        italic: x.italic(),
+                        underline: x.underline(),
+                        inverse: x.inverse(),
+                    },
+                    // Segunda mitad de un carácter ancho: texto vacío, mismos colores.
+                    Some(x) => Cell {
+                        fg: conv_color(x.fgcolor()),
+                        bg: conv_color(x.bgcolor()),
+                        ..Cell::default()
+                    },
+                    None => Cell::default(),
+                });
+            }
+        }
+        Screen {
+            rows,
+            cols,
+            cells,
+            cursor: s.cursor_position(),
+            cursor_visible: !s.hide_cursor() && s.scrollback() == 0,
+            title: self.parser.callbacks().title.clone(),
+        }
     }
 
     /// Respeta el modo cursor de aplicación y el keypad.
     pub fn encode_key(&self, key: Key, mods: Modifiers) -> Vec<u8> {
-        let _ = (key, mods);
-        todo!("friki-term: Terminal::encode_key")
+        let app = self.parser.screen().application_cursor();
+        let m = 1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.ctrl);
+        let csi = |n: &str, fin: char| {
+            if m == 1 {
+                format!("\x1b[{n}{fin}")
+            } else {
+                format!("\x1b[{};{m}{fin}", if n.is_empty() { "1" } else { n })
+            }
+        };
+        let cursor = |fin: char| {
+            if m == 1 && app {
+                format!("\x1bO{fin}")
+            } else {
+                csi("", fin)
+            }
+        };
+        let tilde = |n: &str| csi(n, '~');
+        // Teclas que producen un byte: Alt = prefijo ESC.
+        let alt = |b: Vec<u8>| {
+            if mods.alt {
+                [vec![0x1b], b].concat()
+            } else {
+                b
+            }
+        };
+        match key {
+            Key::Char(c) => {
+                let mut b = [0u8; 4];
+                let mut out = c.encode_utf8(&mut b).as_bytes().to_vec();
+                if mods.ctrl {
+                    match c {
+                        'a'..='z' | 'A'..='Z' => out = vec![(c as u8) & 0x1f],
+                        '@' | ' ' => out = vec![0],
+                        '[' => out = vec![0x1b],
+                        '\\' => out = vec![0x1c],
+                        ']' => out = vec![0x1d],
+                        '^' => out = vec![0x1e],
+                        '_' | '/' => out = vec![0x1f],
+                        '?' => out = vec![0x7f],
+                        _ => {}
+                    }
+                }
+                return alt(out);
+            }
+            Key::Enter => return alt(vec![b'\r']),
+            Key::Backspace => return alt(vec![0x7f]),
+            Key::Tab => return alt(vec![b'\t']),
+            Key::Esc => return alt(vec![0x1b]),
+            _ => {}
+        }
+        match key {
+            Key::BackTab => "\x1b[Z".into(),
+            Key::Up => cursor('A'),
+            Key::Down => cursor('B'),
+            Key::Right => cursor('C'),
+            Key::Left => cursor('D'),
+            Key::Home => cursor('H'),
+            Key::End => cursor('F'),
+            Key::Insert => tilde("2"),
+            Key::Delete => tilde("3"),
+            Key::PageUp => tilde("5"),
+            Key::PageDown => tilde("6"),
+            Key::F(n @ 1..=4) => {
+                let fin = ['P', 'Q', 'R', 'S'][usize::from(n - 1)];
+                if m == 1 {
+                    format!("\x1bO{fin}")
+                } else {
+                    csi("", fin)
+                }
+            }
+            Key::F(n @ 5..=12) => {
+                tilde(["15", "17", "18", "19", "20", "21", "23", "24"][usize::from(n - 5)])
+            }
+            _ => String::new(),
+        }
+        .into_bytes()
     }
 
-    /// Usa bracketed paste si el remoto lo activó.
+    /// Usa bracketed paste si el remoto lo activó. Se elimina ESC del texto para
+    /// que no pueda cerrar el modo (`ESC[201~`) ni inyectar secuencias.
     pub fn encode_paste(&self, text: &str) -> Vec<u8> {
-        let _ = text;
-        todo!("friki-term: Terminal::encode_paste")
+        let clean = text.replace('\x1b', "");
+        if self.parser.screen().bracketed_paste() {
+            format!("\x1b[200~{clean}\x1b[201~").into_bytes()
+        } else {
+            clean.into_bytes()
+        }
     }
+}
+
+const PROMPTS: [&str; 9] = [
+    "password",
+    "passphrase",
+    "contraseña",
+    "passwort",
+    "mot de passe",
+    "senha",
+    "verification code",
+    "pin",
+    "otp",
+];
+
+/// `pin` y `otp` solo como palabra completa (evita "shopping", "footprint"...).
+fn is_password_prompt(line: &str) -> bool {
+    let l = line.to_lowercase();
+    PROMPTS.iter().any(|p| {
+        l.match_indices(p).any(|(i, _)| {
+            let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+            (*p != "pin" && *p != "otp")
+                || (!word(l[..i].chars().next_back()) && !word(l[i + p.len()..].chars().next()))
+        })
+    })
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum St {
+    Text,
+    Esc,
+    Csi,
+    /// Cadena (OSC, DCS...) hasta BEL o ST.
+    Str,
+    StrEsc,
 }
 
 /// Registro de sesión. La salida se registra siempre; la entrada solo si
 /// `log_input`, y nunca la línea que sigue a un aviso de contraseña o
 /// passphrase visto en la salida (se escribe `[entrada oculta]`).
 pub struct SessionLogger {
-    _private: (),
+    file: File,
+    log_input: bool,
+    esc: St,
+    /// Última línea de salida sin terminar (ya sin secuencias de escape).
+    line: Vec<u8>,
+    hidden: bool,
 }
 
 impl SessionLogger {
     /// Expande `%S`, `%H` y `%D` en `cfg.path`, relativo a `base_dir`.
-    pub fn open(cfg: &LogConfig, base_dir: &Path, session: &str, host: &str) -> std::io::Result<Self> {
-        let _ = (cfg, base_dir, session, host);
-        todo!("friki-term: SessionLogger::open")
+    pub fn open(
+        cfg: &LogConfig,
+        base_dir: &Path,
+        session: &str,
+        host: &str,
+    ) -> std::io::Result<Self> {
+        let clean = |s: &str| s.replace(['/', '\\', ':', '\0'], "_").replace("..", "_");
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let raw = cfg.path.to_string_lossy();
+        let expanded = raw
+            .replace("%S", &clean(session))
+            .replace("%H", &clean(host))
+            .replace("%D", &date);
+        let path = base_dir.join(expanded);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut oo = std::fs::OpenOptions::new();
+        oo.create(true);
+        if cfg.append {
+            oo.append(true);
+        } else {
+            oo.write(true).truncate(true);
+        }
+        Ok(Self {
+            file: oo.open(path)?,
+            log_input: cfg.log_input,
+            esc: St::Text,
+            line: Vec::new(),
+            hidden: false,
+        })
     }
 
     pub fn log_output(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        let _ = bytes;
-        todo!("friki-term: SessionLogger::log_output")
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            match self.esc {
+                St::Text => match b {
+                    0x1b => self.esc = St::Esc,
+                    b'\n' => {
+                        out.push(b);
+                        self.line.clear();
+                    }
+                    b'\t' | 0x20..=0x7e | 0x80..=0xff => {
+                        out.push(b);
+                        self.line.push(b);
+                    }
+                    _ => {}
+                },
+                St::Esc => {
+                    self.esc = match b {
+                        b'[' => St::Csi,
+                        b']' | b'P' | b'X' | b'^' | b'_' => St::Str,
+                        0x20..=0x2f => St::Esc,
+                        _ => St::Text,
+                    }
+                }
+                St::Csi => {
+                    if (0x40..=0x7e).contains(&b) {
+                        self.esc = St::Text;
+                    }
+                }
+                St::Str => match b {
+                    0x07 => self.esc = St::Text,
+                    0x1b => self.esc = St::StrEsc,
+                    _ => {}
+                },
+                St::StrEsc => self.esc = if b == b'\\' { St::Text } else { St::Str },
+            }
+        }
+        if self.line.len() > 512 {
+            self.line.drain(..self.line.len() - 256);
+        }
+        self.file.write_all(&out)
     }
 
     pub fn log_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        let _ = bytes;
-        todo!("friki-term: SessionLogger::log_input")
+        if !self.log_input {
+            return Ok(());
+        }
+        if !self.hidden && is_password_prompt(&String::from_utf8_lossy(&self.line)) {
+            self.hidden = true;
+            self.file.write_all("[entrada oculta]".as_bytes())?;
+        }
+        if self.hidden {
+            if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
+                self.hidden = false;
+                self.line.clear();
+                self.file.write_all(b"\n")?;
+            }
+            return Ok(());
+        }
+        self.file.write_all(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn term(bytes: &str) -> Screen {
+        let mut t = Terminal::new(5, 20, 100);
+        t.process(bytes.as_bytes());
+        t.screen()
+    }
+    fn cell(s: &Screen, r: u16, c: u16) -> &Cell {
+        &s.cells[usize::from(r * s.cols + c)]
+    }
+    fn none() -> Modifiers {
+        Modifiers::default()
+    }
+    fn enc(t: &Terminal, k: Key) -> String {
+        String::from_utf8(t.encode_key(k, none())).unwrap_or_default()
+    }
+
+    #[test]
+    fn colores() {
+        let s = term("\x1b[31mR\x1b[38;5;200mI\x1b[38;2;1;2;3;48;2;9;8;7mT\x1b[0;1;4mB");
+        assert_eq!(cell(&s, 0, 0).fg, Color::Indexed(1));
+        assert_eq!(cell(&s, 0, 1).fg, Color::Indexed(200));
+        assert_eq!(cell(&s, 0, 2).fg, Color::Rgb(1, 2, 3));
+        assert_eq!(cell(&s, 0, 2).bg, Color::Rgb(9, 8, 7));
+        let b = cell(&s, 0, 3);
+        assert!(b.bold && b.underline && b.fg == Color::Default);
+    }
+
+    #[test]
+    fn cursor_y_borrado() {
+        let s = term("hola\x1b[2;5H");
+        assert_eq!(s.cursor, (1, 4));
+        assert!(s.cursor_visible);
+        let s = term("hola\x1b[2J\x1b[H\x1b[?25l");
+        assert!(s.cells.iter().all(|c| c.text.is_empty()));
+        assert!(!s.cursor_visible);
+    }
+
+    #[test]
+    fn titulo() {
+        assert_eq!(term("\x1b]0;mi titulo\x07").title, "mi titulo");
+        assert_eq!(term("\x1b]2;otro\x1b\\").title, "otro");
+    }
+
+    #[test]
+    fn anchos() {
+        let s = term("漢a😀b");
+        assert_eq!(cell(&s, 0, 0).text, "漢");
+        assert_eq!(cell(&s, 0, 1).text, "");
+        assert_eq!(cell(&s, 0, 2).text, "a");
+        assert_eq!(cell(&s, 0, 3).text, "😀");
+        assert_eq!(cell(&s, 0, 5).text, "b");
+    }
+
+    #[test]
+    fn scrollback_y_resize() {
+        let mut t = Terminal::new(2, 10, 50);
+        t.process(b"uno\r\ndos\r\ntres\r\ncuatro");
+        assert_eq!(t.screen().cells[0].text, "t");
+        t.scroll_view(2);
+        assert_eq!(t.screen().cells[0].text, "u");
+        t.scroll_view(0);
+        t.resize(3, 12);
+        let s = t.screen();
+        assert_eq!((s.rows, s.cols), (3, 12));
+    }
+
+    #[test]
+    fn teclas_normal_y_aplicacion() {
+        let mut t = Terminal::new(5, 20, 0);
+        assert_eq!(enc(&t, Key::Up), "\x1b[A");
+        assert_eq!(enc(&t, Key::Home), "\x1b[H");
+        t.process(b"\x1b[?1h");
+        assert_eq!(enc(&t, Key::Up), "\x1bOA");
+        assert_eq!(enc(&t, Key::End), "\x1bOF");
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..none()
+        };
+        assert_eq!(t.encode_key(Key::Right, ctrl), b"\x1b[1;5C");
+        assert_eq!(enc(&t, Key::F(1)), "\x1bOP");
+        assert_eq!(enc(&t, Key::F(5)), "\x1b[15~");
+        assert_eq!(enc(&t, Key::F(12)), "\x1b[24~");
+        assert_eq!(enc(&t, Key::PageUp), "\x1b[5~");
+        assert_eq!(enc(&t, Key::PageDown), "\x1b[6~");
+        assert_eq!(enc(&t, Key::Insert), "\x1b[2~");
+        assert_eq!(enc(&t, Key::Delete), "\x1b[3~");
+        assert_eq!(enc(&t, Key::BackTab), "\x1b[Z");
+        assert_eq!(enc(&t, Key::Enter), "\r");
+        assert_eq!(enc(&t, Key::Backspace), "\x7f");
+    }
+
+    #[test]
+    fn ctrl_y_alt() {
+        let t = Terminal::new(5, 20, 0);
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..none()
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..none()
+        };
+        assert_eq!(t.encode_key(Key::Char('c'), ctrl), vec![3]);
+        assert_eq!(t.encode_key(Key::Char('['), ctrl), vec![0x1b]);
+        assert_eq!(t.encode_key(Key::Char('x'), alt), b"\x1bx");
+        assert_eq!(t.encode_key(Key::Char('é'), none()), "é".as_bytes());
+    }
+
+    #[test]
+    fn pegado() {
+        let mut t = Terminal::new(5, 20, 0);
+        assert_eq!(t.encode_paste("ls\n"), b"ls\n");
+        t.process(b"\x1b[?2004h");
+        assert_eq!(t.encode_paste("ls"), b"\x1b[200~ls\x1b[201~");
+        let inj = t.encode_paste("a\x1b[201~rm -rf /");
+        assert_eq!(inj, b"\x1b[200~a[201~rm -rf /\x1b[201~");
+        assert_eq!(inj.iter().filter(|&&b| b == 0x1b).count(), 2);
+    }
+
+    fn logger(dir: &Path, log_input: bool) -> SessionLogger {
+        let cfg = LogConfig {
+            path: "sub/%S-%H-%D.log".into(),
+            append: false,
+            log_input,
+        };
+        SessionLogger::open(&cfg, dir, "s1", "h1").unwrap()
+    }
+    fn tmp(n: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("friki-term-{n}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+    fn read(d: &Path) -> String {
+        let p = std::fs::read_dir(d.join("sub"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("s1-h1-20")
+        );
+        std::fs::read_to_string(p).unwrap()
+    }
+
+    #[test]
+    fn log_salida_sin_escapes() {
+        let d = tmp("out");
+        let mut l = logger(&d, false);
+        l.log_output(b"\x1b[31mro").unwrap();
+        l.log_output(b"jo\x1b[0m \x1b]0;t\x07ok\r\n").unwrap();
+        l.log_input(b"secreto\r").unwrap();
+        assert_eq!(read(&d), "rojo ok\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn log_entrada_oculta() {
+        for prompt in [
+            "Password: ",
+            "Enter passphrase for key:",
+            "Contraseña:",
+            "Enter PIN",
+            "Verification code: ",
+            "OTP:",
+        ] {
+            let d = tmp("in");
+            let mut l = logger(&d, true);
+            l.log_output(b"login ok\r\n").unwrap();
+            l.log_output(prompt.as_bytes()).unwrap();
+            l.log_input(b"hun").unwrap();
+            l.log_input(b"ter2\r").unwrap();
+            l.log_output(b"\r\n$ ").unwrap();
+            l.log_input(b"ls\r").unwrap();
+            let r = read(&d);
+            assert!(
+                !r.contains("hunter2") && !r.contains("hun"),
+                "{prompt}: {r}"
+            );
+            assert!(r.contains("[entrada oculta]"), "{prompt}");
+            assert!(r.ends_with("ls\r"), "{prompt}: {r:?}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    #[test]
+    fn prompt_normal_no_oculta() {
+        assert!(!is_password_prompt("user@host:~/shopping$ "));
+        assert!(is_password_prompt("user@host's PASSWORD: "));
     }
 }
