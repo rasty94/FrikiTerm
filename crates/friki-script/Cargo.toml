@@ -9,3 +9,8 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 thiserror = "2"
+rhai = "1"
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time"] }
