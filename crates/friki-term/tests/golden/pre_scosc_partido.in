@@ -1,0 +1,8 @@
+# fuente: ANSI.SYS CSI s / CSI u (guardar y restaurar cursor) partidas entre llamadas; con parámetros CSI s es DECSLRM y no guarda
+# size: 2 8
+ab\e
+[
+s
+cd\e[
+u
+X

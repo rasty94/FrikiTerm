@@ -21,36 +21,7 @@ use friki_term::{Cell, Color, Terminal};
 /// Diferencias conocidas entre el emulador y la fuente citada en el `.in`. El `.out` del
 /// caso guarda el comportamiento CORRECTO; el test exige que el actual difiera, así que
 /// si el emulador se corrige hay que quitar la entrada.
-const KNOWN_DIFFERENCES: &[(&str, &str)] = &[
-    (
-        "autowrap_off",
-        "DECAWM (CSI ? 7 l) no implementado: vt100 siempre hace ajuste de linea; xterm sobrescribe la ultima columna.",
-    ),
-    (
-        "tab_hts_tbc_todas",
-        "HTS (ESC H) y TBC (CSI 3 g) no implementados: las paradas son fijas cada 8 columnas; sin paradas, HT debe ir al margen derecho.",
-    ),
-    (
-        "tab_tbc_linea",
-        "TBC (CSI 0 g) no implementado: la parada de la columna 8 sigue activa.",
-    ),
-    (
-        "scosc_scorc",
-        "CSI s / CSI u (guardar y restaurar cursor, ANSI.SYS) no implementados: la 'y' se imprime en la posicion actual.",
-    ),
-    (
-        "dec_grafico_g0",
-        "ESC ( 0 (dibujo de lineas DEC) no implementado: se imprimen letras ASCII en vez de ┌──┐ y │.",
-    ),
-    (
-        "dec_grafico_so_si",
-        "ESC ) 0 y SO/SI (0x0E/0x0F) ignorados: no hay juego G1; debe salir a──b, no aqqb.",
-    ),
-    (
-        "utf8_invalido",
-        "Los bytes UTF-8 invalidos se descartan en silencio; Unicode recomienda sustituirlos por U+FFFD (uno por subsecuencia maxima): debe salir a��b.",
-    ),
-];
+const KNOWN_DIFFERENCES: &[(&str, &str)] = &[];
 
 const SCROLLBACK: usize = 100;
 

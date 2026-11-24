@@ -1,0 +1,7 @@
+# fuente: xterm ctlseqs, "ESC ( 0" / "ESC ( B"; la designación llega partida en tres trozos (ESC | ( | 0) y el texto gráfico también
+# size: 3 6
+\e
+(
+0lq
+qk\r\nx\e(
+B x

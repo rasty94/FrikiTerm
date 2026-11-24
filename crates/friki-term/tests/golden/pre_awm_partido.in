@@ -1,0 +1,6 @@
+# fuente: xterm ctlseqs, DECAWM "CSI ? 7 l" / "CSI ? 7 h" partidos entre llamadas
+# size: 3 6
+\e[?
+7
+lABCDEFGH\e[?7
+h\r\n123456789

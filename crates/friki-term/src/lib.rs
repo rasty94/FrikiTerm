@@ -13,6 +13,8 @@ use std::io::Write;
 use std::num::NonZeroU16;
 use std::path::Path;
 
+mod pre;
+
 use friki_core::config::{BackspaceMode, Emulation, LogConfig, TerminalProfile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -189,6 +191,7 @@ pub type Pos = (usize, u16);
 
 pub struct Terminal {
     parser: vt100::Parser<TitleCb>,
+    pre: pre::Pre,
     emulation: Emulation,
     backspace: BackspaceMode,
     keymap: Vec<((Key, Modifiers), Vec<u8>)>,
@@ -251,11 +254,15 @@ impl Grid {
                 continue;
             }
             let w = if x.is_wide() { 2 } else { 1 };
-            let t = if x.has_contents() { x.contents() } else { " " };
+            let t = if x.has_contents() {
+                pre::unmask(x.contents())
+            } else {
+                " ".into()
+            };
             if lower {
                 text.extend(t.chars().flat_map(char::to_lowercase));
             } else {
-                text.push_str(t);
+                text.push_str(&t);
             }
             st.resize(text.len(), c);
             en.resize(text.len(), c + w);
@@ -300,6 +307,7 @@ impl Terminal {
             }
         }
         Self {
+            pre: pre::Pre::new(cols.max(1)),
             parser: vt100::Parser::new_with_callbacks(
                 nz(rows),
                 nz(cols),
@@ -402,7 +410,7 @@ impl Terminal {
             for c in lo..=hi {
                 match g.s.cell(r, c) {
                     Some(x) if x.is_wide_continuation() => {}
-                    Some(x) if x.has_contents() => line.push_str(x.contents()),
+                    Some(x) if x.has_contents() => line.push_str(&pre::unmask(x.contents())),
                     _ => line.push(' '),
                 }
             }
@@ -420,11 +428,12 @@ impl Terminal {
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.process(bytes);
+        self.pre.run(bytes, &mut self.parser);
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.parser.set_size(nz(rows), nz(cols));
+        self.pre.resize(cols.max(1));
     }
 
     /// Desplaza la vista del scrollback (positivo = hacia arriba). 0 vuelve al final.
@@ -468,7 +477,7 @@ impl Terminal {
             for c in 0..cols {
                 cells.push(match s.cell(r, c) {
                     Some(x) if !x.is_wide_continuation() => Cell {
-                        text: x.contents().to_owned(),
+                        text: pre::unmask(x.contents()).into_owned(),
                         fg: conv_color(x.fgcolor()),
                         bg: conv_color(x.bgcolor()),
                         bold: x.bold(),
@@ -490,7 +499,9 @@ impl Terminal {
             rows,
             cols,
             cells,
-            cursor: s.cursor_position(),
+            // vt100 deja col == cols con el ajuste de linea pendiente; xterm muestra el
+            // cursor sobre la ultima columna.
+            cursor: (s.cursor_position().0, s.cursor_position().1.min(cols - 1)),
             cursor_visible: !s.hide_cursor() && s.scrollback() == 0,
             title: (self.parser.callbacks().title.chars())
                 .filter(|c| !c.is_control())

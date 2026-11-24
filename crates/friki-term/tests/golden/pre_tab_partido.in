@@ -1,0 +1,9 @@
+# fuente: xterm ctlseqs, HTS "ESC H" y TBC "CSI 0 g" con las secuencias partidas; HT salta a la parada propia
+# size: 3 20
+\e[1;4H\e
+H\e[1;1H\t
+A\e[
+0g\r\tB\e[1;1H\e[
+3
+g\t
+C
