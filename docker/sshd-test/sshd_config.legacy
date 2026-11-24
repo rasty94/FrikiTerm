@@ -1,0 +1,21 @@
+# Puerto 2223: SOLO algoritmos heredados. Sirve para comprobar que el cliente seguro se niega a negociarlos.
+Port 2223
+ListenAddress 0.0.0.0
+HostKey /etc/friki-sshd/keys/legacy_rsa
+PidFile /run/sshd-legacy.pid
+LogLevel VERBOSE
+
+KexAlgorithms diffie-hellman-group14-sha1
+Ciphers aes128-cbc
+MACs hmac-sha1
+HostKeyAlgorithms ssh-rsa
+PubkeyAcceptedAlgorithms ssh-rsa
+
+PermitRootLogin no
+AllowUsers friki
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+UsePAM yes
+PermitEmptyPasswords no
