@@ -8,6 +8,7 @@ Análisis estático de SecureCRT/SecureFX 9.7.4 (VanDyke) con la skill `reverse-
 - [docs/01-protocolos-y-capacidades.md](docs/01-protocolos-y-capacidades.md)
 - [docs/02-comparativa-plataformas.md](docs/02-comparativa-plataformas.md)
 - [docs/03-auditoria-seguridad.md](docs/03-auditoria-seguridad.md)
+- [docs/04-decompilacion-ssh2-init.md](docs/04-decompilacion-ssh2-init.md): primera decompilación (Ghidra)
 
 ## Reproducir
 
