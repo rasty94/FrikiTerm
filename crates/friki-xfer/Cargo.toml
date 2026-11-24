@@ -12,3 +12,13 @@ friki-ssh = { path = "../friki-ssh" }
 async-trait = "0.1"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "fs", "sync", "time", "macros", "rt"] }
+russh-sftp = "4"
+suppaftp = { version = "13", features = ["tokio-rustls-aws-lc-rs"] }
+rustls-native-certs = "0.8.5"
+tokio-rustls = "0.26.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["process", "rt-multi-thread", "macros", "io-util"] }
+friki-core = { path = "../friki-core" }
+async-trait = "0.1"
