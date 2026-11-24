@@ -9,6 +9,7 @@ Análisis estático de SecureCRT/SecureFX 9.7.4 (VanDyke) con la skill `reverse-
 - [docs/02-comparativa-plataformas.md](docs/02-comparativa-plataformas.md)
 - [docs/03-auditoria-seguridad.md](docs/03-auditoria-seguridad.md)
 - [docs/04-decompilacion-ssh2-init.md](docs/04-decompilacion-ssh2-init.md): primera decompilación (Ghidra)
+- [docs/06-cifrados-mac-y-autenticacion.md](docs/06-cifrados-mac-y-autenticacion.md): cifrados, MAC y autenticación (parcial)
 - [docs/07-tls-libtlscore.md](docs/07-tls-libtlscore.md): capa TLS y verificación de certificados
 - [docs/08-mapa-de-modulos.md](docs/08-mapa-de-modulos.md): módulos, clases y dependencias
 
