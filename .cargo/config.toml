@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-msvc]
+# Control Flow Guard en los binarios de Windows (mitigación contra saltos indirectos maliciosos).
+rustflags = ["-C", "control-flow-guard"]

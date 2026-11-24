@@ -1,3 +1,6 @@
 [toolchain]
-channel = "stable"
+# Versión fijada para que CI y local compilen con el mismo compilador.
+# Subirla con `rustup run stable rustc --version` y actualizar aquí. La MSRV es la de Cargo.toml (rust-version).
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
+profile = "minimal"
