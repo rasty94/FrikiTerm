@@ -7,4 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-tokio = { version = "1", features = ["io-util"] }
+tokio = { version = "1", features = ["io-util", "time", "fs"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "time", "fs", "rt", "macros", "process"] }
