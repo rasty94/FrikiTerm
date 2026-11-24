@@ -146,8 +146,37 @@ impl Default for TerminalProfile {
 /// Convierte el texto de un valor de `keymap` en bytes (`"\eOP"` → `[0x1b, b'O', b'P']`).
 /// Error si hay un escape desconocido o un `\x` incompleto.
 pub fn parse_key_bytes(s: &str) -> std::result::Result<Vec<u8>, String> {
-    let _ = s;
-    todo!("friki-core: parse_key_bytes")
+    let mut out = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('e') => out.push(0x1b),
+            Some('r') => out.push(b'\r'),
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('\\') => out.push(b'\\'),
+            Some('x') => match (
+                chars.next().and_then(|c| c.to_digit(16)),
+                chars.next().and_then(|c| c.to_digit(16)),
+            ) {
+                // Dos dígitos hexadecimales => máximo 0xFF, cabe en u8.
+                (Some(hi), Some(lo)) => out.push((hi * 16 + lo) as u8),
+                _ => {
+                    return Err(format!(
+                        "escape \\x incompleto en `{s}`: se esperan dos dígitos hexadecimales"
+                    ));
+                }
+            },
+            Some(other) => return Err(format!("escape desconocido `\\{other}` en `{s}`")),
+            None => return Err(format!("barra invertida final sin escape en `{s}`")),
+        }
+    }
+    Ok(out)
 }
 
 /// Configuración global de la aplicación (`config_dir()/config.toml`).
@@ -197,22 +226,76 @@ impl Default for AppConfig {
 /// Lee `path`; inexistente = `AppConfig::default()`. Las acciones que falten en `bindings`
 /// toman su valor por defecto; acciones desconocidas o teclas repetidas = `Error::Parse`.
 pub fn load_app_config(path: &Path) -> Result<AppConfig> {
-    let _ = path;
-    todo!("friki-core: load_app_config")
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AppConfig::default()),
+        Err(e) => return Err(e.into()),
+    };
+    let perr = |msg: String| Error::Parse {
+        path: path.display().to_string(),
+        msg,
+    };
+    let mut cfg: AppConfig = toml::from_str(&text).map_err(|e| perr(e.to_string()))?;
+    let defaults = AppConfig::default();
+    if let Some(a) = cfg
+        .bindings
+        .keys()
+        .find(|a| !defaults.bindings.contains_key(*a))
+    {
+        return Err(perr(format!("acción desconocida `{a}` en [bindings]")));
+    }
+    for (action, key) in defaults.bindings {
+        cfg.bindings.entry(action).or_insert(key);
+    }
+    // Mapa ordenado: el primer conflicto encontrado es siempre el mismo.
+    let mut by_key: std::collections::BTreeMap<&str, &str> = Default::default();
+    for (action, key) in &cfg.bindings {
+        if let Some(other) = by_key.insert(key.as_str(), action.as_str()) {
+            return Err(perr(format!(
+                "las acciones `{other}` y `{action}` usan la misma tecla `{key}`"
+            )));
+        }
+    }
+    Ok(cfg)
 }
 
 /// Árbol de carpetas del gestor de sesiones: (carpeta, sesiones) ordenado por carpeta y
 /// después por nombre; la raíz es `""`. Incluye las carpetas intermedias aunque estén vacías.
 pub fn session_tree(sessions: &[SessionConfig]) -> Vec<(String, Vec<&SessionConfig>)> {
-    let _ = sessions;
-    todo!("friki-core: session_tree")
+    let mut map: std::collections::BTreeMap<String, Vec<&SessionConfig>> = Default::default();
+    for s in sessions {
+        // Carpeta inválida = raíz, igual que al cargar.
+        let folder = normalize_folder(&s.folder).unwrap_or_default();
+        let mut acc = String::new();
+        for seg in folder.split('/').filter(|seg| !seg.is_empty()) {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            map.entry(acc.clone()).or_default();
+        }
+        map.entry(folder).or_default().push(s);
+    }
+    map.into_iter()
+        .map(|(folder, mut list)| {
+            list.sort_by(|a, b| a.name.cmp(&b.name));
+            (folder, list)
+        })
+        .collect()
 }
 
 /// Normaliza una carpeta: sin `/` inicial ni final, sin segmentos vacíos, `.` ni `..`.
 /// `None` si no es válida.
 pub fn normalize_folder(folder: &str) -> Option<String> {
-    let _ = folder;
-    todo!("friki-core: normalize_folder")
+    let mut segs = Vec::new();
+    for seg in folder.split('/') {
+        match seg {
+            "" => {}
+            "." | ".." => return None,
+            _ => segs.push(seg),
+        }
+    }
+    Some(segs.join("/"))
 }
 
 /// Lee todos los `*.toml` de `dir` (inexistente = lista vacía), ordenados por nombre.
@@ -243,6 +326,8 @@ pub fn load_sessions(dir: &Path) -> Result<Vec<SessionConfig>> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
         }
+        // Carpeta inválida al cargar = raíz; no rompe la carga.
+        s.folder = normalize_folder(&s.folder).unwrap_or_default();
         out.push(s);
     }
     Ok(out)
@@ -259,7 +344,13 @@ pub fn save_session(dir: &Path, session: &SessionConfig) -> Result<PathBuf> {
         });
     }
     let path = dir.join(format!("{name}.toml"));
-    let text = toml::to_string_pretty(session).map_err(|e| Error::Parse {
+    let folder = normalize_folder(&session.folder).ok_or_else(|| Error::Parse {
+        path: path.display().to_string(),
+        msg: format!("carpeta no válida: `{}`", session.folder),
+    })?;
+    let mut session = session.clone();
+    session.folder = folder;
+    let text = toml::to_string_pretty(&session).map_err(|e| Error::Parse {
         path: path.display().to_string(),
         msg: e.to_string(),
     })?;
@@ -741,6 +832,181 @@ Host late
         );
         let h = r("2001:db8::1").unwrap();
         assert_eq!((h.host.as_str(), h.port), ("2001:db8::1", 22));
+    }
+
+    #[test]
+    fn parse_key_bytes_escapes_and_utf8() {
+        assert_eq!(parse_key_bytes("\\eOP").unwrap(), vec![0x1b, b'O', b'P']);
+        assert_eq!(
+            parse_key_bytes("\\r\\n\\t\\\\").unwrap(),
+            b"\r\n\t\\".to_vec()
+        );
+        assert_eq!(
+            parse_key_bytes("\\x7f\\x1B\\xfF").unwrap(),
+            vec![0x7f, 0x1b, 0xff]
+        );
+        assert_eq!(parse_key_bytes("ñ€").unwrap(), "ñ€".as_bytes().to_vec());
+        assert_eq!(parse_key_bytes("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn parse_key_bytes_rejects_bad_escapes() {
+        for bad in ["\\q", "\\x", "\\x4", "\\xZZ", "\\x4G", "fin\\"] {
+            assert!(parse_key_bytes(bad).is_err(), "{bad}");
+        }
+        assert!(parse_key_bytes("\\q").unwrap_err().contains("desconocido"));
+        assert!(parse_key_bytes("\\x4").unwrap_err().contains("incompleto"));
+    }
+
+    #[test]
+    fn app_config_missing_file_is_default() {
+        let d = tempfile::tempdir().unwrap();
+        let got = load_app_config(&d.path().join("config.toml")).unwrap();
+        assert_eq!(got, AppConfig::default());
+    }
+
+    #[test]
+    fn app_config_partial_keeps_default_bindings() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config.toml");
+        std::fs::write(&p, "[bindings]\nquit = \"z\"\n").unwrap();
+        let got = load_app_config(&p).unwrap();
+        let def = AppConfig::default();
+        assert_eq!(got.bindings.get("quit").map(String::as_str), Some("z"));
+        assert_eq!(got.bindings.len(), def.bindings.len());
+        assert_eq!(got.bindings.get("help"), def.bindings.get("help"));
+        assert_eq!(got.prefix, def.prefix);
+    }
+
+    #[test]
+    fn app_config_changed_prefix_and_terminal_defaults() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config.toml");
+        std::fs::write(
+            &p,
+            "prefix = \"ctrl+a\"\n[default_terminal]\nscrollback = 5\n",
+        )
+        .unwrap();
+        let got = load_app_config(&p).unwrap();
+        assert_eq!(got.prefix, "ctrl+a");
+        assert_eq!(got.bindings, AppConfig::default().bindings);
+        assert_eq!(got.default_terminal.scrollback, 5);
+        assert_eq!(got.default_terminal.theme, "default");
+    }
+
+    #[test]
+    fn app_config_unknown_action_is_parse_error() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config.toml");
+        std::fs::write(&p, "[bindings]\nfly = \"f\"\n").unwrap();
+        let err = load_app_config(&p).unwrap_err();
+        assert!(
+            matches!(&err, Error::Parse { msg, .. } if msg.contains("fly")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn app_config_duplicate_key_is_parse_error() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("config.toml");
+        // quit pasa a "c", que ya es new-tab por defecto.
+        std::fs::write(&p, "[bindings]\nquit = \"c\"\n").unwrap();
+        let err = load_app_config(&p).unwrap_err();
+        assert!(
+            matches!(&err, Error::Parse { msg, .. } if msg.contains("misma tecla")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn normalize_folder_rules() {
+        assert_eq!(normalize_folder("/a//b/"), Some("a/b".into()));
+        assert_eq!(normalize_folder(""), Some(String::new()));
+        assert_eq!(normalize_folder("/"), Some(String::new()));
+        assert_eq!(normalize_folder("a/./b"), None);
+        assert_eq!(normalize_folder("a/../b"), None);
+    }
+
+    #[test]
+    fn session_tree_includes_intermediate_folders() {
+        let mk = |name: &str, folder: &str| SessionConfig {
+            folder: folder.into(),
+            ..s(name)
+        };
+        let v = vec![
+            mk("z", "a/b/c"),
+            mk("y", ""),
+            mk("x", "a/b/c"),
+            mk("w", "bad/.."),
+        ];
+        let tree = session_tree(&v);
+        let keys: Vec<&str> = tree.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(keys, vec!["", "a", "a/b", "a/b/c"]);
+        let (_, leaf) = &tree[3];
+        assert_eq!(
+            leaf.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["x", "z"]
+        );
+        assert!(tree[1].1.is_empty() && tree[2].1.is_empty());
+        assert_eq!(tree[0].1[0].name, "w", "carpeta inválida = raíz");
+    }
+
+    #[test]
+    fn save_normalizes_folder_and_rejects_invalid() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = s("a");
+        a.folder = "/clientes//acme/".into();
+        save_session(d.path(), &a).unwrap();
+        assert_eq!(load_sessions(d.path()).unwrap()[0].folder, "clientes/acme");
+        a.folder = "x/../y".into();
+        assert!(matches!(
+            save_session(d.path(), &a),
+            Err(Error::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn load_invalid_folder_becomes_root() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("f.toml"),
+            "host = \"h\"\nfolder = \"a/../b\"\n",
+        )
+        .unwrap();
+        let got = load_sessions(d.path()).unwrap();
+        assert_eq!(got[0].folder, "");
+    }
+
+    #[test]
+    fn pre_phase2_session_toml_loads_with_defaults() {
+        let d = tempfile::tempdir().unwrap();
+        let text = "name = \"vieja\"\nhost = \"h.example\"\nport = 22\nuser = \"ana\"\n\
+            auth = [\"agent\", \"public-key\"]\nidentity_files = []\nlegacy_algorithms = false\n\
+            term = \"xterm-256color\"\nmax_auth_attempts = 3\nconnect_timeout_secs = 15\n\
+            keepalive_secs = 30\n";
+        std::fs::write(d.path().join("vieja.toml"), text).unwrap();
+        let got = load_sessions(d.path()).unwrap();
+        assert_eq!(got[0].terminal, TerminalProfile::default());
+        assert_eq!(got[0].folder, "");
+        assert_eq!(got[0].user.as_deref(), Some("ana"));
+    }
+
+    #[test]
+    fn partial_terminal_table_keeps_other_defaults() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("t.toml"),
+            "host = \"h\"\n[terminal]\nscrollback = 7\n",
+        )
+        .unwrap();
+        let got = load_sessions(d.path()).unwrap();
+        let def = TerminalProfile::default();
+        assert_eq!(got[0].terminal.scrollback, 7);
+        assert_eq!(got[0].terminal.emulation, def.emulation);
+        assert_eq!(got[0].terminal.backspace, def.backspace);
+        assert_eq!(got[0].terminal.theme, def.theme);
+        assert!(got[0].terminal.keymap.is_empty());
     }
 
     #[test]
