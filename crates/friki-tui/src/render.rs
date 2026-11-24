@@ -61,23 +61,48 @@ pub fn screen_to_buffer(screen: &Screen, buf: &mut Buffer, area: Rect) {
     }
 }
 
+#[derive(Default)]
 pub struct StatusInfo<'a> {
     pub session: &'a str,
     pub host: &'a str,
     pub state: &'a str,
+    /// Cifrado negociado, compacto (vacío si no se conoce).
+    pub cipher: &'a str,
+    /// `legacy_algorithms` activo o algoritmo heredado negociado: indicador permanente.
+    pub legacy: bool,
+    /// Problema con el registro de sesión (no se abre o dejó de escribir).
+    pub log_warn: Option<&'a str>,
 }
 
 pub fn status_line(info: &StatusInfo, width: u16) -> Line<'static> {
-    let left = format!(" {} | {} | {} ", info.session, info.host, info.state);
-    let right = "Ctrl+] q salir  PgUp/PgDn scroll  ? ayuda ";
-    let pad = (width as usize).saturating_sub(left.width() + right.width());
-    let style = Style::default().fg(Color::Black).bg(Color::Gray);
-    Line::from(vec![
-        Span::raw(left),
-        Span::raw(" ".repeat(pad)),
-        Span::raw(right),
-    ])
-    .style(style)
+    let mut left = format!(" {} | {} | {}", info.session, info.host, info.state);
+    if !info.cipher.is_empty() {
+        left.push_str(" | ");
+        left.push_str(info.cipher);
+    }
+    left.push(' ');
+    let mut spans = vec![Span::raw(left)];
+    if info.legacy {
+        spans.push(Span::styled(
+            " LEGACY ",
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(w) = info.log_warn {
+        spans.push(Span::styled(
+            format!(" {w} "),
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        ));
+    }
+    let used: usize = spans.iter().map(Span::width).sum();
+    let right = " Ctrl+] q salir  PgUp/PgDn scroll  ? ayuda ";
+    let pad = (width as usize).saturating_sub(used + right.width());
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::raw(right));
+    Line::from(spans).style(Style::default().fg(Color::Black).bg(Color::Gray))
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -162,10 +187,12 @@ pub fn draw(
             HELP.iter().map(|l| Line::from(*l)).collect(),
             false,
         );
-    } else if let Some(s) = screen {
-        if s.cursor_visible && s.cursor.0 < body.height && s.cursor.1 < body.width {
-            frame.set_cursor_position((body.x + s.cursor.1, body.y + s.cursor.0));
-        }
+    } else if let Some(s) = screen
+        && s.cursor_visible
+        && s.cursor.0 < body.height
+        && s.cursor.1 < body.width
+    {
+        frame.set_cursor_position((body.x + s.cursor.1, body.y + s.cursor.0));
     }
 }
 
@@ -230,20 +257,25 @@ mod tests {
 
     #[test]
     fn draw_with_status_bar_and_cursor() {
-        let mut t = Terminal::new(TestBackend::new(40, 3)).expect("terminal");
+        let mut t = Terminal::new(TestBackend::new(120, 3)).expect("terminal");
         let info = StatusInfo {
             session: "web",
             host: "h:22",
             state: "conectado",
+            cipher: "chacha20-poly1305",
+            legacy: true,
+            log_warn: Some("sin registro"),
         };
         t.draw(|f| draw(f, Some(&screen()), &info, None, false))
             .expect("draw");
         let buf = t.backend().buffer().clone();
         let row0: String = (0..4).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert!(row0.starts_with("AB"));
-        let last: String = (0..40).map(|x| buf[(x, 2)].symbol().to_string()).collect();
+        let last: String = (0..120).map(|x| buf[(x, 2)].symbol().to_string()).collect();
         assert!(last.contains("web | h:22 | conectado"));
         assert!(last.contains("Ctrl+] q"));
+        assert!(last.contains("chacha20-poly1305") && last.contains("LEGACY"));
+        assert!(last.contains("sin registro"));
         t.backend_mut().assert_cursor_position((1, 0));
     }
 
@@ -254,6 +286,7 @@ mod tests {
             session: "s",
             host: "h",
             state: "conectando",
+            ..Default::default()
         };
         let d = Dialog::changed_host("h", 22, "ssh-ed25519", "SHA256:new", "SHA256:old");
         t.draw(|f| draw(f, None, &info, Some(&d), false))
