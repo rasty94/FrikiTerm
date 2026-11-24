@@ -61,6 +61,101 @@ pub struct SessionConfig {
     /// Carpeta lógica en el gestor de sesiones, con `/` como separador (`"clientes/acme"`).
     /// Vacía = raíz. No forma parte del nombre del fichero (TODO.md §8).
     pub folder: String,
+    /// Protocolo de la sesión (fase 4). Ausente en el TOML = SSH.
+    pub protocol: Protocol,
+    /// Solo con `Protocol::Serial`; `host`/`port` se ignoran.
+    pub serial: SerialConfig,
+    /// Solo con `Protocol::LocalShell`: orden a ejecutar (`None` = `$SHELL` / `%COMSPEC%`).
+    pub local_command: Option<String>,
+    /// Redirecciones de puertos SSH de la sesión (fase 4).
+    pub forwards: Vec<Forward>,
+    /// Reenvío del agente SSH al remoto (opt-in, TODO.md §2).
+    pub forward_agent: bool,
+    /// Exigir strict KEX: si el servidor no lo anuncia, se aborta (mitigación Terrapin).
+    pub require_strict_kex: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+    #[default]
+    Ssh,
+    Telnet,
+    /// Telnet sobre TLS con verificación de certificado y nombre (TODO.md §9).
+    TelnetTls,
+    /// TCP sin negociación.
+    Raw,
+    Serial,
+    LocalShell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Parity {
+    #[default]
+    None,
+    Odd,
+    Even,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlowControl {
+    #[default]
+    None,
+    /// XON/XOFF.
+    Software,
+    /// RTS/CTS. DTR/DSR no se ofrece: no existe en macOS ni Linux (docs/16).
+    Hardware,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SerialConfig {
+    /// `/dev/ttyUSB0`, `/dev/cu.usbserial-…`, `COM3`.
+    pub device: String,
+    pub baud: u32,
+    /// 5..=8
+    pub data_bits: u8,
+    pub parity: Parity,
+    /// 1 o 2
+    pub stop_bits: u8,
+    pub flow: FlowControl,
+}
+
+impl Default for SerialConfig {
+    fn default() -> Self {
+        Self {
+            device: String::new(),
+            baud: 115_200,
+            data_bits: 8,
+            parity: Parity::None,
+            stop_bits: 1,
+            flow: FlowControl::None,
+        }
+    }
+}
+
+/// Redirección de puertos SSH. Direcciones de escucha por defecto en `127.0.0.1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Forward {
+    /// `-L [bind:]port:host:hostport`
+    Local {
+        bind: String,
+        port: u16,
+        host: String,
+        host_port: u16,
+    },
+    /// `-R [bind:]port:host:hostport` (escucha en el servidor)
+    Remote {
+        bind: String,
+        port: u16,
+        host: String,
+        host_port: u16,
+    },
+    /// `-D [bind:]port` (SOCKS5)
+    Dynamic { bind: String, port: u16 },
 }
 
 impl Default for SessionConfig {
@@ -86,6 +181,12 @@ impl Default for SessionConfig {
             log: None,
             terminal: TerminalProfile::default(),
             folder: String::new(),
+            protocol: Protocol::Ssh,
+            serial: SerialConfig::default(),
+            local_command: None,
+            forwards: Vec::new(),
+            forward_agent: false,
+            require_strict_kex: false,
         }
     }
 }

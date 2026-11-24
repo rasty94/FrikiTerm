@@ -1351,6 +1351,7 @@ dependencies = [
 name = "friki-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "directories",
  "fd-lock",
@@ -1365,6 +1366,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "friki-pty"
+version = "0.1.0"
+dependencies = [
+ "friki-core",
+]
+
+[[package]]
+name = "friki-script"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "friki-serial"
+version = "0.1.0"
+dependencies = [
+ "friki-core",
+]
+
+[[package]]
 name = "friki-ssh"
 version = "0.1.0"
 dependencies = [
@@ -1376,6 +1399,13 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "friki-telnet"
+version = "0.1.0"
+dependencies = [
+ "friki-core",
 ]
 
 [[package]]
@@ -1402,6 +1432,24 @@ dependencies = [
  "ratatui",
  "tokio",
  "unicode-width",
+]
+
+[[package]]
+name = "friki-xfer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "friki-core",
+ "friki-ssh",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "friki-zmodem"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

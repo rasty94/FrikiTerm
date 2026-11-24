@@ -56,3 +56,16 @@ Contratos nuevos (las firmas son las de los `lib.rs`; mismas reglas que en la fa
 | `friki-tui` | Multiplexor: varias sesiones a la vez en pestañas y paneles divididos, foco, atajos configurables, apertura de sesiones |
 
 Atajos por defecto (tras el prefijo `Ctrl+]`, estilo tmux): `c` pestaña nueva, `n`/`p` siguiente/anterior, `"` dividir horizontal, `%` dividir vertical, `o` siguiente panel, `x` cerrar panel, `s` sesiones, `,` renombrar pestaña, `/` buscar, `[` modo copia, `PgUp`/`PgDn` scroll, `?` ayuda, `q` salir.
+
+## Fases 3 y 4: transferencia, protocolos y extras
+
+```
+friki-cli ─► friki-tui ─► friki-ssh, friki-telnet, friki-serial, friki-pty, friki-zmodem, friki-script
+     └────► friki-xfer ─► friki-ssh
+todos ─► friki-core (config, transport)
+```
+
+- `friki_core::transport`: `StreamWriter`/`StreamReader`/`Stream`, flujo común de SSH, Telnet, RAW, serie y PTY. La TUI trabaja solo con esto.
+- `SessionConfig` gana `protocol`, `serial`, `local_command`, `forwards`, `forward_agent`, `require_strict_kex` (todos con valor por defecto: los TOML antiguos siguen cargando).
+- `friki-ssh`: `open_shell_stream`, `open_subsystem`, `open_exec_stream` (`ChannelStream`), `start_forward`/`stop_forward`; ProxyJump dentro de `connect`.
+- Crates nuevos: `friki-xfer` (trait `RemoteFs`, SFTP, SCP, FTP/FTPS, `LocalFs`, cola, sincronización, caché SQLite), `friki-telnet`, `friki-serial`, `friki-pty`, `friki-zmodem`, `friki-script` (Rhai con `ScriptHost`).

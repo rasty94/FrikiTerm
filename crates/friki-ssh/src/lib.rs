@@ -197,6 +197,61 @@ impl Negotiated {
     }
 }
 
+/// Canal SSH como `AsyncRead + AsyncWrite`.
+pub struct ChannelStream {
+    inner: std::pin::Pin<Box<dyn DuplexStream>>,
+    exit: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+}
+
+trait DuplexStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send> DuplexStream for T {}
+
+impl ChannelStream {
+    /// Estado de salida del comando remoto, si ya llegó.
+    pub fn exit_status(&self) -> Option<u32> {
+        self.exit.lock().map(|g| *g).unwrap_or(None)
+    }
+}
+
+impl tokio::io::AsyncRead for ChannelStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.inner.as_mut().poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for ChannelStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.inner.as_mut().poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.inner.as_mut().poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.inner.as_mut().poll_shutdown(cx)
+    }
+}
+
+/// Identifica una redirección activa.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardHandle {
+    pub id: u64,
+    pub listen: std::net::SocketAddr,
+}
+
 pub struct Connection {
     handle: russh::client::Handle<session::Handler>,
     info: Arc<session::Info>,
@@ -292,6 +347,44 @@ impl Connection {
         E: tokio::io::AsyncWrite + Unpin,
     {
         session::exec_stream(&self.handle, &self.info, command, stdin, stdout, stderr).await
+    }
+
+    /// Shell interactivo como flujo genérico de `friki_core::transport` (para los paneles
+    /// de la TUI, que mezclan SSH, Telnet, serie y PTY). `ExitStatus` → `Exit(n)`,
+    /// `ExitSignal` → `Exit(exit_code_for_signal)`, `Lost` → `Lost`.
+    pub async fn open_shell_stream(
+        &self,
+        term: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<friki_core::transport::Stream> {
+        let _ = (term, cols, rows);
+        todo!("friki-ssh: open_shell_stream")
+    }
+
+    /// Canal con un subsistema (`"sftp"`) como flujo de bytes bidireccional.
+    pub async fn open_subsystem(&self, name: &str) -> Result<ChannelStream> {
+        let _ = name;
+        todo!("friki-ssh: open_subsystem")
+    }
+
+    /// Canal `exec` como flujo de bytes (para `scp -t`/`scp -f`). El estado de salida
+    /// se obtiene con `ChannelStream::exit_status` tras el EOF.
+    pub async fn open_exec_stream(&self, command: &str) -> Result<ChannelStream> {
+        let _ = command;
+        todo!("friki-ssh: open_exec_stream")
+    }
+
+    /// Activa una redirección de puertos (fase 4). Devuelve la dirección real de escucha
+    /// (útil con puerto 0). Se mantiene mientras viva la conexión o hasta `stop_forward`.
+    pub async fn start_forward(&self, fwd: &friki_core::config::Forward) -> Result<ForwardHandle> {
+        let _ = fwd;
+        todo!("friki-ssh: start_forward")
+    }
+
+    pub async fn stop_forward(&self, handle: ForwardHandle) -> Result<()> {
+        let _ = handle;
+        todo!("friki-ssh: stop_forward")
     }
 
     pub async fn disconnect(self) -> Result<()> {

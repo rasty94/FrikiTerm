@@ -6,6 +6,7 @@ mod fsutil;
 pub mod known_hosts;
 pub mod paths;
 pub mod secrets;
+pub mod transport;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
