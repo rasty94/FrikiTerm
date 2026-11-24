@@ -2,6 +2,23 @@
 
 Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capacidades de SecureCRT/SecureFX documentadas en `docs/`.
 
+## Estado (2026-11-25)
+
+**Fase 1 (MVP) hecha y verificada.** CI en verde en Linux, macOS y Windows, más MSRV 1.89 y la feature `legacy`. 124 pruebas, incluidas las de integración contra OpenSSH en Docker. `cargo deny` y `cargo audit -D warnings` limpios.
+
+- Hecho: sesión SSH-2 interactiva (TUI) y `exec` con streaming y stdin, claves Ed25519/ECDSA/RSA, agente (Unix), keyboard-interactive, `known_hosts` compatible con OpenSSH (incluidas las entradas hasheadas), política de algoritmos segura con strict KEX y sin compresión, sesiones TOML, importación de `ssh_config` con avisos, llavero del sistema, registro de sesión con enmascarado, códigos de salida de 8 bits, `keygen`.
+- Revisiones: dos pasadas (corrección con Opus, seguridad con Fable). Se cerraron todos los hallazgos altos y medios.
+
+**Pendiente heredado de las revisiones** (bajo, o fuera del MVP):
+- [ ] ProxyJump: hoy `connect` lo rechaza de forma explícita; falta implementarlo (§2).
+- [ ] Agente SSH en Windows (Pageant / named pipe).
+- [ ] Strict KEX: opción para exigirlo, o restringir a AES-GCM si el servidor no lo anuncia.
+- [ ] Fecha del nombre del log: `time` no da el desfase local con varios hilos, así que sale en UTC.
+- [ ] Reenvío del ratón al remoto (falta su codificación en `friki-term`).
+- [ ] Heurística de "sin eco = contraseña" en el log: descartada por poco fiable; documentada como límite.
+- [ ] `russh` compila siempre CBC/SHA-1/group1: la barrera es la lista ofrecida (§11), vigilada por una prueba.
+- [ ] Probar la TUI a mano en una terminal real en las tres plataformas (las pruebas automáticas usan un backend simulado).
+
 ## 0. Reglas del proyecto
 
 - [ ] **Sala limpia.** Se implementa desde RFC y documentación pública. No se copia ni se traduce código de los binarios de VanDyke; los informes de `docs/` describen *qué hace* el producto, no *cómo*. No hay nada de licencias, ofuscación ni credenciales ajenas.

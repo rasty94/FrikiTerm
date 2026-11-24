@@ -210,6 +210,13 @@ impl Connection {
         verifier: Arc<dyn HostKeyVerifier>,
         prompter: Arc<dyn AuthPrompter>,
     ) -> Result<Self> {
+        // ponytail: sin saltos todavía (TODO.md §2). Conectar directo al host de una sesión
+        // con ProxyJump podría ofrecer credenciales a otra máquina: se rechaza (auditoría #10).
+        if let Some(jump) = &cfg.proxy_jump {
+            return Err(Error::Other(format!(
+                "ProxyJump ({jump}) aún no está soportado; no se conecta directamente al host"
+            )));
+        }
         let c = session::connect(cfg, verifier.clone(), prompter).await?;
         Ok(Self {
             handle: c.handle,
@@ -357,6 +364,53 @@ pub fn exit_code_for_signal(signal: &str) -> i32 {
         _ => return 255,
     };
     128 + n
+}
+
+#[cfg(test)]
+mod proxy_jump_tests {
+    use super::*;
+
+    struct No;
+    #[async_trait::async_trait]
+    impl HostKeyVerifier for No {
+        async fn verify(&self, _: &str, _: u16, _: &HostKey) -> HostKeyDecision {
+            HostKeyDecision::Reject
+        }
+    }
+    #[async_trait::async_trait]
+    impl AuthPrompter for No {
+        async fn password(&self, _: &str, _: &str) -> Option<Zeroizing<String>> {
+            None
+        }
+        async fn passphrase(&self, _: &Path) -> Option<Zeroizing<String>> {
+            None
+        }
+        async fn keyboard_interactive(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(String, bool)],
+        ) -> Option<Vec<Zeroizing<String>>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_jump_se_rechaza_sin_conectar() {
+        // Puerto 1 en localhost: si intentara conectar, el error sería de red, no Other.
+        let cfg = SessionConfig {
+            host: "127.0.0.1".into(),
+            port: 1,
+            proxy_jump: Some("bastion".into()),
+            ..Default::default()
+        };
+        let r = Connection::connect(&cfg, Arc::new(No), Arc::new(No)).await;
+        assert!(
+            matches!(r, Err(Error::Other(ref m)) if m.contains("ProxyJump")),
+            "{:?}",
+            r.err()
+        );
+    }
 }
 
 #[cfg(test)]
