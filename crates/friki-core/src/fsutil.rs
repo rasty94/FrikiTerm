@@ -49,11 +49,10 @@ pub(crate) fn with_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result
     f()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn dirs_are_private() {
         use std::os::unix::fs::PermissionsExt;

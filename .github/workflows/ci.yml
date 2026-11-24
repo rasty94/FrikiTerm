@@ -89,7 +89,7 @@ jobs:
         run: cargo test -p friki-ssh --features legacy
 
   msrv:
-    name: MSRV (1.85.0)
+    name: MSRV (1.89.0)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -103,8 +103,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
 
-      - name: Instalar toolchain 1.85.0
-        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Instalar toolchain 1.89.0
+        run: rustup toolchain install 1.89.0 --profile minimal
 
       - name: Compilar con la MSRV (rust-version del Cargo.toml raíz)
-        run: cargo +1.85.0 build --workspace
+        run: cargo +1.89.0 build --workspace
