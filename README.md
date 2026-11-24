@@ -14,6 +14,8 @@ Análisis estático de SecureCRT/SecureFX 9.7.4 (VanDyke) con la skill `reverse-
 - [docs/09-listas-por-defecto-y-compresion.md](docs/09-listas-por-defecto-y-compresion.md): filtro de algoritmos y compresión
 - [docs/12-api-de-scripting.md](docs/12-api-de-scripting.md): API de scripting Python, ayuda frente a binario
 - [docs/13-transferencias-y-cli.md](docs/13-transferencias-y-cli.md): transferencias, sincronización y herramientas CLI
+- [docs/14-terceros-y-cves.md](docs/14-terceros-y-cves.md): librerías de terceros y avisos públicos
+- [docs/16-terminal-telnet-serie.md](docs/16-terminal-telnet-serie.md): emulaciones, Telnet, serie y transferencias en terminal
 - [docs/08-mapa-de-modulos.md](docs/08-mapa-de-modulos.md): módulos, clases y dependencias
 
 ## Reproducir
