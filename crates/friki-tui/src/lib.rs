@@ -12,12 +12,14 @@
 //! unen con crossterm.
 
 mod app;
+mod copy_mode;
 mod dialog;
 mod input;
 mod keys;
 mod layout;
 mod picker;
 mod render;
+mod search;
 
 use std::io::{Stdout, stdout};
 use std::path::{Path, PathBuf};
