@@ -9,124 +9,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use friki_cli::cli::{Cli, Command, ExecArgs, KeygenArgs, SessionsAction, SshArgs};
 use friki_core::config::{self, SessionConfig};
 use friki_core::known_hosts::{HostKey, HostKeyStatus};
 use friki_core::paths;
 use friki_ssh::{AuthPrompter, Connection, HostKeyDecision, KnownHostsVerifier, Zeroizing};
 use tokio::io::AsyncWriteExt;
-
-#[derive(Debug, Parser)]
-#[command(name = "friki", version, about = "Cliente SSH de terminal")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Abre una sesión interactiva en la TUI.
-    Ssh(SshArgs),
-    /// Ejecuta un comando remoto sin TUI y devuelve su estado.
-    Exec(ExecArgs),
-    /// Gestiona las sesiones guardadas.
-    Sessions {
-        #[command(subcommand)]
-        action: SessionsAction,
-    },
-    /// Genera un par de claves Ed25519.
-    Keygen(KeygenArgs),
-}
-
-/// Opciones de conexión comunes a `ssh` y `exec`.
-#[derive(Debug, clap::Args)]
-struct ConnArgs {
-    /// Puerto (sobrescribe el de la sesión).
-    #[arg(short, long)]
-    port: Option<u16>,
-    /// Usuario (sobrescribe el de la sesión).
-    #[arg(short = 'l', long = "user")]
-    user: Option<String>,
-    /// Fichero de clave privada; repetible.
-    #[arg(short, long = "identity")]
-    identity: Vec<PathBuf>,
-    /// Permite algoritmos heredados (requiere compilar con la feature `legacy`).
-    #[arg(long)]
-    legacy_algorithms: bool,
-}
-
-impl ConnArgs {
-    fn apply(self, cfg: &mut SessionConfig) {
-        if let Some(port) = self.port {
-            cfg.port = port;
-        }
-        if let Some(user) = self.user {
-            cfg.user = Some(user);
-        }
-        cfg.identity_files.extend(self.identity);
-        if self.legacy_algorithms {
-            cfg.legacy_algorithms = true;
-        }
-    }
-}
-
-#[derive(Debug, clap::Args)]
-struct SshArgs {
-    /// Sesión guardada o `[user@]host[:port]`.
-    target: String,
-    #[command(flatten)]
-    conn: ConnArgs,
-}
-
-#[derive(Debug, clap::Args)]
-struct ExecArgs {
-    /// Sesión guardada o `[user@]host[:port]`.
-    target: String,
-    #[command(flatten)]
-    conn: ConnArgs,
-    /// Comando remoto; se une con espacios.
-    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    command: Vec<String>,
-    /// Imprime `{"stdout","stderr","exit_status","exit_signal"}` en vez de la salida cruda.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum SessionsAction {
-    /// Lista las sesiones guardadas.
-    List {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Guarda una sesión nueva.
-    Add {
-        name: String,
-        /// `[user@]host[:port]`.
-        target: String,
-    },
-    /// Importa los bloques `Host` concretos de un `ssh_config`.
-    ImportSshConfig {
-        /// Por defecto `~/.ssh/config`.
-        path: Option<PathBuf>,
-        /// Sobrescribe sesiones con el mismo nombre.
-        #[arg(long)]
-        force: bool,
-    },
-}
-
-#[derive(Debug, clap::Args)]
-struct KeygenArgs {
-    /// Ruta de la clave privada (por defecto `~/.ssh/id_ed25519`).
-    #[arg(short, long)]
-    file: Option<PathBuf>,
-    /// Comentario de la clave pública.
-    #[arg(short = 'C', long, default_value = "frikiSSH")]
-    comment: String,
-    /// No pedir passphrase.
-    #[arg(long)]
-    no_passphrase: bool,
-}
 
 #[tokio::main]
 async fn main() {

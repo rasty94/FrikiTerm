@@ -2,7 +2,9 @@
 
 ## Fase 5: exponer `Cli` para generar man y completions (`xtask`)
 
-**Estado:** `xtask` compila y está en `members`, pero `friki_command()` devuelve error hasta que
+**Estado: RESUELTO.** `Cli` vive en `crates/friki-cli/src/cli.rs` (lib `friki_cli`) y `xtask` genera man y completions.
+
+**Estado anterior:** `xtask` compila y está en `members`, pero `friki_command()` devuelve error hasta que
 se exponga la definición de la CLI. Mientras tanto `cargo run -p xtask -- assets` falla con un
 mensaje que apunta a este fichero, y `release.yml` (paso "Generar página man y completions") también.
 

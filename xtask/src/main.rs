@@ -51,5 +51,6 @@ fn assets() -> Result<(), Box<dyn std::error::Error>> {
 /// (mover `Cli` a `crates/friki-cli/src/cli.rs` y reexportarlo) está en
 /// `CONTRACT-CHANGES.md` de la raíz del repositorio.
 fn friki_command() -> Result<Command, String> {
-    Err("definición de la CLI no expuesta todavía; ver CONTRACT-CHANGES.md".into())
+    use clap::CommandFactory;
+    Ok(friki_cli::cli::Cli::command())
 }
