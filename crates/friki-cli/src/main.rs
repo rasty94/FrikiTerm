@@ -12,6 +12,11 @@ use anyhow::{anyhow, bail};
 use clap::Parser;
 use friki_cli::cli::{Cli, Command, ExecArgs, KeygenArgs, SessionsAction, SshArgs};
 use friki_core::config::{self, SessionConfig};
+
+mod net;
+mod pubkey;
+mod script;
+mod xfer;
 use friki_core::known_hosts::{HostKey, HostKeyStatus};
 use friki_core::paths;
 use friki_ssh::{AuthPrompter, Connection, HostKeyDecision, KnownHostsVerifier, Zeroizing};
@@ -59,11 +64,26 @@ fn sanitize_remote(texto: &str) -> String {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<i32> {
-    match cli.command {
+    let Some(command) = cli.command else {
+        return friki_tui::run_app(None, friki_tui::Paths::default_paths()).await;
+    };
+    match command {
         Command::Ssh(args) => ssh(args).await,
         Command::Exec(args) => exec(args).await,
         Command::Sessions { action } => sessions(action).map(|()| 0),
         Command::Keygen(args) => keygen(args).map(|()| 0),
+        Command::Fwd(args) => net::fwd(args).await,
+        Command::Ls(args) => xfer::ls(args).await,
+        Command::Get(args) => xfer::get(args).await,
+        Command::Put(args) => xfer::put(args).await,
+        Command::Cp(args) => xfer::cp(args).await,
+        Command::Sync(args) => xfer::sync(args).await,
+        Command::Ftp { action } => xfer::ftp(action).await,
+        Command::PubkeyInstall(args) => pubkey::install(args).await,
+        Command::Script(args) => script::run(args).await,
+        Command::Serial(args) => net::serial(args).await,
+        Command::Telnet(args) => net::telnet(args).await,
+        Command::Shell(args) => net::shell(args).await,
     }
 }
 
@@ -73,18 +93,64 @@ const EXIT_AUTH: i32 = 252;
 const EXIT_HOST_KEY: i32 = 253;
 const EXIT_OTHER: i32 = 254;
 
+/// Error con código de salida ya decidido (fallos de la cola de transferencias).
+#[derive(Debug)]
+struct CodedError(i32, String);
+
+impl std::fmt::Display for CodedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for CodedError {}
+
+fn ssh_code(e: &friki_ssh::Error) -> i32 {
+    match e {
+        friki_ssh::Error::Network(_) => EXIT_NETWORK,
+        friki_ssh::Error::Auth(_) => EXIT_AUTH,
+        friki_ssh::Error::HostKey(_) => EXIT_HOST_KEY,
+        friki_ssh::Error::Negotiation(_) | friki_ssh::Error::Other(_) => EXIT_OTHER,
+    }
+}
+
+/// Código de un error de `friki-xfer`: red/E/S → 251; permisos, no existe y el resto → 254.
+fn xfer_code(e: &friki_xfer::Error) -> i32 {
+    use std::io::ErrorKind::{NotFound, PermissionDenied};
+    match e {
+        friki_xfer::Error::Ssh(e) => ssh_code(e),
+        friki_xfer::Error::Io(e) if matches!(e.kind(), NotFound | PermissionDenied) => EXIT_OTHER,
+        friki_xfer::Error::Io(_) => EXIT_NETWORK,
+        _ => EXIT_OTHER,
+    }
+}
+
+/// Un fallo de la cola llega como texto (`QueueEvent::Failed`): se clasifica por su prefijo.
+fn failure_code(msg: &str) -> i32 {
+    if msg.starts_with("E/S:") || msg.starts_with("red:") {
+        EXIT_NETWORK
+    } else if msg.starts_with("autenticación:") {
+        EXIT_AUTH
+    } else if msg.starts_with("clave de host") {
+        EXIT_HOST_KEY
+    } else {
+        EXIT_OTHER
+    }
+}
+
 /// Código de salida de la CLI según el error (ARCHITECTURE.md).
 pub fn exit_code(err: &anyhow::Error) -> i32 {
     if err.downcast_ref::<UsageError>().is_some() {
         return EXIT_USAGE;
     }
+    if let Some(e) = err.downcast_ref::<CodedError>() {
+        return e.0;
+    }
+    if let Some(e) = err.downcast_ref::<friki_xfer::Error>() {
+        return xfer_code(e);
+    }
     if let Some(e) = err.downcast_ref::<friki_ssh::Error>() {
-        return match e {
-            friki_ssh::Error::Network(_) => EXIT_NETWORK,
-            friki_ssh::Error::Auth(_) => EXIT_AUTH,
-            friki_ssh::Error::HostKey(_) => EXIT_HOST_KEY,
-            friki_ssh::Error::Negotiation(_) | friki_ssh::Error::Other(_) => EXIT_OTHER,
-        };
+        return ssh_code(e);
     }
     if err.downcast_ref::<friki_core::Error>().is_some() {
         return EXIT_OTHER;
@@ -200,9 +266,8 @@ impl AuthPrompter for TerminalPrompter {
     }
 }
 
-async fn exec(args: ExecArgs) -> anyhow::Result<i32> {
-    let mut cfg = load_target(&args.target)?;
-    args.conn.apply(&mut cfg);
+/// Conecta sin TUI: `known_hosts` sin preguntar y secretos por terminal si la hay.
+async fn connect(cfg: &SessionConfig) -> anyhow::Result<Connection> {
     let verifier = Arc::new(KnownHostsVerifier::new(
         paths::known_hosts_file(),
         rechazar_clave,
@@ -210,11 +275,25 @@ async fn exec(args: ExecArgs) -> anyhow::Result<i32> {
     let prompter = Arc::new(TerminalPrompter {
         interactive: std::io::stdin().is_terminal(),
     });
-
-    let conn = Connection::connect(&cfg, verifier, prompter).await?;
+    let conn = Connection::connect(cfg, verifier, prompter).await?;
     for aviso in conn.warnings() {
         eprintln!("friki: aviso: {}", sanitize_remote(&aviso));
     }
+    Ok(conn)
+}
+
+/// Resuelve el destino, aplica las opciones de conexión y conecta.
+async fn connect_target(
+    target: &str,
+    conn: friki_cli::cli::ConnArgs,
+) -> anyhow::Result<Connection> {
+    let mut cfg = load_target(target)?;
+    conn.apply(&mut cfg);
+    connect(&cfg).await
+}
+
+async fn exec(args: ExecArgs) -> anyhow::Result<i32> {
+    let conn = connect_target(&args.target, args.conn).await?;
     let comando = args.command.join(" ");
     let (exit_status, exit_signal) = if args.json {
         let out = conn.exec(&comando).await?;
@@ -367,6 +446,7 @@ mod tests {
         Cli::try_parse_from(args)
             .expect("argumentos válidos")
             .command
+            .expect("subcomando")
     }
 
     #[test]
@@ -565,6 +645,271 @@ mod tests {
             }
             other => panic!("subcomando inesperado: {other:?}"),
         }
+    }
+
+    fn local(bind: &str, port: u16, host: &str, host_port: u16) -> config::Forward {
+        config::Forward::Local {
+            bind: bind.into(),
+            port,
+            host: host.into(),
+            host_port,
+        }
+    }
+
+    #[test]
+    fn sin_subcomando_abre_la_tui() {
+        assert!(
+            Cli::try_parse_from(["friki"])
+                .expect("válido")
+                .command
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parsea_redirecciones_openssh() {
+        use friki_cli::cli::{parse_dynamic, parse_local, parse_remote};
+        assert_eq!(parse_local("8080:web:80"), Ok(local("", 8080, "web", 80)));
+        assert_eq!(
+            parse_local("*:8080:web:80"),
+            Ok(local("*", 8080, "web", 80))
+        );
+        assert_eq!(
+            parse_local("[::1]:8080:[fe80::1]:80"),
+            Ok(local("::1", 8080, "fe80::1", 80))
+        );
+        assert_eq!(parse_local("8080:[::1]:80"), Ok(local("", 8080, "::1", 80)));
+        assert!(parse_local("8080:web").is_err());
+        assert!(parse_local("x:web:80").is_err());
+        assert!(parse_local("8080::80").is_err());
+        assert!(parse_local("[::1:8080:h:80").is_err());
+        assert_eq!(
+            parse_remote("0.0.0.0:2222:localhost:22"),
+            Ok(config::Forward::Remote {
+                bind: "0.0.0.0".into(),
+                port: 2222,
+                host: "localhost".into(),
+                host_port: 22
+            })
+        );
+        assert_eq!(
+            parse_dynamic("1080"),
+            Ok(config::Forward::Dynamic {
+                bind: String::new(),
+                port: 1080
+            })
+        );
+        assert_eq!(
+            parse_dynamic("[::1]:1080"),
+            Ok(config::Forward::Dynamic {
+                bind: "::1".into(),
+                port: 1080
+            })
+        );
+        assert!(parse_dynamic("a:b:1").is_err());
+    }
+
+    #[test]
+    fn parsea_saltos() {
+        use friki_cli::cli::parse_jump;
+        assert!(parse_jump("a").is_ok());
+        assert!(parse_jump("u@a:22,[::1]:2200,b").is_ok());
+        assert!(parse_jump("").is_err());
+        assert!(parse_jump("a,,b").is_err());
+        assert!(parse_jump("a:x").is_err());
+    }
+
+    #[test]
+    fn opciones_de_conexion_rellenan_la_sesion() {
+        match parse(&[
+            "friki",
+            "fwd",
+            "srv",
+            "-J",
+            "bast@jump:2200",
+            "-L",
+            "8080:web:80",
+            "-R",
+            "9000:localhost:9000",
+            "-D",
+            "1080",
+            "-A",
+            "--require-strict-kex",
+        ]) {
+            Command::Fwd(a) => {
+                let mut cfg = SessionConfig::default();
+                a.conn.apply(&mut cfg);
+                assert_eq!(cfg.proxy_jump.as_deref(), Some("bast@jump:2200"));
+                assert_eq!(cfg.forwards.len(), 3);
+                assert_eq!(cfg.forwards[0], local("", 8080, "web", 80));
+                assert!(cfg.forward_agent && cfg.require_strict_kex);
+            }
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parsea_transferencias() {
+        assert!(matches!(parse(&["friki", "ls", "h:/tmp"]), Command::Ls(_)));
+        match parse(&["friki", "get", "-r", "h:/a", "/tmp/x"]) {
+            Command::Get(a) => {
+                assert_eq!(a.remote, "h:/a");
+                assert_eq!(a.local, Some(PathBuf::from("/tmp/x")));
+                assert!(a.recursive);
+            }
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        match parse(&["friki", "put", "a", "b", "h:/d/"]) {
+            Command::Put(a) => assert_eq!(a.paths, ["a", "b", "h:/d/"]),
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["friki", "put", "h:/d/"]).is_err());
+        match parse(&["friki", "cp", "-r", "--scp", "h:/a", "."]) {
+            Command::Cp(a) => assert!(a.scp && a.recursive),
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parsea_sync() {
+        match parse(&[
+            "friki",
+            "sync",
+            "dir",
+            "h:/r",
+            "--down",
+            "--delete",
+            "--include",
+            "*.rs",
+            "--exclude",
+            "target/",
+            "--dry-run",
+            "--json",
+        ]) {
+            Command::Sync(a) => {
+                assert!(a.down && !a.both && a.delete && a.dry_run && a.json);
+                assert_eq!(a.include, ["*.rs"]);
+                assert_eq!(a.exclude, ["target/"]);
+            }
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["friki", "sync", "d", "h:/r", "--down", "--both"]).is_err());
+    }
+
+    #[test]
+    fn parsea_ftp() {
+        match parse(&["friki", "ftp", "ls", "h:2121", "--tls", "-u", "ana", "/pub"]) {
+            Command::Ftp {
+                action: friki_cli::cli::FtpAction::Ls { ftp, path, .. },
+            } => {
+                assert!(ftp.tls);
+                assert_eq!((ftp.host.as_str(), ftp.user.as_str()), ("h:2121", "ana"));
+                assert_eq!(path.as_deref(), Some("/pub"));
+            }
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        assert!(matches!(
+            parse(&["friki", "ftp", "get", "h", "/f"]),
+            Command::Ftp {
+                action: friki_cli::cli::FtpAction::Get { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["friki", "ftp", "put", "h", "f"]),
+            Command::Ftp {
+                action: friki_cli::cli::FtpAction::Put { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parsea_pubkey_install_y_script() {
+        match parse(&["friki", "pubkey-install", "h", "-i", "k.pub", "-I", "k"]) {
+            Command::PubkeyInstall(a) => {
+                assert_eq!(a.pubkey, Some(PathBuf::from("k.pub")));
+                assert_eq!(a.auth_identity, [PathBuf::from("k")]);
+            }
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        match parse(&[
+            "friki",
+            "script",
+            "s.rhai",
+            "--target",
+            "h",
+            "--allow-read",
+            "/r",
+            "--allow-write",
+            "/w",
+            "--allow-connect",
+            "--",
+            "-x",
+            "y",
+        ]) {
+            Command::Script(a) => {
+                assert_eq!(a.target.as_deref(), Some("h"));
+                assert_eq!(a.allow_read, [PathBuf::from("/r")]);
+                assert_eq!(a.allow_write, [PathBuf::from("/w")]);
+                assert!(a.allow_connect);
+                assert_eq!(a.args, ["-x", "y"]);
+            }
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parsea_protocolos_de_la_tui() {
+        match parse(&["friki", "serial", "list"]) {
+            Command::Serial(a) => assert_eq!(a.device, "list"),
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        match parse(&[
+            "friki",
+            "serial",
+            "/dev/ttyUSB0",
+            "--baud",
+            "9600",
+            "--data-bits",
+            "7",
+            "--parity",
+            "even",
+            "--stop-bits",
+            "2",
+            "--flow",
+            "hardware",
+        ]) {
+            Command::Serial(a) => {
+                assert_eq!((a.baud, a.data_bits, a.stop_bits), (9600, 7, 2));
+                assert_eq!(a.parity, config::Parity::Even);
+                assert_eq!(a.flow, config::FlowControl::Hardware);
+            }
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["friki", "serial", "d", "--data-bits", "9"]).is_err());
+        match parse(&["friki", "telnet", "[::1]:2323", "--tls"]) {
+            Command::Telnet(a) => assert!(a.tls && a.host == "[::1]:2323"),
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+        match parse(&["friki", "shell", "ls", "-la"]) {
+            Command::Shell(a) => assert_eq!(a.command, ["ls", "-la"]),
+            other => panic!("subcomando inesperado: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn errores_de_xfer_dan_codigos() {
+        let nf = anyhow::Error::from(friki_xfer::Error::NotFound("x".into()));
+        let pd = anyhow::Error::from(friki_xfer::Error::PermissionDenied("x".into()));
+        let io = anyhow::Error::from(friki_xfer::Error::Io(std::io::ErrorKind::TimedOut.into()));
+        let red = anyhow::Error::from(friki_xfer::Error::Ssh(friki_ssh::Error::Network(
+            "x".into(),
+        )));
+        assert_eq!(exit_code(&nf), EXIT_OTHER);
+        assert_eq!(exit_code(&pd), EXIT_OTHER);
+        assert_eq!(exit_code(&io), EXIT_NETWORK);
+        assert_eq!(exit_code(&red), EXIT_NETWORK);
+        assert_eq!(failure_code("E/S: roto"), EXIT_NETWORK);
+        assert_eq!(failure_code("permiso denegado: x"), EXIT_OTHER);
     }
 
     #[test]
