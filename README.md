@@ -39,3 +39,4 @@ Solo análisis estático: no se ejecutó ningún binario del producto.
 - **Resultado:** `rea doctor` da todas las comprobaciones de Ghidra en verde (`mach-o arm64`, JDK 27).
 - **Prueba real:** decompilar `SSH2::Init` tarda unos 46 s en frío, frente a unos 2 min en Docker emulado, con el mismo resultado (mismos manejadores de KEX).
 - **Uso:** `GHIDRA_INSTALL_DIR=~/tools/ghidra JAVA_HOME=/opt/homebrew/opt/openjdk npx -y rea-agents@latest decompile <binario> <dirección> --json`
+- **Registro MCP actual:** `claude mcp add -s user rea -e GHIDRA_INSTALL_DIR=$HOME/tools/ghidra -e JAVA_HOME=/opt/homebrew/opt/openjdk -- npx -y rea-agents@latest mcp`. La opción de Docker de arriba sigue siendo válida si no quieres compilar nada.
