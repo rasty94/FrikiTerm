@@ -7,4 +7,13 @@ license.workspace = true
 publish = false
 
 [dependencies]
+async-trait = "0.1.92"
 friki-core = { path = "../friki-core" }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8.5"
+tokio = { version = "1.54.1", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }

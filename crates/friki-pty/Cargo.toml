@@ -7,4 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+async-trait = "0.1.92"
 friki-core = { path = "../friki-core" }
+portable-pty = "0.9.0"
+tokio = { version = "1.54.1", features = ["rt", "sync", "macros", "time"] }
