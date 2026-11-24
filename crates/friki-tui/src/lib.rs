@@ -1,8 +1,8 @@
-//! Multiplexor de terminal (ratatui + crossterm): varias sesiones SSH a la vez, en
-//! pestañas y paneles divididos.
+//! Multiplexor de terminal (ratatui + crossterm): varias sesiones (SSH, Telnet, RAW,
+//! serie, shell local) a la vez, en pestañas y paneles divididos.
 //!
 //! Arquitectura: cada panel (`app::Pane`) es una sesión; una tarea por panel conecta,
-//! abre el shell y reenvía `(PaneId, ShellEvent)` y las peticiones de diálogo
+//! abre el flujo y reenvía `(PaneId, StreamEvent)` y las peticiones de diálogo
 //! (clave de host, autenticación) a un único canal `mpsc`. `app::App` guarda las
 //! pestañas (árbol de disposición de `layout`, un panel con foco) y un solo bucle
 //! `select!` atiende teclado, mensajes de los paneles y el tick de dibujo.
@@ -20,9 +20,12 @@ mod layout;
 mod picker;
 mod render;
 mod search;
+mod target;
+mod theme;
 
 use std::io::{Stdout, stdout};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -32,7 +35,8 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use friki_core::config::SessionConfig;
-use friki_ssh::{Error, Negotiated, ShellEvent, ShellWriter, exit_code_for_signal};
+use friki_core::transport::{StreamEvent, StreamWriter};
+use friki_ssh::{Error, Negotiated};
 use friki_term::SessionLogger;
 use futures_util::Stream;
 use ratatui::Terminal;
@@ -42,7 +46,6 @@ use dialog::clean;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-const SCROLLBACK: usize = 10_000;
 const WHEEL_LINES: i32 = 3;
 
 /// Rutas de datos; `run` usa las de `friki_core::paths`, las pruebas las suyas.
@@ -206,56 +209,54 @@ impl Log {
     }
 }
 
-/// Escritura al remoto. Un canal ya cerrado (carrera al hacer `exit`) no es un error
-/// de la sesión: el evento final llegará por el lector. Una cola llena descarta la
-/// entrada y lo anota para la barra de estado.
+/// Escritura al otro extremo. Un canal ya cerrado (`BrokenPipe`: carrera al hacer `exit`)
+/// no es un error de la sesión: el evento final llegará por el lector. Cualquier otro fallo
+/// (cola llena...) descarta la entrada y lo anota para la barra de estado.
 struct Out {
-    writer: ShellWriter,
+    writer: Arc<dyn StreamWriter>,
     log: Log,
     dropped: bool,
 }
 
 impl Out {
-    fn settle(&mut self, r: friki_ssh::Result<()>) -> anyhow::Result<()> {
+    fn settle(&mut self, r: std::io::Result<()>) {
         match r {
             Ok(()) => self.dropped = false,
-            Err(Error::Network(_)) => {}
-            Err(Error::Other(_)) => self.dropped = true,
-            Err(e) => return Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(_) => self.dropped = true,
         }
-        Ok(())
     }
 
-    async fn send(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+    async fn send(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
-            return Ok(());
+            return;
         }
         self.log.input(bytes);
         let r = self.writer.write(bytes).await;
-        self.settle(r)
+        self.settle(r);
     }
 
-    async fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
+    async fn resize(&mut self, cols: u16, rows: u16) {
         let r = self.writer.resize(cols, rows).await;
-        self.settle(r)
+        self.settle(r);
     }
 }
 
-/// Código de salida que aporta un evento del shell, si es de estado o señal.
-fn exit_code(ev: &ShellEvent) -> Option<i32> {
+/// Código de salida que aporta un evento del flujo, si es de salida.
+fn exit_code(ev: &StreamEvent) -> Option<i32> {
     match ev {
-        ShellEvent::ExitStatus(c) => Some(i32::try_from(*c).unwrap_or(255)),
-        ShellEvent::ExitSignal { signal, .. } => Some(exit_code_for_signal(signal)),
+        StreamEvent::Exit(c) => Some(*c),
         _ => None,
     }
 }
 
 /// Resultado final cuando el lector termina (`Closed`, `Lost` o canal agotado).
-/// `Lost` se devuelve como `friki_ssh::Error::Network` sin envolver en texto.
-fn finish(exit: Option<i32>, last: Option<ShellEvent>) -> anyhow::Result<i32> {
+/// `Lost` se devuelve como `friki_ssh::Error::Network` (error de red genérico en todos los
+/// protocolos), sin envolver en texto.
+fn finish(exit: Option<i32>, last: Option<StreamEvent>) -> anyhow::Result<i32> {
     match last {
-        Some(ShellEvent::Lost(msg)) => Err(Error::Network(msg).into()),
-        Some(ShellEvent::Closed) => Ok(exit.unwrap_or(0)),
+        Some(StreamEvent::Lost(msg)) => Err(Error::Network(msg).into()),
+        Some(StreamEvent::Closed) => Ok(exit.unwrap_or(0)),
         _ => exit.ok_or_else(|| Error::Network("canal cerrado sin estado de salida".into()).into()),
     }
 }
@@ -276,23 +277,18 @@ mod tests {
 
     #[test]
     fn exit_events_map_to_codes() {
-        assert_eq!(exit_code(&ShellEvent::ExitStatus(3)), Some(3));
-        assert_eq!(
-            exit_code(&ShellEvent::ExitSignal {
-                signal: "KILL".into(),
-                core_dumped: false
-            }),
-            Some(137)
-        );
-        assert_eq!(exit_code(&ShellEvent::Closed), None);
-        assert_eq!(exit_code(&ShellEvent::Data(vec![1])), None);
+        assert_eq!(exit_code(&StreamEvent::Exit(3)), Some(3));
+        assert_eq!(exit_code(&StreamEvent::Exit(137)), Some(137));
+        assert_eq!(exit_code(&StreamEvent::Closed), None);
+        assert_eq!(exit_code(&StreamEvent::Lost("x".into())), None);
+        assert_eq!(exit_code(&StreamEvent::Data(vec![1])), None);
     }
 
     #[test]
     fn finish_maps_final_events() {
-        assert_eq!(finish(Some(7), Some(ShellEvent::Closed)).ok(), Some(7));
-        assert_eq!(finish(None, Some(ShellEvent::Closed)).ok(), Some(0));
-        let e = finish(Some(1), Some(ShellEvent::Lost("corte".into()))).expect_err("lost");
+        assert_eq!(finish(Some(7), Some(StreamEvent::Closed)).ok(), Some(7));
+        assert_eq!(finish(None, Some(StreamEvent::Closed)).ok(), Some(0));
+        let e = finish(Some(1), Some(StreamEvent::Lost("corte".into()))).expect_err("lost");
         assert!(matches!(e.downcast_ref::<Error>(), Some(Error::Network(m)) if m == "corte"));
         let e = finish(None, None).expect_err("sin estado");
         assert!(matches!(e.downcast_ref::<Error>(), Some(Error::Network(_))));

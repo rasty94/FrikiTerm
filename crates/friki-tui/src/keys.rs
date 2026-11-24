@@ -3,7 +3,7 @@
 
 use crossterm::event::{KeyEvent, KeyEventKind};
 use friki_core::config::AppConfig;
-use friki_term::{Key, Modifiers};
+use friki_term::{Key, Modifiers, parse_chord};
 
 use crate::input::{pressed, translate_key};
 
@@ -57,74 +57,18 @@ const ACTIONS: [(&str, Action, &str); 16] = [
     ("quit", Action::Quit, "salir"),
 ];
 
+fn name_of(a: Action) -> &'static str {
+    ACTIONS
+        .iter()
+        .find(|(_, x, _)| *x == a)
+        .map_or("?", |(n, ..)| *n)
+}
+
 fn ctrl() -> Modifiers {
     Modifiers {
         ctrl: true,
         ..Default::default()
     }
-}
-
-/// Interpreta `"ctrl+]"`, `"shift+o"`, `"pageup"`, `"f5"`... Misma semántica que
-/// `friki_term::parse_chord`: modificadores `ctrl`/`alt`/`shift` separados por `+` y una
-/// tecla final (un carácter, un nombre o `f1`..`f12`), sin distinguir mayúsculas en
-/// nombres y modificadores.
-// ponytail: copia local porque `friki_term::parse_chord` aún es `todo!()` en esta rama;
-// sustituir por la de friki-term y borrar esta.
-pub fn parse_chord_local(s: &str) -> Option<Chord> {
-    let (mods_part, key_part, had_sep) = if s == "+" {
-        ("", "+", false)
-    } else if let Some(m) = s.strip_suffix("++") {
-        (m, "+", true)
-    } else if let Some((m, k)) = s.rsplit_once('+') {
-        (m, k, true)
-    } else {
-        ("", s, false)
-    };
-    if had_sep && mods_part.is_empty() {
-        return None;
-    }
-    let mut mods = Modifiers::default();
-    if !mods_part.is_empty() {
-        for m in mods_part.split('+') {
-            match m.to_lowercase().as_str() {
-                "ctrl" => mods.ctrl = true,
-                "alt" => mods.alt = true,
-                "shift" => mods.shift = true,
-                _ => return None,
-            }
-        }
-    }
-    let mut chars = key_part.chars();
-    let key = match (chars.next(), chars.next()) {
-        (None, _) => return None,
-        (Some(c), None) => Key::Char(c),
-        _ => match key_part.to_lowercase().as_str() {
-            "enter" => Key::Enter,
-            "tab" => Key::Tab,
-            "backtab" => Key::BackTab,
-            "esc" => Key::Esc,
-            "backspace" => Key::Backspace,
-            "up" => Key::Up,
-            "down" => Key::Down,
-            "left" => Key::Left,
-            "right" => Key::Right,
-            "home" => Key::Home,
-            "end" => Key::End,
-            "pageup" => Key::PageUp,
-            "pagedown" => Key::PageDown,
-            "insert" => Key::Insert,
-            "delete" => Key::Delete,
-            "space" => Key::Char(' '),
-            f => {
-                let n: u8 = f.strip_prefix('f')?.parse().ok()?;
-                if !(1..=12).contains(&n) {
-                    return None;
-                }
-                Key::F(n)
-            }
-        },
-    };
-    Some((key, mods))
 }
 
 /// Forma canónica para comparar: letras en minúscula con `shift` si eran mayúsculas;
@@ -168,34 +112,65 @@ pub struct Keymap {
     prefix_text: String,
     binds: Vec<(Chord, Action, String)>,
     armed: bool,
+    warnings: Vec<String>,
 }
 
 impl Keymap {
-    /// Un prefijo no válido cae al de `AppConfig::default()`; un atajo no válido o una
-    /// acción desconocida se ignoran.
+    /// Un prefijo no válido cae al de `AppConfig::default()`; un atajo no válido, repetido
+    /// (tras interpretarlo con `friki_term::parse_chord` y normalizarlo) o igual al prefijo
+    /// se ignora. Todo ello queda en `warnings()`.
     pub fn new(cfg: &AppConfig) -> Self {
         let default = AppConfig::default();
-        let (raw, prefix_text) = match parse_chord_local(&cfg.prefix) {
+        let mut warnings = Vec::new();
+        let (raw, prefix_text) = match parse_chord(&cfg.prefix) {
             Some(c) => (c, cfg.prefix.clone()),
-            None => (
-                parse_chord_local(&default.prefix).unwrap_or((Key::Char(']'), ctrl())),
-                default.prefix.clone(),
-            ),
+            None => {
+                warnings.push(format!(
+                    "prefijo `{}` no válido: se usa `{}`",
+                    cfg.prefix, default.prefix
+                ));
+                (
+                    parse_chord(&default.prefix).unwrap_or((Key::Char(']'), ctrl())),
+                    default.prefix.clone(),
+                )
+            }
         };
-        let binds = ACTIONS
-            .iter()
-            .filter_map(|(name, action, _)| {
-                let text = cfg.bindings.get(*name)?;
-                Some((canon(parse_chord_local(text)?), *action, text.clone()))
-            })
-            .collect();
+        let prefix = canon(raw);
+        let mut binds: Vec<(Chord, Action, String)> = Vec::new();
+        for (name, action, _) in ACTIONS {
+            let Some(text) = cfg.bindings.get(name) else {
+                continue;
+            };
+            let Some(chord) = parse_chord(text).map(canon) else {
+                warnings.push(format!("atajo `{name}` = `{text}` no válido: se ignora"));
+                continue;
+            };
+            if chord == prefix {
+                warnings.push(format!(
+                    "atajo `{name}` = `{text}` coincide con el prefijo: se ignora"
+                ));
+            } else if let Some((_, other, _)) = binds.iter().find(|(b, ..)| *b == chord) {
+                warnings.push(format!(
+                    "atajo `{name}` = `{text}` repite el de `{}`: se ignora",
+                    name_of(*other)
+                ));
+            } else {
+                binds.push((chord, action, text.clone()));
+            }
+        }
         Self {
             prefix_raw: raw,
-            prefix: canon(raw),
+            prefix,
             prefix_text,
             binds,
             armed: false,
+            warnings,
         }
+    }
+
+    /// Problemas de la configuración de atajos (ignorados, no fatales).
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub fn is_armed(&self) -> bool {
@@ -285,35 +260,32 @@ mod tests {
     }
 
     #[test]
-    fn parses_chords() {
-        let m = |ctrl, alt, shift| Modifiers { ctrl, alt, shift };
-        let none = Modifiers::default();
-        assert_eq!(
-            parse_chord_local("ctrl+]"),
-            Some((Key::Char(']'), m(true, false, false)))
-        );
-        assert_eq!(
-            parse_chord_local("Ctrl+Alt+F5"),
-            Some((Key::F(5), m(true, true, false)))
-        );
-        assert_eq!(
-            parse_chord_local("shift+o"),
-            Some((Key::Char('o'), m(false, false, true)))
-        );
-        assert_eq!(
-            parse_chord_local("ctrl++"),
-            Some((Key::Char('+'), m(true, false, false)))
-        );
-        assert_eq!(parse_chord_local("+"), Some((Key::Char('+'), none)));
-        assert_eq!(parse_chord_local("\""), Some((Key::Char('"'), none)));
-        assert_eq!(parse_chord_local("PageUp"), Some((Key::PageUp, none)));
-        assert_eq!(parse_chord_local("space"), Some((Key::Char(' '), none)));
-        assert_eq!(parse_chord_local("f12").map(|c| c.0), Some(Key::F(12)));
-        for bad in [
-            "", "f13", "f0", "foo", "a+", "+x", "meta+a", "ctrl+", "ctrl+ab",
-        ] {
-            assert_eq!(parse_chord_local(bad), None, "{bad}");
+    fn default_bindings_parse_with_friki_term() {
+        let cfg = AppConfig::default();
+        assert!(parse_chord(&cfg.prefix).is_some());
+        for (action, key) in &cfg.bindings {
+            assert!(parse_chord(key).is_some(), "{action}: {key}");
         }
+        assert!(Keymap::new(&cfg).warnings().is_empty());
+    }
+
+    #[test]
+    fn invalid_and_repeated_chords_warn_and_are_ignored() {
+        let mut cfg = AppConfig::default();
+        cfg.bindings.insert("help".into(), "ctrl+".into()); // no válida
+        cfg.bindings.insert("focus-next".into(), "shift+o".into());
+        cfg.bindings.insert("focus-prev".into(), "O".into()); // mismo que `shift+o`
+        cfg.bindings.insert("quit".into(), "ctrl+5".into()); // = prefijo (ctrl+])
+        let mut km = Keymap::new(&cfg);
+        let w = km.warnings().join("\n");
+        assert!(w.contains("`help`") && w.contains("no válido"), "{w}");
+        assert!(w.contains("`focus-prev`") && w.contains("repite"), "{w}");
+        assert!(w.contains("`quit`") && w.contains("prefijo"), "{w}");
+        assert_eq!(km.key_for(Action::Help), "");
+        assert_eq!(km.key_for(Action::Quit), "");
+        assert_eq!(km.key_for(Action::FocusNext), "shift+o"); // gana el primero (orden de ACTIONS)
+        km.feed(&pre());
+        assert_eq!(km.feed(&plain('O')), KeyOut::Do(Action::FocusNext));
     }
 
     fn map() -> Keymap {
@@ -392,6 +364,7 @@ mod tests {
         cfg.bindings.insert("quit".into(), "Q".into());
         cfg.bindings.insert("help".into(), "no-valida".into());
         let mut km = Keymap::new(&cfg);
+        assert_eq!(km.warnings().len(), 1);
         assert_eq!(km.feed(&pre()), KeyOut::Forward(Key::Char(']'), ctrl()));
         assert_eq!(
             km.feed(&k(KeyCode::Char('b'), KeyModifiers::CONTROL)),
@@ -400,7 +373,9 @@ mod tests {
         assert_eq!(km.feed(&plain('Q')), KeyOut::Do(Action::Quit));
         assert_eq!(km.key_for(Action::Help), "");
         cfg.prefix = "???".into();
-        assert!(Keymap::new(&cfg).hint().starts_with(" ctrl+] "));
+        let km = Keymap::new(&cfg);
+        assert!(km.hint().starts_with(" ctrl+] "));
+        assert!(km.warnings().iter().any(|w| w.contains("prefijo")));
     }
 
     #[test]

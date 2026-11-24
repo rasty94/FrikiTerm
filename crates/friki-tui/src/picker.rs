@@ -1,8 +1,13 @@
-//! Selector de sesión: lista de sesiones guardadas filtrable escribiendo, o un destino
+//! Selector de sesión: árbol de carpetas (`session_tree`) con las sesiones guardadas,
+//! filtrable escribiendo (sobre ruta + nombre, host y usuario), o un destino
 //! `[user@]host[:port]`. Estado puro, sin E/S.
 
+use std::collections::HashSet;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use friki_core::config::{SessionConfig, resolve_target};
+use friki_core::config::{Protocol, SessionConfig, resolve_target, session_tree};
+
+use crate::target::tag;
 
 const ROWS: usize = 8;
 
@@ -18,14 +23,49 @@ pub struct Picker {
     pub filter: String,
     sel: usize,
     pub error: Option<String>,
+    /// Carpetas plegadas (ruta completa).
+    collapsed: HashSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Row {
+    Folder { path: String, depth: usize },
+    Session { idx: usize, depth: usize },
+}
+
+/// `carpeta/nombre`, o solo el nombre en la raíz.
+fn full_name(s: &SessionConfig) -> String {
+    let folder = friki_core::config::normalize_folder(&s.folder).unwrap_or_default();
+    if folder.is_empty() {
+        s.name.clone()
+    } else {
+        format!("{folder}/{}", s.name)
+    }
 }
 
 fn matches(s: &SessionConfig, f: &str) -> bool {
     let f = f.to_lowercase();
     let user_host = format!("{}@{}", s.user.as_deref().unwrap_or(""), s.host);
-    [s.name.as_str(), s.host.as_str(), user_host.as_str()]
-        .iter()
-        .any(|t| t.to_lowercase().contains(&f))
+    [
+        full_name(s).as_str(),
+        s.host.as_str(),
+        user_host.as_str(),
+        tag(s.protocol),
+    ]
+    .iter()
+    .any(|t| t.to_lowercase().contains(&f))
+}
+
+/// Destino entre paréntesis según el protocolo.
+fn detail(s: &SessionConfig) -> String {
+    match s.protocol {
+        Protocol::Serial => format!("{}@{}", s.serial.device, s.serial.baud),
+        Protocol::LocalShell => s.local_command.clone().unwrap_or_else(|| "shell".into()),
+        _ => {
+            let who = s.user.as_deref().map_or(String::new(), |u| format!("{u}@"));
+            format!("{who}{}:{}", s.host, s.port)
+        }
+    }
 }
 
 impl Picker {
@@ -35,14 +75,96 @@ impl Picker {
             filter: String::new(),
             sel: 0,
             error,
+            collapsed: HashSet::new(),
         }
     }
 
-    /// Índices de las sesiones que cumplen el filtro.
-    fn visible(&self) -> Vec<usize> {
-        (0..self.sessions.len())
-            .filter(|&i| matches(&self.sessions[i], &self.filter))
-            .collect()
+    fn hidden(&self, folder: &str, include_self: bool) -> bool {
+        let mut acc = String::new();
+        let segs: Vec<&str> = folder.split('/').filter(|s| !s.is_empty()).collect();
+        let n = if include_self {
+            segs.len()
+        } else {
+            segs.len().saturating_sub(1)
+        };
+        for seg in segs.into_iter().take(n) {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            if self.collapsed.contains(&acc) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Filas visibles. Con filtro, solo las sesiones que lo cumplen (planas); sin filtro,
+    /// el árbol con las carpetas plegadas ocultando su contenido.
+    fn rows(&self) -> Vec<Row> {
+        let filtering = !self.filter.trim().is_empty();
+        let mut out = Vec::new();
+        for (folder, list) in session_tree(&self.sessions) {
+            let depth = folder.split('/').filter(|s| !s.is_empty()).count();
+            if !filtering {
+                if !folder.is_empty() {
+                    if self.hidden(&folder, false) {
+                        continue;
+                    }
+                    out.push(Row::Folder {
+                        path: folder.clone(),
+                        depth: depth - 1,
+                    });
+                }
+                if self.hidden(&folder, true) {
+                    continue;
+                }
+            }
+            for s in list {
+                let Some(idx) = self.sessions.iter().position(|x| std::ptr::eq(x, s)) else {
+                    continue;
+                };
+                if !filtering || matches(s, self.filter.trim()) {
+                    out.push(Row::Session {
+                        idx,
+                        depth: if filtering { 0 } else { depth },
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn clamp(&mut self) {
+        self.sel = self.sel.min(self.rows().len().saturating_sub(1));
+    }
+
+    fn set_collapsed(&mut self, path: &str, on: bool) {
+        if on {
+            self.collapsed.insert(path.to_string());
+        } else {
+            self.collapsed.remove(path);
+        }
+        // La selección sigue a la carpeta aunque cambie la lista.
+        if let Some(i) = self
+            .rows()
+            .iter()
+            .position(|r| matches!(r, Row::Folder { path: p, .. } if p == path))
+        {
+            self.sel = i;
+        }
+        self.clamp();
+    }
+
+    /// Carpeta de la fila seleccionada (la propia si es carpeta; la de la sesión si no).
+    fn selected_folder(&self) -> Option<String> {
+        match self.rows().get(self.sel)? {
+            Row::Folder { path, .. } => Some(path.clone()),
+            Row::Session { idx, .. } => {
+                let f = friki_core::config::normalize_folder(&self.sessions[*idx].folder)?;
+                (!f.is_empty()).then_some(f)
+            }
+        }
     }
 
     pub fn handle_key(&mut self, ev: &KeyEvent) -> PickerOut {
@@ -52,11 +174,22 @@ impl Picker {
             return PickerOut::Pending;
         }
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
+        let browsing = self.filter.trim().is_empty();
         match ev.code {
             KeyCode::Esc => return PickerOut::Cancel,
             KeyCode::Char('c') if ctrl => return PickerOut::Cancel,
             KeyCode::Up => self.sel = self.sel.saturating_sub(1),
-            KeyCode::Down => self.sel = (self.sel + 1).min(self.visible().len().saturating_sub(1)),
+            KeyCode::Down => self.sel = (self.sel + 1).min(self.rows().len().saturating_sub(1)),
+            KeyCode::Left if browsing => {
+                if let Some(f) = self.selected_folder() {
+                    self.set_collapsed(&f, true);
+                }
+            }
+            KeyCode::Right if browsing => {
+                if let Some(Row::Folder { path, .. }) = self.rows().get(self.sel).cloned() {
+                    self.set_collapsed(&path, false);
+                }
+            }
             KeyCode::Backspace => {
                 self.filter.pop();
                 self.sel = 0;
@@ -80,10 +213,19 @@ impl Picker {
         self.error = None;
     }
 
-    /// Con coincidencias, la seleccionada; sin ellas, el texto es un destino ad hoc.
+    /// Sesión seleccionada: se abre; carpeta: se pliega o despliega; sin filas, el texto
+    /// es un destino ad hoc.
     fn accept(&mut self) -> PickerOut {
-        if let Some(&i) = self.visible().get(self.sel) {
-            return PickerOut::Open(Box::new(self.sessions[i].clone()));
+        match self.rows().get(self.sel).cloned() {
+            Some(Row::Session { idx, .. }) => {
+                return PickerOut::Open(Box::new(self.sessions[idx].clone()));
+            }
+            Some(Row::Folder { path, .. }) => {
+                let on = !self.collapsed.contains(&path);
+                self.set_collapsed(&path, on);
+                return PickerOut::Pending;
+            }
+            None => {}
         }
         match resolve_target(&self.sessions, self.filter.trim()) {
             Some(s) if !self.filter.trim().is_empty() => PickerOut::Open(Box::new(s)),
@@ -94,25 +236,47 @@ impl Picker {
         }
     }
 
-    /// Líneas del diálogo: filtro, ventana de la lista y ayuda.
+    /// Líneas del diálogo: filtro, ventana del árbol y ayuda.
     pub fn lines(&self) -> Vec<String> {
-        let vis = self.visible();
+        let rows = self.rows();
         let mut v = vec![format!("> {}_", self.filter)];
         let start = self.sel.saturating_sub(ROWS - 1);
-        for (n, &i) in vis.iter().enumerate().skip(start).take(ROWS) {
-            let s = &self.sessions[i];
+        for (n, row) in rows.iter().enumerate().skip(start).take(ROWS) {
             let mark = if n == self.sel { ">" } else { " " };
-            let who = s.user.as_deref().map_or(String::new(), |u| format!("{u}@"));
-            v.push(format!("{mark} {}  ({who}{}:{})", s.name, s.host, s.port));
+            match row {
+                Row::Folder { path, depth } => {
+                    let open = if self.collapsed.contains(path) {
+                        "[+]"
+                    } else {
+                        "[-]"
+                    };
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    v.push(format!("{mark} {}{open} {name}/", "  ".repeat(*depth)));
+                }
+                Row::Session { idx, depth } => {
+                    let s = &self.sessions[*idx];
+                    let name = if *depth == 0 && !self.filter.trim().is_empty() {
+                        full_name(s)
+                    } else {
+                        s.name.clone()
+                    };
+                    v.push(format!(
+                        "{mark} {}{name}  [{}]  ({})",
+                        "  ".repeat(*depth),
+                        tag(s.protocol),
+                        detail(s)
+                    ));
+                }
+            }
         }
-        if vis.is_empty() {
+        if rows.is_empty() {
             v.push("  (sin coincidencias: Enter abre el texto como destino)".into());
         }
         if let Some(e) = &self.error {
             v.push(e.clone());
         }
         v.push(String::new());
-        v.push("Enter abre  Esc cancela  flechas eligen".into());
+        v.push("Enter abre  Esc cancela  flechas eligen  izq/der pliegan".into());
         v
     }
 }
@@ -129,6 +293,13 @@ mod tests {
             ..Default::default()
         }
     }
+    fn sf(name: &str, folder: &str, p: Protocol) -> SessionConfig {
+        SessionConfig {
+            folder: folder.into(),
+            protocol: p,
+            ..s(name, "10.0.0.9")
+        }
+    }
     fn key(c: KeyCode) -> KeyEvent {
         KeyEvent::new(c, KeyModifiers::NONE)
     }
@@ -136,6 +307,9 @@ mod tests {
         for c in t.chars() {
             p.handle_key(&key(KeyCode::Char(c)));
         }
+    }
+    fn text(p: &Picker) -> String {
+        p.lines().join("\n")
     }
 
     fn picker() -> Picker {
@@ -145,12 +319,24 @@ mod tests {
         )
     }
 
+    fn tree() -> Picker {
+        Picker::new(
+            vec![
+                s("raiz", "r"),
+                sf("db", "clientes/acme", Protocol::Ssh),
+                sf("router", "clientes/acme", Protocol::Telnet),
+                sf("consola", "lab", Protocol::Serial),
+            ],
+            None,
+        )
+    }
+
     #[test]
     fn filters_and_opens_selected() {
         let mut p = picker();
-        assert_eq!(p.visible().len(), 2);
+        assert_eq!(p.rows().len(), 2);
         type_str(&mut p, "WEB");
-        assert_eq!(p.visible(), vec![1]);
+        assert_eq!(p.rows(), vec![Row::Session { idx: 1, depth: 0 }]);
         match p.handle_key(&key(KeyCode::Enter)) {
             PickerOut::Open(c) => assert_eq!(c.name, "web"),
             o => panic!("{o:?}"),
@@ -193,5 +379,68 @@ mod tests {
         let mut p = Picker::new(vec![], None);
         assert_eq!(p.handle_key(&key(KeyCode::Enter)), PickerOut::Pending);
         assert!(p.error.is_some());
+    }
+
+    #[test]
+    fn tree_shows_folders_and_protocols() {
+        let t = text(&tree());
+        let order = [
+            "[-] clientes/",
+            "[-] acme/",
+            "db  [ssh]",
+            "router  [telnet]",
+        ];
+        let pos: Vec<usize> = order.iter().map(|o| t.find(o).expect(o)).collect();
+        assert!(pos.windows(2).all(|w| w[0] < w[1]), "{t}");
+        assert!(
+            t.contains("[-] lab/") && t.contains("consola  [serie]"),
+            "{t}"
+        );
+        assert!(t.contains("raiz  [ssh]"), "{t}");
+        // Raíz primero, luego las carpetas.
+        assert!(t.find("raiz").expect("raiz") < t.find("clientes/").expect("clientes"));
+    }
+
+    #[test]
+    fn collapse_and_expand_with_arrows() {
+        let mut p = tree();
+        // Filas: raiz, clientes/, acme/, db, router, lab/, consola
+        assert_eq!(p.rows().len(), 7);
+        p.handle_key(&key(KeyCode::Down)); // clientes/
+        p.handle_key(&key(KeyCode::Left));
+        assert_eq!(p.rows().len(), 4); // raiz, clientes/ (plegada), lab/, consola
+        assert!(text(&p).contains("[+] clientes/"));
+        p.handle_key(&key(KeyCode::Right));
+        assert_eq!(p.rows().len(), 7);
+        // Enter sobre una carpeta la pliega; sobre una sesión, la abre.
+        assert_eq!(p.handle_key(&key(KeyCode::Enter)), PickerOut::Pending);
+        assert_eq!(p.rows().len(), 4);
+        // Plegar desde una sesión pliega su carpeta y se queda en ella.
+        let mut p = tree();
+        for _ in 0..3 {
+            p.handle_key(&key(KeyCode::Down)); // db
+        }
+        p.handle_key(&key(KeyCode::Left));
+        assert!(text(&p).contains("[+] acme/"));
+        assert_eq!(p.rows().len(), 5); // raiz, clientes/, acme/, lab/, consola
+        assert_eq!(p.sel, 2);
+    }
+
+    #[test]
+    fn filter_matches_path_name_and_protocol() {
+        let mut p = tree();
+        type_str(&mut p, "acme/r");
+        assert_eq!(p.rows(), vec![Row::Session { idx: 2, depth: 0 }]);
+        assert!(text(&p).contains("clientes/acme/router  [telnet]"));
+        match p.handle_key(&key(KeyCode::Enter)) {
+            PickerOut::Open(c) => assert_eq!(c.protocol, Protocol::Telnet),
+            o => panic!("{o:?}"),
+        }
+        let mut p = tree();
+        type_str(&mut p, "serie");
+        assert_eq!(p.rows().len(), 1);
+        // Las flechas laterales no hacen nada mientras se filtra.
+        p.handle_key(&key(KeyCode::Left));
+        assert_eq!(p.rows().len(), 1);
     }
 }

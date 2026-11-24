@@ -1,6 +1,6 @@
 //! Dibujo: `Screen` -> buffer de ratatui, barra de estado y diálogos.
 
-use friki_term::{Color as TColor, Screen};
+use friki_term::Screen;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,17 +10,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::dialog::Dialog;
+use crate::theme::Theme;
 
-fn color(c: TColor) -> Color {
-    match c {
-        TColor::Default => Color::Reset,
-        TColor::Indexed(i) => Color::Indexed(i),
-        TColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
-    }
-}
-
-/// Copia el `Screen` al buffer, celda a celda, recortando a `area`.
-pub fn screen_to_buffer(screen: &Screen, buf: &mut Buffer, area: Rect) {
+/// Copia el `Screen` al buffer, celda a celda, recortando a `area` y aplicando el tema.
+pub fn screen_to_buffer(screen: &Screen, buf: &mut Buffer, area: Rect, theme: &Theme) {
     let cols = screen.cols as usize;
     for row in 0..screen.rows.min(area.height) {
         let mut prev_wide = false;
@@ -28,7 +21,9 @@ pub fn screen_to_buffer(screen: &Screen, buf: &mut Buffer, area: Rect) {
             let Some(cell) = screen.cells.get(row as usize * cols + col as usize) else {
                 continue;
             };
-            let mut style = Style::default().fg(color(cell.fg)).bg(color(cell.bg));
+            let mut style = Style::default()
+                .fg(theme.color(cell.fg, false))
+                .bg(theme.color(cell.bg, true));
             for (on, m) in [
                 (cell.bold, Modifier::BOLD),
                 (cell.italic, Modifier::ITALIC),
@@ -60,6 +55,8 @@ pub struct StatusInfo<'a> {
     pub state: &'a str,
     /// Cifrado negociado, compacto (vacío si no se conoce).
     pub cipher: &'a str,
+    /// Redirecciones SSH activas, ya formateadas (vacío si no hay).
+    pub forwards: &'a str,
     /// `legacy_algorithms` activo o algoritmo heredado negociado: indicador permanente.
     pub legacy: bool,
     /// Problema con el registro de sesión (no se abre o dejó de escribir).
@@ -71,6 +68,10 @@ pub fn status_line(info: &StatusInfo, right: &str, width: u16) -> Line<'static> 
     if !info.cipher.is_empty() {
         left.push_str(" | ");
         left.push_str(info.cipher);
+    }
+    if !info.forwards.is_empty() {
+        left.push_str(" | ");
+        left.push_str(info.forwards);
     }
     left.push(' ');
     let mut spans = vec![Span::raw(left)];
@@ -161,7 +162,7 @@ pub fn draw_dialog(frame: &mut Frame, d: &Dialog) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use friki_term::Cell;
+    use friki_term::{Cell, Color as TColor};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -202,7 +203,12 @@ mod tests {
     #[test]
     fn screen_cells_colors_attrs() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
-        screen_to_buffer(&screen(), &mut buf, Rect::new(0, 0, 4, 2));
+        screen_to_buffer(
+            &screen(),
+            &mut buf,
+            Rect::new(0, 0, 4, 2),
+            &Theme::default(),
+        );
         let a = &buf[(0, 0)];
         assert_eq!(a.symbol(), "A");
         assert_eq!(a.fg, Color::Indexed(1));
@@ -224,6 +230,7 @@ mod tests {
             host: "h:22",
             state: "conectado",
             cipher: "chacha20-poly1305",
+            forwards: "L 127.0.0.1:1>x:2",
             legacy: true,
             log_warn: Some("sin registro"),
         };
@@ -235,7 +242,17 @@ mod tests {
         assert!(line.contains("web | h:22 | conectado"));
         assert!(line.contains("ctrl+] q salir"));
         assert!(line.contains("chacha20-poly1305") && line.contains("LEGACY"));
-        assert!(line.contains("sin registro"));
+        assert!(line.contains("sin registro") && line.contains("L 127.0.0.1:1>x:2"));
+    }
+
+    #[test]
+    fn theme_recolors_default_cells() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
+        let (t, _) = Theme::named("solarized-dark");
+        screen_to_buffer(&screen(), &mut buf, Rect::new(0, 0, 4, 2), &t);
+        assert_eq!(buf[(1, 0)].bg, Color::Rgb(0, 0x2b, 0x36)); // fondo por defecto
+        assert_eq!(buf[(0, 0)].fg, Color::Rgb(0xdc, 0x32, 0x2f)); // índice 1 remapeado
+        assert_eq!(buf[(0, 0)].bg, Color::Rgb(1, 2, 3)); // RGB intacto
     }
 
     #[test]
