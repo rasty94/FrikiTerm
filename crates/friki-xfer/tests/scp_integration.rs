@@ -101,7 +101,11 @@ async fn scp_fichero_y_recursivo() {
             .expect("down"),
         1
     );
-    assert_eq!(std::fs::read(out.join("it's.txt")).expect("leer"), b"x");
+    // El nombre local es el basename remoto (`friki-xfer-scp-PID-it's.txt`).
+    let odd_name = std::path::Path::new(&remote_odd)
+        .file_name()
+        .expect("nombre");
+    assert_eq!(std::fs::read(out.join(odd_name)).expect("leer"), b"x");
 
     // Recursivo: sube `src` como `remote`, baja de vuelta.
     let n = scp::upload(&conn, &src, &remote, true)

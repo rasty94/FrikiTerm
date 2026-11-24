@@ -115,7 +115,7 @@ async fn sftp_contra_sshd() {
     // Errores mapeados.
     let r = fs.open_read(&p("no-existe"), 0).await;
     assert!(matches!(r, Err(Error::NotFound(_))), "{:?}", r.err());
-    let r = fs.mkdir("/proc/friki").await;
+    let r = fs.mkdir("/root/friki").await;
     assert!(
         matches!(r, Err(Error::PermissionDenied(_) | Error::Protocol(_))),
         "{:?}",

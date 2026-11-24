@@ -259,6 +259,7 @@ pub struct Connection {
     info: Arc<session::Info>,
     verifier: Arc<dyn HostKeyVerifier>,
     warnings: Vec<String>,
+    target: (String, String, u16),
     forwards: std::sync::Mutex<ForwardState>,
     _jumps: Vec<russh::client::Handle<session::Handler>>,
 }
@@ -284,9 +285,22 @@ impl Connection {
             info: c.info,
             verifier,
             warnings: c.warnings,
+            target: (
+                cfg.user
+                    .clone()
+                    .or_else(session::default_user)
+                    .unwrap_or_default(),
+                cfg.host.clone(),
+                cfg.port,
+            ),
             forwards: std::sync::Mutex::default(),
             _jumps: c.jumps,
         })
+    }
+
+    /// (usuario, host, puerto) efectivos del destino (no de los saltos).
+    pub fn target(&self) -> (String, String, u16) {
+        self.target.clone()
     }
 
     fn fwd(&self) -> std::sync::MutexGuard<'_, ForwardState> {

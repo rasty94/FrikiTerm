@@ -216,7 +216,7 @@ impl client::Handler for Handler {
     }
 }
 
-fn default_user() -> Option<String> {
+pub(crate) fn default_user() -> Option<String> {
     ["USER", "USERNAME", "LOGNAME"]
         .iter()
         .find_map(|v| std::env::var(v).ok())
