@@ -383,7 +383,7 @@ async fn finish(conn: Connection, res: anyhow::Result<()>) -> anyhow::Result<i32
 pub async fn get(args: GetArgs) -> anyhow::Result<i32> {
     if is_url(&args.remote) {
         let (fs, rpath) = url_fs(&args.remote, false)?;
-        download_fs(fs, &rpath, args.local.as_deref(), args.recursive, args.json).await?;
+        download_fs(fs, &[rpath.as_str()], args.local.as_deref(), args.recursive, args.json).await?;
         return Ok(0);
     }
     let (target, rpath) = need_remote(&args.remote)?;
@@ -445,7 +445,7 @@ pub async fn cp(args: CpArgs) -> anyhow::Result<i32> {
         && is_url(src)
     {
         let (fs, rpath) = url_fs(src, false)?;
-        download_fs(fs, &rpath, Some(Path::new(dst)), rec, json).await?;
+        download_fs(fs, &[rpath.as_str()], Some(Path::new(dst)), rec, json).await?;
         return Ok(0);
     }
     if let Some((target, rpath)) = split_remote(dst) {

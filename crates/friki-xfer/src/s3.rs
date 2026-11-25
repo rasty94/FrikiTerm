@@ -613,8 +613,10 @@ mod tests {
     async fn minio_ciclo_completo() {
         use rusty_s3::actions::CreateBucket;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // MinIO no entra en FRIKI_TEST_REQUIRED (la CI no lo levanta): sin endpoint, se salta.
         let Ok(ep) = std::env::var("FRIKI_TEST_S3_ENDPOINT") else {
-            panic!("falta FRIKI_TEST_S3_ENDPOINT");
+            eprintln!("aviso: sin FRIKI_TEST_S3_ENDPOINT, prueba MinIO saltada");
+            return;
         };
         let name = std::env::var("FRIKI_TEST_S3_BUCKET").unwrap_or("friki-test".into());
         let mut o = S3Options::from_env(&name);
