@@ -2,6 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use friki_ssh::{HostKeyDecision, Zeroizing};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
@@ -31,6 +32,8 @@ enum Kind {
     Input { multi: bool },
     /// s / n.
     Confirm,
+    /// Hay que escribir "yes" y Enter (Esc cancela); contesta `Confirm`.
+    ConfirmYes,
     /// Aviso: Enter, Esc o espacio lo cierran.
     Notice,
 }
@@ -44,6 +47,8 @@ pub struct Dialog {
     pub focus: usize,
     /// El aviso de clave cambiada se pinta en rojo.
     pub alert: bool,
+    /// Hasta este instante el diálogo descarta teclas y pegados (los provoca el remoto).
+    locked_until: Option<Instant>,
 }
 
 /// Quita de un texto ajeno (servidor, nombres de algoritmo) los controles C0, DEL y C1,
@@ -87,7 +92,34 @@ impl Dialog {
             fields,
             focus: 0,
             alert: false,
+            locked_until: None,
         }
+    }
+
+    /// Descarta la entrada durante `d` desde ahora: un diálogo que abre el remoto no debe
+    /// recibir teclas que el usuario tecleaba antes de verlo.
+    pub fn locked_for(mut self, d: Duration) -> Self {
+        self.locked_until = Some(Instant::now() + d);
+        self
+    }
+
+    fn is_locked(&self) -> bool {
+        self.locked_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    #[cfg(test)]
+    pub fn unlock(&mut self) {
+        self.locked_until = None;
+    }
+
+    /// Pide escribir `yes` y Enter (no basta una tecla).
+    pub fn confirm_yes(title: &str, question: &str) -> Self {
+        Self::new(
+            Kind::ConfirmYes,
+            title.into(),
+            vec![question.into(), "Escriba yes y Enter; Esc cancela.".into()],
+            vec![field("> ", true)],
+        )
     }
 
     pub fn unknown_host(host: &str, port: u16, algorithm: &str, fingerprint: &str) -> Self {
@@ -191,11 +223,6 @@ impl Dialog {
         )
     }
 
-    /// Pregunta s/n (Esc cancela).
-    pub fn confirm(title: &str, question: &str) -> Self {
-        Self::new(Kind::Confirm, title.into(), vec![question.into()], vec![])
-    }
-
     /// Entrada de una línea con eco y valor inicial (renombrar pestaña). Contesta con
     /// `Answer::Secret(Some(texto))`.
     pub fn text(title: &str, label: &str, initial: &str) -> Self {
@@ -216,7 +243,7 @@ impl Dialog {
 
     /// Procesa una tecla; `Some` cuando el diálogo termina.
     pub fn handle_key(&mut self, ev: &KeyEvent) -> Option<Answer> {
-        if ignored(ev) {
+        if ignored(ev) || self.is_locked() {
             return None;
         }
         let ctrl_c = ev.modifiers.contains(KeyModifiers::CONTROL) && ev.code == KeyCode::Char('c');
@@ -264,6 +291,20 @@ impl Dialog {
                 self.edit(ev);
                 None
             }
+            Kind::ConfirmYes => {
+                if cancel {
+                    return Some(Answer::Confirm(false));
+                }
+                if ev.code == KeyCode::Enter {
+                    let yes = self
+                        .fields
+                        .first()
+                        .is_some_and(|f| f.value.as_str() == "yes");
+                    return yes.then_some(Answer::Confirm(true));
+                }
+                self.edit(ev);
+                None
+            }
             Kind::Confirm => match ev.code {
                 _ if cancel => Some(Answer::Confirm(false)),
                 KeyCode::Char('s' | 'S') => Some(Answer::Confirm(true)),
@@ -277,6 +318,9 @@ impl Dialog {
 
     /// Texto pegado (bracketed paste) en el campo activo: primera línea, sin controles.
     pub fn paste(&mut self, text: &str) {
+        if self.is_locked() {
+            return;
+        }
         if let Some(f) = self.fields.get_mut(self.focus) {
             let line = text.lines().next().unwrap_or("");
             f.value.extend(line.chars().filter(|c| !c.is_control()));
@@ -311,7 +355,7 @@ impl Dialog {
             Kind::Trust | Kind::Changed => Answer::HostKey(HostKeyDecision::Reject),
             Kind::Input { multi: true } => Answer::Multi(None),
             Kind::Input { multi: false } => Answer::Secret(None),
-            Kind::Confirm | Kind::Notice => Answer::Confirm(false),
+            Kind::Confirm | Kind::ConfirmYes | Kind::Notice => Answer::Confirm(false),
         }
     }
 }
@@ -481,6 +525,35 @@ mod tests {
         assert_eq!(
             n.handle_key(&key(KeyCode::Enter)),
             Some(Answer::Confirm(true))
+        );
+    }
+
+    #[test]
+    fn confirm_yes_needs_the_word_and_locked_dialogs_drop_input() {
+        let mut d = Dialog::confirm_yes("Zmodem", "Recibir?").locked_for(Duration::from_secs(60));
+        // Bloqueado: ni teclas ni pegados llegan.
+        for c in "yes".chars() {
+            assert!(d.handle_key(&key(KeyCode::Char(c))).is_none());
+        }
+        d.paste("yes");
+        assert!(d.fields[0].value.is_empty());
+        assert!(d.handle_key(&key(KeyCode::Esc)).is_none());
+        d.unlock();
+        assert!(d.handle_key(&key(KeyCode::Char('s'))).is_none());
+        assert!(
+            d.handle_key(&key(KeyCode::Enter)).is_none(),
+            "una s no basta"
+        );
+        d.handle_key(&key(KeyCode::Backspace));
+        type_str(&mut d, "yes");
+        assert_eq!(
+            d.handle_key(&key(KeyCode::Enter)),
+            Some(Answer::Confirm(true))
+        );
+        let mut d = Dialog::confirm_yes("Zmodem", "Recibir?");
+        assert_eq!(
+            d.handle_key(&key(KeyCode::Esc)),
+            Some(Answer::Confirm(false))
         );
     }
 }
