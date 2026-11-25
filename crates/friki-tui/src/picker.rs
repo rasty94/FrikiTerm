@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use friki_core::config::{Protocol, SessionConfig, resolve_target, session_tree};
 
-use crate::target::tag;
+use crate::tag;
 
 const ROWS: usize = 8;
 

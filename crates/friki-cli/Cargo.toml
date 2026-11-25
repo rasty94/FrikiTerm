@@ -30,6 +30,7 @@ friki-core = { path = "../friki-core" }
 friki-ssh = { path = "../friki-ssh" }
 friki-term = { path = "../friki-term" }
 friki-tui = { path = "../friki-tui" }
+friki-session = { path = "../friki-session" }
 friki-xfer = { path = "../friki-xfer" }
 friki-script = { path = "../friki-script" }
 friki-serial = { path = "../friki-serial" }
@@ -37,7 +38,6 @@ friki-tftp = { path = "../friki-tftp" }
 anyhow = "1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
-russh-sftp = "4"
 rpassword = "7"
 serde_json = "1"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "net", "signal", "sync", "time"] }

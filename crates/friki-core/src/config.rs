@@ -454,17 +454,29 @@ pub fn load_sessions(dir: &Path) -> Result<Vec<SessionConfig>> {
     Ok(out)
 }
 
-/// Escribe `<dir>/<name>.toml` de forma atómica y devuelve la ruta.
-pub fn save_session(dir: &Path, session: &SessionConfig) -> Result<PathBuf> {
-    let name = &session.name;
+/// `<dir>/<name>.toml`, rechazando nombres que no valen como nombre de fichero.
+fn session_path(dir: &Path, name: &str) -> Result<PathBuf> {
     let bad = name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']);
     if bad {
         return Err(Error::Parse {
-            path: name.clone(),
+            path: name.to_string(),
             msg: "nombre de sesión no válido como nombre de fichero".into(),
         });
     }
-    let path = dir.join(format!("{name}.toml"));
+    Ok(dir.join(format!("{name}.toml")))
+}
+
+/// Borra `<dir>/<name>.toml`; si ya no existe no es un error.
+pub fn delete_session(dir: &Path, name: &str) -> Result<()> {
+    match std::fs::remove_file(session_path(dir, name)?) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Escribe `<dir>/<name>.toml` de forma atómica y devuelve la ruta.
+pub fn save_session(dir: &Path, session: &SessionConfig) -> Result<PathBuf> {
+    let path = session_path(dir, &session.name)?;
     let folder = normalize_folder(&session.folder).ok_or_else(|| Error::Parse {
         path: path.display().to_string(),
         msg: format!("carpeta no válida: `{}`", session.folder),
@@ -780,6 +792,18 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("bad.toml"), "port = \"no\"").unwrap();
         assert!(matches!(load_sessions(d.path()), Err(Error::Parse { .. })));
+    }
+
+    #[test]
+    fn delete_removes_file_and_is_idempotent() {
+        let d = tempfile::tempdir().unwrap();
+        save_session(d.path(), &s("uno")).unwrap();
+        delete_session(d.path(), "uno").unwrap();
+        assert!(load_sessions(d.path()).unwrap().is_empty());
+        delete_session(d.path(), "uno").unwrap();
+        for n in ["", "..", "a/b"] {
+            assert!(delete_session(d.path(), n).is_err(), "{n:?}");
+        }
     }
 
     #[test]

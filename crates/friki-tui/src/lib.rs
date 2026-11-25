@@ -21,8 +21,8 @@ mod picker;
 mod render;
 mod script_host;
 mod search;
-mod target;
 mod theme;
+pub use friki_session::{forward_label, label, tag, telnet_options, term_for};
 #[cfg(feature = "tn3270")]
 mod tn3270;
 mod xfer;
