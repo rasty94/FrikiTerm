@@ -167,6 +167,86 @@ fn sync_dry_run_y_real() {
 
 #[test]
 #[ignore = "necesita el sshd de pruebas"]
+fn sync_both_propaga_borrados_con_cache() {
+    let e = env("both");
+    let work = tempfile::tempdir().expect("tempdir");
+    let dir = work.path().join("src");
+    write(&dir.join("a.txt"), "uno");
+    write(&dir.join("b.txt"), "dos");
+    let (d, r) = (s(&dir), format!("{}:{}", e.host, e.tag));
+
+    e.ok(&["sync", &d, &r, "--both"]);
+    let ls = e.exec(&format!("ls {}", e.tag));
+    assert_eq!(String::from_utf8_lossy(&ls.stdout), "a.txt\nb.txt\n");
+
+    // Borrado en el remoto: se borra en local (sin la caché se volvería a subir).
+    e.exec(&format!("rm {}/b.txt", e.tag));
+    e.ok(&["sync", &d, &r, "--both", "--delete", "--yes"]);
+    assert!(!dir.join("b.txt").exists());
+    assert!(dir.join("a.txt").exists());
+
+    // Borrado en local: se borra en el remoto.
+    std::fs::remove_file(dir.join("a.txt")).expect("borrar");
+    e.ok(&["sync", &d, &r, "--both", "--delete", "--yes"]);
+    let ls = e.exec(&format!("ls {}", e.tag));
+    assert_eq!(String::from_utf8_lossy(&ls.stdout), "");
+
+    // Un fichero nuevo en el remoto se baja, no se toma por borrado.
+    e.exec(&format!("echo hola > {}/n.txt", e.tag));
+    e.ok(&["sync", &d, &r, "--both", "--delete", "--yes"]);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("n.txt")).expect("leer"),
+        "hola\n"
+    );
+}
+
+#[test]
+#[ignore = "necesita el sshd de pruebas"]
+fn cp_varios_origenes_remotos() {
+    let e = env("cpmulti");
+    e.ok(&[
+        "exec",
+        &e.host,
+        &format!(
+            "mkdir -p {0}/d && echo 1 > {0}/a && echo 2 > {0}/b && echo 3 > {0}/d/c",
+            e.tag
+        ),
+    ]);
+    for scp in [false, true] {
+        let work = tempfile::tempdir().expect("tempdir");
+        let mut args = vec!["cp", "-r"];
+        if scp {
+            args.push("--scp");
+        }
+        let (a, b, d, w) = (e.remote("a"), e.remote("b"), e.remote("d"), s(work.path()));
+        args.extend([a.as_str(), b.as_str(), d.as_str(), w.as_str()]);
+        e.ok(&args);
+        for f in ["a", "b", "d/c"] {
+            assert!(work.path().join(f).exists(), "scp={scp} falta {f}");
+        }
+        // El destino debe ser un directorio con varios orígenes.
+        let file = s(&work.path().join("a"));
+        let mut args = vec!["cp"];
+        if scp {
+            args.push("--scp");
+        }
+        args.extend([a.as_str(), b.as_str(), file.as_str()]);
+        assert_eq!(e.run(&args).status.code(), Some(250), "scp={scp}");
+    }
+}
+
+#[test]
+fn cp_origenes_en_hosts_distintos_es_error_de_uso() {
+    let o = Command::new(env!("CARGO_BIN_EXE_friki"))
+        .args(["cp", "h1:a", "h2:b", "."])
+        .stdin(Stdio::null())
+        .output()
+        .expect("ejecutar friki");
+    assert_eq!(o.status.code(), Some(250));
+}
+
+#[test]
+#[ignore = "necesita el sshd de pruebas"]
 fn sync_down_con_raiz_remota_inexistente_no_toca_nada() {
     let e = env("syncmiss");
     let work = tempfile::tempdir().expect("tempdir");
