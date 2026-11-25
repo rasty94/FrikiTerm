@@ -32,6 +32,16 @@ pub fn logs_dir() -> PathBuf {
     config_dir().join("logs")
 }
 
+/// Claves privadas generadas por la aplicación.
+pub fn keys_dir() -> PathBuf {
+    config_dir().join("keys")
+}
+
+/// Snippets guardados.
+pub fn snippets_file() -> PathBuf {
+    config_dir().join("snippets.toml")
+}
+
 /// Configuración global (`AppConfig`).
 pub fn app_config_file() -> PathBuf {
     config_dir().join("config.toml")
@@ -64,5 +74,7 @@ mod tests {
         assert_eq!(sessions_dir(), base.join("sessions"));
         assert_eq!(known_hosts_file(), base.join("known_hosts"));
         assert_eq!(logs_dir(), base.join("logs"));
+        assert_eq!(keys_dir(), base.join("keys"));
+        assert_eq!(snippets_file(), base.join("snippets.toml"));
     }
 }

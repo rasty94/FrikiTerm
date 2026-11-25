@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 friki-core = { path = "../friki-core" }
 friki-ssh = { path = "../friki-ssh" }
+friki-session = { path = "../friki-session" }
 friki-term = { path = "../friki-term" }
 friki-telnet = { path = "../friki-telnet" }
 friki-serial = { path = "../friki-serial" }
@@ -29,4 +30,4 @@ base64 = "0.22"
 
 [features]
 default = ["tn3270"]
-tn3270 = ["dep:friki-tn3270"]
+tn3270 = ["dep:friki-tn3270", "friki-session/tn3270"]

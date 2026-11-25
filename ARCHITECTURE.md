@@ -5,7 +5,7 @@ Requisitos en [TODO.md](TODO.md). Decisiones tomadas: **TUI** (ratatui) primero,
 ## Crates
 
 ```
-friki-cli ──► friki-tui ──► friki-ssh ──► friki-core
+friki-cli ──► friki-tui ──► friki-session ──► friki-ssh ──► friki-core
     │             └───────► friki-term ─► friki-core
     └──────────────────────────────────► friki-core
 ```
@@ -15,6 +15,7 @@ friki-cli ──► friki-tui ──► friki-ssh ──► friki-core
 | `friki-core` | Sesiones TOML, importar `ssh_config`, `known_hosts`, llavero, rutas | Red, terminal |
 | `friki-ssh` | Conexión SSH-2 (`russh`), autenticación, política de algoritmos, shell, exec, generación de claves | Interfaz, prompts propios (los pide por traits) |
 | `friki-term` | Emulación de terminal (bytes → `Screen`), codificación de teclas, registro de sesión con enmascarado | Red, dibujo |
+| `friki-session` | Lógica de sesión compartida por TUI y escritorio: trait `Asker` (prompts de clave de host y autenticación), `Prompter`, `verifier`, `connect_ssh`/`open_stream` (SSH, Telnet, serie, shell local), helpers de destino (`tag`, `label`, `term_for`...) e instalación de clave pública | Dibujo, texto de los diálogos |
 | `friki-tui` | Dibujo, teclado, diálogos de clave de host y contraseña | Lógica de protocolo |
 | `friki-cli` | Binario `friki`, subcomandos, códigos de salida | Lógica de negocio |
 

@@ -6,10 +6,8 @@
 //! sesión a la que pertenecen, aunque otro panel tenga el foco.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,12 +17,10 @@ use crossterm::event::{
 use friki_core::config::{
     AppConfig, Protocol, SessionConfig, load_app_config, load_sessions, resolve_target,
 };
-use friki_core::known_hosts::{HostKey, HostKeyStatus};
-use friki_core::transport::{StreamEvent, StreamReader, StreamWriter};
+use friki_core::transport::{StreamEvent, StreamWriter};
 use friki_script::{CancelToken, Limits, Permissions, ScriptError};
-use friki_ssh::{
-    AuthPrompter, Connection, Error, HostKeyDecision, KnownHostsVerifier, Negotiated, Zeroizing,
-};
+use friki_session::{Asker, Prompt, Reply};
+use friki_ssh::{Connection, Negotiated};
 use friki_term::{Key, Modifiers, MouseButton, MouseKind, Terminal as Emulator};
 use friki_zmodem::{FileProtocol, Progress, ZmodemStart};
 use futures_util::{Stream, StreamExt};
@@ -47,12 +43,11 @@ use crate::picker::{Picker, PickerOut};
 use crate::render::{StatusInfo, draw_dialog, popup, screen_to_buffer, status_line};
 use crate::script_host::{HostReq, PaneHost, Shared};
 use crate::search::{Search, SearchOutcome};
-use crate::target::{forward_label, label, telnet_options, term_for};
 use crate::theme::Theme;
 use crate::xfer::{CANCEL, PaneIo, bar};
-use crate::{Log, Out, Paths, WHEEL_LINES, compact, exit_code, finish, is_legacy};
-
-type Ask = Pin<Box<dyn Future<Output = HostKeyDecision> + Send>>;
+use crate::{
+    Log, Out, Paths, WHEEL_LINES, compact, exit_code, finish, forward_label, is_legacy, label,
+};
 
 /// Lo que una tarea de panel envía al bucle central.
 enum Msg {
@@ -76,7 +71,7 @@ enum XferMsg {
 
 struct Opened {
     /// Solo SSH: la conexión que mantiene vivas las redirecciones y el canal.
-    conn: Option<Connection>,
+    conn: Option<Arc<Connection>>,
     writer: Arc<dyn StreamWriter>,
     /// (columnas, filas) con las que se abrió el PTY.
     size: (u16, u16),
@@ -87,6 +82,31 @@ struct Opened {
     fwd_errors: Vec<String>,
 }
 
+impl From<friki_session::Opened> for Opened {
+    fn from(o: friki_session::Opened) -> Self {
+        let (mut forwards, mut fwd_errors) = (vec![], vec![]);
+        for (f, r) in o.forwards {
+            match r {
+                Ok(h) => forwards.push(forward_label(&f, Some(h.listen))),
+                Err(e) => fwd_errors.push(format!(
+                    "redirección {}: {}",
+                    forward_label(&f, None),
+                    clean(&e)
+                )),
+            }
+        }
+        Self {
+            conn: o.conn,
+            writer: o.writer,
+            size: o.size,
+            warnings: o.warnings,
+            negotiated: o.negotiated,
+            forwards,
+            fwd_errors,
+        }
+    }
+}
+
 /// Envía diálogos al bucle principal y espera la respuesta.
 #[derive(Clone)]
 struct UiChannel {
@@ -95,175 +115,50 @@ struct UiChannel {
 }
 
 impl UiChannel {
-    async fn ask(&self, d: Dialog) -> Option<Answer> {
+    async fn ask_dialog(&self, d: Dialog) -> Option<Answer> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Msg::Ask(self.pane, d, tx)).ok()?;
         rx.await.ok()
     }
 }
 
-struct UiPrompter {
-    ui: UiChannel,
-    host: String,
-}
-
 #[async_trait::async_trait]
-impl AuthPrompter for UiPrompter {
-    async fn password(&self, user: &str, host: &str) -> Option<Zeroizing<String>> {
-        match self.ui.ask(Dialog::password(user, host)).await? {
-            Answer::Secret(s) => s,
-            _ => None,
-        }
-    }
-
-    async fn passphrase(&self, key_path: &Path) -> Option<Zeroizing<String>> {
-        match self
-            .ui
-            .ask(Dialog::passphrase(&key_path.display().to_string()))
-            .await?
-        {
-            Answer::Secret(s) => s,
-            _ => None,
-        }
-    }
-
-    async fn keyboard_interactive(
-        &self,
-        name: &str,
-        instructions: &str,
-        prompts: &[(String, bool)],
-    ) -> Option<Vec<Zeroizing<String>>> {
-        self.keyboard_interactive_for(&self.host, name, instructions, prompts)
-            .await
-    }
-
-    /// Muestra el servidor que de verdad pregunta (un salto de ProxyJump o el destino).
-    async fn keyboard_interactive_for(
-        &self,
-        host: &str,
-        name: &str,
-        instructions: &str,
-        prompts: &[(String, bool)],
-    ) -> Option<Vec<Zeroizing<String>>> {
-        match self
-            .ui
-            .ask(Dialog::keyboard_interactive(
+impl Asker for UiChannel {
+    async fn ask(&self, p: Prompt) -> Option<Reply> {
+        let d = match p {
+            Prompt::HostKeyUnknown {
+                host,
+                port,
+                algorithm,
+                fingerprint,
+            } => Dialog::unknown_host(&host, port, &algorithm, &fingerprint),
+            Prompt::HostKeyChanged {
+                host,
+                port,
+                algorithm,
+                fingerprint,
+                previous_fingerprint,
+            } => Dialog::changed_host(&host, port, &algorithm, &fingerprint, &previous_fingerprint),
+            Prompt::Password { user, host } => Dialog::password(&user, &host),
+            Prompt::Passphrase { key_path } => Dialog::passphrase(&key_path),
+            Prompt::KbdInteractive {
                 host,
                 name,
                 instructions,
                 prompts,
-            ))
-            .await?
-        {
-            Answer::Multi(m) => m,
-            _ => None,
+            } => {
+                let prompts: Vec<(String, bool)> =
+                    prompts.into_iter().map(|p| (p.text, p.echo)).collect();
+                Dialog::keyboard_interactive(&host, &name, &instructions, &prompts)
+            }
+        };
+        match self.ask_dialog(d).await? {
+            Answer::HostKey(d) => Some(Reply::HostKey(d)),
+            Answer::Secret(s) => Some(Reply::Secret(s)),
+            Answer::Multi(m) => Some(Reply::Multi(m)),
+            Answer::Confirm(_) => None,
         }
     }
-}
-
-/// Error de red genérico para los transportes que no son SSH.
-fn net(e: &std::io::Error) -> anyhow::Error {
-    Error::Network(e.to_string()).into()
-}
-
-/// SSH: verificación de clave de host y autenticación por diálogos, shell con PTY y las
-/// redirecciones de la sesión (cada resultado queda para el panel; un fallo no tumba el shell).
-async fn open_ssh(
-    ui: UiChannel,
-    session: &SessionConfig,
-    known_hosts: std::path::PathBuf,
-    (cols, rows): (u16, u16),
-    term: &str,
-) -> anyhow::Result<(Opened, Box<dyn StreamReader>)> {
-    let ask_ui = ui.clone();
-    let verifier = Arc::new(KnownHostsVerifier::new(
-        known_hosts,
-        move |host: &str, port: u16, key: &HostKey, status: HostKeyStatus| -> Ask {
-            let fp = key.fingerprint_sha256();
-            let dialog = match status {
-                HostKeyStatus::Unknown => Dialog::unknown_host(host, port, &key.algorithm, &fp),
-                HostKeyStatus::Changed { previous } => Dialog::changed_host(
-                    host,
-                    port,
-                    &key.algorithm,
-                    &fp,
-                    &previous.fingerprint_sha256(),
-                ),
-                _ => return Box::pin(async { HostKeyDecision::Reject }),
-            };
-            let ui = ask_ui.clone();
-            Box::pin(async move {
-                match ui.ask(dialog).await {
-                    Some(Answer::HostKey(d)) => d,
-                    _ => HostKeyDecision::Reject,
-                }
-            })
-        },
-    ));
-    let prompter = Arc::new(UiPrompter {
-        ui,
-        host: session.host.clone(),
-    });
-    let conn = Connection::connect(session, verifier, prompter).await?;
-    let (writer, reader) = conn.open_shell_stream(term, cols, rows).await?;
-    let (mut forwards, mut fwd_errors) = (vec![], vec![]);
-    for f in &session.forwards {
-        match conn.start_forward(f).await {
-            Ok(h) => forwards.push(forward_label(f, Some(h.listen))),
-            Err(e) => fwd_errors.push(format!(
-                "redirección {}: {}",
-                forward_label(f, None),
-                clean(&e.to_string())
-            )),
-        }
-    }
-    let opened = Opened {
-        warnings: conn.warnings(),
-        negotiated: conn.negotiated(),
-        conn: Some(conn),
-        writer,
-        size: (cols, rows),
-        forwards,
-        fwd_errors,
-    };
-    Ok((opened, reader))
-}
-
-/// Abre el flujo según el protocolo de la sesión.
-async fn open_stream(
-    ui: UiChannel,
-    session: &SessionConfig,
-    known_hosts: std::path::PathBuf,
-    size: (u16, u16),
-) -> anyhow::Result<(Opened, Box<dyn StreamReader>)> {
-    let term = term_for(session);
-    let (cols, rows) = size;
-    let stream = match session.protocol {
-        Protocol::Ssh => return open_ssh(ui, session, known_hosts, size, &term).await,
-        Protocol::Tn3270 if !cfg!(feature = "tn3270") => {
-            return Err(anyhow::anyhow!("TN3270 no incluido en esta compilación"));
-        }
-        Protocol::Telnet | Protocol::TelnetTls | Protocol::Raw | Protocol::Tn3270 => {
-            let opts = telnet_options(session, &term);
-            friki_telnet::connect(&session.host, session.port, &opts, cols, rows).await
-        }
-        Protocol::Serial => friki_serial::open(&session.serial).await,
-        Protocol::LocalShell => {
-            friki_pty::spawn(session.local_command.as_deref(), &term, cols, rows).await
-        }
-    }
-    .map_err(|e| net(&e))?;
-    let (writer, reader) = stream;
-    let opened = Opened {
-        conn: None,
-        writer,
-        size,
-        warnings: vec![],
-        negotiated: None,
-        forwards: vec![],
-        fwd_errors: vec![],
-    };
-    Ok((opened, reader))
 }
 
 /// Conecta, abre el flujo y reenvía sus eventos hasta que se agota.
@@ -279,13 +174,14 @@ fn spawn_connect(
             tx: tx.clone(),
             pane: id,
         };
-        let (opened, mut reader) = match open_stream(ui, &session, known_hosts, size).await {
-            Ok(x) => x,
-            Err(e) => {
-                let _ = tx.send(Msg::Failed(id, e));
-                return;
-            }
-        };
+        let (opened, mut reader) =
+            match friki_session::open_stream(ui, &session, known_hosts, size).await {
+                Ok((o, r)) => (Opened::from(o), r),
+                Err(e) => {
+                    let _ = tx.send(Msg::Failed(id, e));
+                    return;
+                }
+            };
         if tx.send(Msg::Opened(id, Box::new(opened))).is_err() {
             return;
         }
@@ -402,7 +298,7 @@ struct Pane {
     forwards: Vec<String>,
     theme: Theme,
     modal: Option<Modal>,
-    conn: Option<Connection>,
+    conn: Option<Arc<Connection>>,
     task: Option<JoinHandle<()>>,
     exit: Option<i32>,
     outcome: Option<anyhow::Result<i32>>,
@@ -689,9 +585,10 @@ impl<'a> App<'a> {
         }
     }
 
-    fn detach(&mut self, conn: Connection) {
+    fn detach(&mut self, conn: Arc<Connection>) {
         self.disconnects.push(tokio::spawn(async move {
-            let _ = tokio::time::timeout(Duration::from_secs(2), conn.disconnect()).await;
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), friki_session::disconnect(conn)).await;
         }));
     }
 
@@ -1966,7 +1863,7 @@ impl<'a> App<'a> {
             }
             if let Some(c) = p.conn.take() {
                 handles.push(tokio::spawn(async move {
-                    let _ = c.disconnect().await;
+                    friki_session::disconnect(c).await;
                 }));
             }
         }
@@ -2198,6 +2095,7 @@ where
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    use friki_ssh::{AuthPrompter, Error};
     use futures_util::stream;
     use ratatui::backend::TestBackend;
 
@@ -2781,10 +2679,7 @@ mod tests {
     #[tokio::test]
     async fn keyboard_interactive_for_shows_the_asking_host() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let p = UiPrompter {
-            ui: UiChannel { tx, pane: 1 },
-            host: "destino".into(),
-        };
+        let p = friki_session::Prompter::new(UiChannel { tx, pane: 1 }, "destino");
         let t = tokio::spawn(async move {
             p.keyboard_interactive_for("salto.example", "", "", &[("Code: ".into(), false)])
                 .await

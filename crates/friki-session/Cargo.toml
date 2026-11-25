@@ -1,0 +1,28 @@
+[package]
+name = "friki-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+friki-core = { path = "../friki-core" }
+friki-ssh = { path = "../friki-ssh" }
+friki-term = { path = "../friki-term" }
+friki-telnet = { path = "../friki-telnet" }
+friki-serial = { path = "../friki-serial" }
+friki-pty = { path = "../friki-pty" }
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+russh-sftp = "4"
+tokio = { version = "1", features = ["io-util"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+
+[features]
+# La TUI lo activa con su propia feature `tn3270`.
+tn3270 = []
