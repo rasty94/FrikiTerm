@@ -26,6 +26,7 @@ const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Conexiones `-R` simultáneas por conexión SSH.
 const MAX_REMOTE_CONNS: usize = 256;
 /// Canales de agente simultáneos.
+#[cfg_attr(not(unix), allow(dead_code))] // el reenvío de agente solo existe en Unix
 const MAX_AGENT_CHANNELS: usize = 8;
 /// Salida del servidor pendiente de leer por la TUI antes de dar el canal por perdido.
 /// La tarea lectora debe drenar siempre a russh (si no, la conexión entera se detiene).
@@ -47,6 +48,7 @@ pub(crate) struct Info {
     /// El servidor aceptó `auth-agent-req` en un shell interactivo de esta conexión.
     pub(crate) agent_granted: AtomicBool,
     /// Canales de agente abiertos ahora mismo.
+    #[cfg_attr(not(unix), allow(dead_code))]
     agent_open: AtomicUsize,
     /// Conexiones `-R` en curso (tope por conexión SSH).
     remote_open: AtomicUsize,

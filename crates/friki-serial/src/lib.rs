@@ -225,7 +225,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn pty_pair_roundtrip_and_lost() {
-        use serialport::TTYPort;
+        use serialport::{SerialPort, TTYPort};
         let (mut master, slave) = TTYPort::pair().unwrap();
         let cfg = SerialConfig {
             device: slave.name().unwrap(),
