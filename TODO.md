@@ -4,20 +4,24 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 
 ## Estado (2026-11-25)
 
-**Fase 1 (MVP) hecha y verificada.** CI en verde en Linux, macOS y Windows, más MSRV 1.89 y la feature `legacy`. 124 pruebas, incluidas las de integración contra OpenSSH en Docker. `cargo deny` y `cargo audit -D warnings` limpios.
+**Fases 1 a 5 hechas.** 392 pruebas (más 51 con la feature `legacy`), incluidas las de integración contra OpenSSH y telnetd reales en Docker; `cargo deny` y `cargo audit -D warnings` limpios; CI en Linux, macOS, Windows, MSRV 1.89 y `legacy`. Cuatro pasadas de revisión (corrección con Opus y seguridad con Fable, tras la fase 1 y al final), con todos los hallazgos altos y medios corregidos.
 
-- Hecho: sesión SSH-2 interactiva (TUI) y `exec` con streaming y stdin, claves Ed25519/ECDSA/RSA, agente (Unix), keyboard-interactive, `known_hosts` compatible con OpenSSH (incluidas las entradas hasheadas), política de algoritmos segura con strict KEX y sin compresión, sesiones TOML, importación de `ssh_config` con avisos, llavero del sistema, registro de sesión con enmascarado, códigos de salida de 8 bits, `keygen`.
-- Revisiones: dos pasadas (corrección con Opus, seguridad con Fable). Se cerraron todos los hallazgos altos y medios.
+- **Fase 1**: SSH-2 (TUI y `exec`), claves, agente, `known_hosts`, algoritmos seguros con strict KEX, sesiones TOML, `ssh_config`, llavero, log con enmascarado, `keygen`.
+- **Fase 2**: pestañas y paneles, atajos configurables (`config.toml`), perfiles y emulaciones (xterm, VT100, VT220, Linux, ANSI), temas, búsqueda, modo copia (portapapeles u OSC 52), selector por carpetas, emulador sin diferencias conocidas frente a xterm en el banco golden.
+- **Fase 3**: SFTP, SCP (nombre esperado validado), FTP/FTPS; cola con paralelismo, reintentos, reconexión, reanudación sobre `.friki-part` y límite de ancho de banda; sincronización con filtros, conflictos y tope de borrados; CLI `ls/get/put/cp/sync/ftp`.
+- **Fase 4**: ProxyJump, `-L/-R/-D`, reenvío de agente (solo en shell interactivo), exigir strict KEX, Telnet/TLS, RAW, serie, shell local, X/Y/Zmodem en paneles, scripting Rhai cancelable con sandbox, `pubkey-install` atómico.
+- **Fase 5**: release firmada (cosign, atestación) tras tests/deny/audit, `.deb`, SHA256SUMS, man y completions, `docs/INSTALL.md`, licencias MIT/Apache-2.0.
 
-**Pendiente heredado de las revisiones** (bajo, o fuera del MVP):
-- [ ] ProxyJump: hoy `connect` lo rechaza de forma explícita; falta implementarlo (§2).
+**Pendiente:**
+- [ ] Probar a mano la TUI en una terminal real en las tres plataformas (las pruebas usan un backend simulado).
+- [ ] Sin probar en real: ConPTY en Windows, puerto serie (la prueba con par PTY solo corre en Linux), FTP contra un servidor real, el caso negativo de strict KEX, interoperabilidad Zmodem con `rz/sz` fuera del contenedor.
 - [ ] Agente SSH en Windows (Pageant / named pipe).
-- [ ] Strict KEX: opción para exigirlo, o restringir a AES-GCM si el servidor no lo anuncia.
-- [ ] Fecha del nombre del log: `time` no da el desfase local con varios hilos, así que sale en UTC.
-- [ ] Reenvío del ratón al remoto (falta su codificación en `friki-term`).
-- [ ] Heurística de "sin eco = contraseña" en el log: descartada por poco fiable; documentada como límite.
-- [ ] `russh` compila siempre CBC/SHA-1/group1: la barrera es la lista ofrecida (§11), vigilada por una prueba.
-- [ ] Probar la TUI a mano en una terminal real en las tres plataformas (las pruebas automáticas usan un backend simulado).
+- [ ] Mantenedor del `.deb`: hoy `frikiSSH <noreply@invalid>`.
+- [ ] Crear el entorno `release` con revisores y proteger los tags `v*` en GitHub (`docs/INSTALL.md` §5).
+- [ ] Revisar las excepciones de `deny.toml` / `.cargo/audit.toml` antes del 2027-05-25.
+- [ ] Fecha del nombre del log en UTC (`time` no da el desfase local con varios hilos).
+- [ ] Reenvío del ratón al remoto; Kermit; TN3270, Wyse y TVI (fuera del alcance actual).
+- [ ] `sync --both` sin caché en la CLI; `cp` descarga un solo origen remoto.
 
 ## 0. Reglas del proyecto
 
