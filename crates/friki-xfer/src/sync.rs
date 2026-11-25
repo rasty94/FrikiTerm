@@ -10,7 +10,7 @@ pub enum SyncMode {
     Upload,
     /// Remoto → local.
     Download,
-    /// Ambos sentidos: gana la fecha más reciente.
+    /// Ambos sentidos: gana la fecha más reciente; con caché y `delete` propaga borrados.
     Both,
 }
 
@@ -24,7 +24,8 @@ pub struct Filters {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncOptions {
     pub mode: SyncMode,
-    /// Borrar en el destino lo que no existe en el origen (no aplica a `Both`).
+    /// Borrar en el destino lo que no existe en el origen; en `Both` solo propaga los
+    /// borrados detectados con la caché.
     pub delete: bool,
     pub filters: Filters,
     /// Comparar también por tamaño (siempre) y fecha con esta tolerancia en segundos.
@@ -86,6 +87,28 @@ pub fn cache_key(
         remote.label(),
         remote_root
     )
+}
+
+fn action_path(a: &Action) -> &str {
+    match a {
+        Action::Upload { path }
+        | Action::Download { path }
+        | Action::MkdirRemote { path }
+        | Action::MkdirLocal { path }
+        | Action::DeleteRemote { path }
+        | Action::DeleteLocal { path }
+        | Action::Conflict { path } => path,
+    }
+}
+
+/// Estado actual de `root` (ficheros y directorios, sin filtros) para guardarlo en la caché
+/// tras una sincronización `Both` correcta. Una raíz inexistente da un estado vacío.
+pub async fn snapshot(fs: &dyn RemoteFs, root: &str) -> Result<Vec<Entry>> {
+    let f = Filter {
+        inc: vec![],
+        exc: vec![],
+    };
+    Ok(walk(fs, root, &f, true).await?.into_values().collect())
 }
 
 struct Pat {
@@ -241,8 +264,20 @@ pub async fn plan(
         for p in paths {
             let path = p.clone();
             match (l.get(p), r.get(p)) {
-                (Some(a), None) => acts.push(up_act(true, path, is_dir(a))),
-                (None, Some(b)) => acts.push(up_act(false, path, is_dir(b))),
+                // Con caché y `delete`: lo que estaba en la última sincronización y sigue
+                // sin cambios en un lado se borró en el otro; si cambió, se conserva.
+                (Some(a), None) => match last.get(p) {
+                    Some(c) if opts.delete && (is_dir(a) || !differs(a, c, tol)) => {
+                        dels.push((is_dir(a), Action::DeleteLocal { path }))
+                    }
+                    _ => acts.push(up_act(true, path, is_dir(a))),
+                },
+                (None, Some(b)) => match last.get(p) {
+                    Some(c) if opts.delete && (is_dir(b) || !differs(b, c, tol)) => {
+                        dels.push((is_dir(b), Action::DeleteRemote { path }))
+                    }
+                    _ => acts.push(up_act(false, path, is_dir(b))),
+                },
                 (Some(a), Some(b)) if is_dir(a) != is_dir(b) => {
                     acts.push(Action::Conflict { path })
                 }
@@ -267,6 +302,24 @@ pub async fn plan(
                     });
                 }
                 (None, None) => {}
+            }
+        }
+        // Un directorio borrado que aún tiene contenido modificado se recrea en vez de borrarse.
+        let mut i = 0;
+        while i < dels.len() {
+            let (d, a) = &dels[i];
+            let (Action::DeleteLocal { path } | Action::DeleteRemote { path }) = a else {
+                unreachable!()
+            };
+            let pre = format!("{path}/");
+            let at = acts.iter().position(|x| action_path(x).starts_with(&pre));
+            match at {
+                Some(at) if *d => {
+                    let mk = up_act(matches!(a, Action::DeleteLocal { .. }), path.clone(), true);
+                    acts.insert(at, mk);
+                    dels.remove(i);
+                }
+                _ => i += 1,
             }
         }
     } else {

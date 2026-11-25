@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use friki_cli::cli::{CpArgs, FtpAction, FtpConn, GetArgs, LsArgs, PutArgs, SyncArgs};
 use friki_ssh::{Connection, Zeroizing};
+use friki_xfer::cache::DirCache;
 use friki_xfer::ftp::{self, FtpOptions};
 use friki_xfer::local::LocalFs;
 use friki_xfer::queue::{Direction, Job, Queue, QueueEvent, QueueOptions, Resume};
-use friki_xfer::sync::{Action, Filters, SyncMode, SyncOptions, plan};
+use friki_xfer::sync::{Action, Filters, SyncMode, SyncOptions, cache_key, plan, snapshot};
 use friki_xfer::{Entry, Kind, RemoteFs, join, safe_name, scp, sftp};
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -224,24 +225,34 @@ fn job(direction: Direction, src: String, dst: String, recursive: bool) -> Job {
 
 async fn download_fs(
     remote: Fs,
-    rpath: &str,
+    rpaths: &[&str],
     local: Option<&Path>,
     recursive: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    let rpath = remote_path(rpath);
-    let dest = match local {
-        Some(l) if l.is_dir() => l.join(base_name(rpath)?),
-        Some(l) => l.to_path_buf(),
-        None => PathBuf::from(base_name(rpath)?),
-    };
+    let into_dir = local.is_none_or(Path::is_dir);
+    if rpaths.len() > 1 && !into_dir {
+        return Err(usage(format!(
+            "`{}` debe ser un directorio",
+            local.map_or_else(String::new, |l| l.display().to_string())
+        )));
+    }
+    let mut jobs = Vec::new();
+    for rpath in rpaths {
+        let rpath = remote_path(rpath);
+        let dest = match local {
+            Some(l) if l.is_dir() => l.join(base_name(rpath)?),
+            Some(l) => l.to_path_buf(),
+            None => PathBuf::from(base_name(rpath)?),
+        };
+        jobs.push(job(
+            Direction::Download,
+            rpath.to_string(),
+            local_rel(&dest)?,
+            recursive,
+        ));
+    }
     let fs: Fs = Arc::new(LocalFs::new(local_root()?));
-    let jobs = vec![job(
-        Direction::Download,
-        rpath.to_string(),
-        local_rel(&dest)?,
-        recursive,
-    )];
     run_jobs(fs, remote, jobs, json).await
 }
 
@@ -297,7 +308,7 @@ async fn scp_up(
 
 async fn scp_down(
     conn: &Connection,
-    rpath: &str,
+    rpaths: &[&str],
     local: Option<&Path>,
     recursive: bool,
     json: bool,
@@ -307,10 +318,11 @@ async fn scp_down(
         Some(l) if l.is_dir() => l.to_path_buf(),
         Some(_) => return Err(usage("con --scp el destino local debe ser un directorio")),
     };
-    scp_done(
-        scp::download(conn, remote_path(rpath), &dir, recursive).await?,
-        json,
-    );
+    let mut total = 0;
+    for r in rpaths {
+        total += scp::download(conn, remote_path(r), &dir, recursive).await?;
+    }
+    scp_done(total, json);
     Ok(())
 }
 
@@ -335,7 +347,14 @@ pub async fn get(args: GetArgs) -> anyhow::Result<i32> {
     let conn = connect_target(target, args.conn).await?;
     let res = async {
         let fs = open_sftp(&conn).await?;
-        download_fs(fs, rpath, args.local.as_deref(), args.recursive, args.json).await
+        download_fs(
+            fs,
+            &[rpath],
+            args.local.as_deref(),
+            args.recursive,
+            args.json,
+        )
+        .await
     }
     .await;
     finish(conn, res).await
@@ -377,18 +396,32 @@ pub async fn cp(args: CpArgs) -> anyhow::Result<i32> {
         .await;
         return finish(conn, res).await;
     }
-    // ponytail: una sola fuente remota; varias exigirían agrupar por destino.
-    let [src] = srcs else {
-        return Err(usage("para descargar indica un único origen destino:ruta"));
-    };
-    let (target, rpath) = need_remote(src)?;
+    // Varios orígenes remotos: todos en el mismo destino (una sola conexión).
+    let parsed = srcs
+        .iter()
+        .map(|s| need_remote(s))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let target = parsed[0].0;
+    if parsed.iter().any(|(t, _)| *t != target) {
+        return Err(usage(
+            "los orígenes remotos deben estar en el mismo destino",
+        ));
+    }
+    let rpaths: Vec<&str> = parsed.iter().map(|(_, p)| *p).collect();
     let local = Some(PathBuf::from(dst));
     let conn = connect_target(target, args.conn).await?;
     let res = async {
         if scp {
-            scp_down(&conn, rpath, local.as_deref(), rec, json).await
+            scp_down(&conn, &rpaths, local.as_deref(), rec, json).await
         } else {
-            download_fs(open_sftp(&conn).await?, rpath, local.as_deref(), rec, json).await
+            download_fs(
+                open_sftp(&conn).await?,
+                &rpaths,
+                local.as_deref(),
+                rec,
+                json,
+            )
+            .await
         }
     }
     .await;
@@ -531,8 +564,17 @@ async fn sync_run(args: SyncArgs, remote: Fs, rroot: &str) -> anyhow::Result<()>
         mtime_tolerance: 1,
         ..Default::default()
     };
-    // ponytail: sin caché de directorios; en `--both` decide la fecha más reciente.
-    let actions = plan(&*local, "", &*remote, rroot, &opts, None).await?;
+    // Solo `--both` usa caché: sin ella no distingue «borrado» de «nuevo en el otro lado».
+    let cache = if mode == SyncMode::Both {
+        let path = friki_core::paths::config_dir().join("sync-cache.db");
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        Some(DirCache::open(&path)?)
+    } else {
+        None
+    };
+    let actions = plan(&*local, "", &*remote, rroot, &opts, cache.as_ref()).await?;
     if args.dry_run {
         for a in &actions {
             let (name, path) = action_parts(a);
@@ -612,6 +654,11 @@ async fn sync_run(args: SyncArgs, remote: Fs, rroot: &str) -> anyhow::Result<()>
         )
         .into());
     }
+    // Solo tras una ejecución completa: el estado local pasa a ser la referencia.
+    if let Some(c) = cache {
+        let key = cache_key(&*local, "", &*remote, rroot);
+        c.store(&key, &snapshot(&*local, "").await?)?;
+    }
     Ok(())
 }
 
@@ -683,7 +730,7 @@ pub async fn ftp(action: FtpAction) -> anyhow::Result<i32> {
             json,
         } => {
             let fs = ftp_open(&ftp).await?;
-            download_fs(fs, &remote, local.as_deref(), recursive, json).await?;
+            download_fs(fs, &[&remote], local.as_deref(), recursive, json).await?;
         }
         FtpAction::Put {
             ftp,

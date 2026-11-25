@@ -279,3 +279,61 @@ async fn max_deletes_limita_el_plan() {
     o.max_deletes = Some(2);
     assert_eq!(plan(&l, "", &r, "", &o, None).await.unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn both_con_cache_propaga_borrados() {
+    let (a, b, d) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    for root in [a.path(), b.path()] {
+        put(root, "borrado_r.txt", "x", 100);
+        put(root, "borrado_l.txt", "x", 100);
+        put(root, "cambiado.txt", "x", 100);
+        put(root, "dir/x.txt", "x", 100);
+    }
+    let (lfs, rfs) = (LocalFs::new(a.path()), LocalFs::new(b.path()));
+    let cache = DirCache::open(&d.path().join("c.db")).unwrap();
+    let last = friki_xfer::sync::snapshot(&lfs, "").await.unwrap();
+    cache.store(&cache_key(&lfs, "", &rfs, ""), &last).unwrap();
+    // El remoto borra borrado_r y dir; el local borra borrado_l; `cambiado` se modifica en
+    // local y se borra en remoto (se conserva); nuevo.txt solo existe en local.
+    std::fs::remove_file(b.path().join("borrado_r.txt")).unwrap();
+    std::fs::remove_dir_all(b.path().join("dir")).unwrap();
+    std::fs::remove_file(a.path().join("borrado_l.txt")).unwrap();
+    std::fs::remove_file(b.path().join("cambiado.txt")).unwrap();
+    put(a.path(), "cambiado.txt", "mucho más largo", 200);
+    put(a.path(), "nuevo.txt", "n", 100);
+
+    let o = opts(SyncMode::Both, true);
+    let acts = run(a.path(), b.path(), &o, Some(&cache)).await;
+    assert_eq!(
+        acts,
+        vec![
+            Action::Upload {
+                path: s("cambiado.txt")
+            },
+            Action::Upload {
+                path: s("nuevo.txt")
+            },
+            Action::DeleteRemote {
+                path: s("borrado_l.txt")
+            },
+            Action::DeleteLocal {
+                path: s("borrado_r.txt")
+            },
+            Action::DeleteLocal {
+                path: s("dir/x.txt")
+            },
+            Action::DeleteLocal { path: s("dir") },
+        ]
+    );
+    // Sin `delete` nada se borra: se restaura.
+    let o = opts(SyncMode::Both, false);
+    let acts = run(a.path(), b.path(), &o, Some(&cache)).await;
+    assert!(
+        acts.iter()
+            .all(|a| !matches!(a, Action::DeleteLocal { .. } | Action::DeleteRemote { .. }))
+    );
+}

@@ -22,8 +22,17 @@ use friki_core::paths;
 use friki_ssh::{AuthPrompter, Connection, HostKeyDecision, KnownHostsVerifier, Zeroizing};
 use tokio::io::AsyncWriteExt;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Antes de crear hilos: `time` solo da el desfase local en un proceso monohilo.
+    friki_term::init_local_offset();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime tokio")
+        .block_on(amain());
+}
+
+async fn amain() {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

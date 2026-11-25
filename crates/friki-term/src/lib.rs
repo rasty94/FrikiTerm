@@ -753,11 +753,25 @@ pub struct SessionLogger {
     marked: bool,
 }
 
-/// Fecha local AAAA-MM-DD. `time` rechaza obtener el desfase local si hay
-/// varios hilos (evita la carrera de `localtime_r`/`setenv`); en ese caso UTC.
-fn today() -> String {
-    let d = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
+
+/// Guarda el desfase local. `time` lo rechaza si hay varios hilos (carrera de
+/// `localtime_r`/`setenv`), así que hay que llamarlo desde `main` antes del runtime.
+pub fn init_local_offset() {
+    if let Ok(o) = time::UtcOffset::current_local_offset() {
+        let _ = LOCAL_OFFSET.set(o);
+    }
+}
+
+/// Fecha AAAA-MM-DD de `now` en el desfase dado (UTC si no hay).
+fn date_at(now: time::OffsetDateTime, offset: Option<time::UtcOffset>) -> String {
+    let d = offset.map_or(now, |o| now.to_offset(o));
     format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+}
+
+/// Fecha local; UTC si no se pudo obtener el desfase.
+fn today() -> String {
+    date_at(time::OffsetDateTime::now_utc(), LOCAL_OFFSET.get().copied())
 }
 
 /// Solo `[A-Za-z0-9._-]`; `.`, `..` y vacío pasan a `_`.
@@ -905,6 +919,14 @@ impl SessionLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_at_usa_el_desfase_local() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_704_151_800).unwrap(); // 2024-01-01 23:30Z
+        let plus2 = time::UtcOffset::from_hms(2, 0, 0).unwrap();
+        assert_eq!(date_at(now, None), "2024-01-01");
+        assert_eq!(date_at(now, Some(plus2)), "2024-01-02");
+    }
 
     fn term(bytes: &str) -> Screen {
         let mut t = Terminal::new(5, 20, 100);
