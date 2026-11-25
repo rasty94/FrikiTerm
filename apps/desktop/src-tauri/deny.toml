@@ -1,0 +1,54 @@
+# Política de cargo-deny para FrikiTerm Desktop (workspace propio de src-tauri).
+# Copia de la política raíz (deny.toml) más excepciones mínimas del stack de Tauri/GTK.
+# Comprobar con: cargo deny check (desde apps/desktop/src-tauri)
+
+[advisories]
+version = 2
+# Vulnerabilidades (por defecto deny), crates sin mantenimiento y versiones yanked bloquean el CI.
+unmaintained = "all"
+yanked = "deny"
+# Excepciones revisadas a mano; quitar en cuanto el origen se actualice.
+# Todas: próxima revisión 2027-05-25.
+ignore = [
+    # chrono sin mantenimiento: llega solo por russh -> russh-util vía friki-ssh; no lo usamos directamente.
+    { id = "RUSTSEC-2026-0543", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de russh-util vía friki-ssh (revisión 2027-05-25)" },
+    # proc-macro-error sin mantenimiento: lo trae glib-macros (gtk 0.18, usado por muda/tray de Tauri). Sin actualización segura.
+    { id = "RUSTSEC-2024-0370", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de glib-macros vía gtk 0.18 (Tauri/muda); sin actualización segura (revisión 2027-05-25)" },
+    # Crates unic-* sin mantenimiento: los trae urlpattern vía tauri-utils (patrones de URL de capacidades). Sin actualización segura.
+    { id = "RUSTSEC-2025-0075", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de urlpattern vía tauri-utils (revisión 2027-05-25)" },
+    { id = "RUSTSEC-2025-0080", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de urlpattern vía tauri-utils (revisión 2027-05-25)" },
+    { id = "RUSTSEC-2025-0081", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de urlpattern vía tauri-utils (revisión 2027-05-25)" },
+    { id = "RUSTSEC-2025-0098", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de urlpattern vía tauri-utils (revisión 2027-05-25)" },
+    { id = "RUSTSEC-2025-0100", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de urlpattern vía tauri-utils (revisión 2027-05-25)" },
+]
+
+[licenses]
+version = 2
+# Solo licencias permisivas, más MPL-2.0. MPL-2.0 es copyleft débil por fichero: aceptable como
+# dependencia sin modificar (la trae option-ext vía directories). No obliga a licenciar el código propio.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+    # Permisivas: clipboard-win/error-code (vía arboard, solo Windows) y tiny-keccak.
+    "BSL-1.0",
+    "CC0-1.0",
+    # Datos de raíces TLS (webpki-root-certs), vía rustls-platform-verifier de reqwest (feature http).
+    "CDLA-Permissive-2.0",
+]
+# Excepción por crate, no por licencia: target-lexicon (build-dependency de system-deps/cfg-expr, stack
+# GTK de Tauri en Linux) usa Apache-2.0 con excepción LLVM, permisiva. Revisión 2027-05-25.
+exceptions = [
+    { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "target-lexicon" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
