@@ -2,16 +2,20 @@
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use friki_ssh::Connection;
+use friki_ssh::{Connection, ForwardHandle};
+use friki_xfer::RemoteFs;
+use friki_xfer::queue::Queue;
 use tauri::ipc::Channel;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::dto::{AppEvent, Prompt, PromptAnswer, PromptId, PromptKind, SftpId};
-use crate::error::CmdError;
+use crate::dto::{
+    AppEvent, ConnId, ForwardStatus, Prompt, PromptAnswer, PromptId, PromptKind, SftpId,
+};
+use crate::error::{CmdError, ErrorKind};
 
 /// Plazo para contestar un prompt; vencido cuenta como rechazo.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -39,9 +43,21 @@ pub struct ConnHandle {
     pub conn: Arc<Connection>,
 }
 
-// Marcadores: T3 los sustituye por los recursos reales.
-pub struct SftpHandle;
-pub struct QueueHandle;
+/// Redirecciones vivas por conexión.
+pub type ForwardMap = HashMap<ConnId, Vec<(ForwardStatus, ForwardHandle)>>;
+
+/// Sistema de ficheros remoto abierto con `sftp_open`.
+pub struct SftpHandle {
+    pub fs: Arc<dyn RemoteFs>,
+    /// Pausa de la sesión: las colas nuevas nacen con ella.
+    pub paused: AtomicBool,
+}
+
+/// Cola de transferencias de un (sftp, raíz local). `seq` va en los `JobId`.
+pub struct QueueHandle {
+    pub seq: u64,
+    pub queue: Queue,
+}
 
 /// Mapa id -> recurso con ids secuenciales.
 pub struct Registry<T> {
@@ -134,6 +150,8 @@ pub struct AppState {
     pub sftps: Arc<Registry<SftpHandle>>,
     /// Una cola por (sftp, raíz local).
     pub queues: Arc<Mutex<HashMap<(SftpId, String), QueueHandle>>>,
+    /// Redirecciones activas por conexión: `(estado, handle de friki-ssh)`.
+    pub fwds: Arc<Mutex<ForwardMap>>,
     pub prompts: Arc<Prompts>,
     events: Arc<Mutex<Option<Channel<AppEvent>>>>,
 }
@@ -148,6 +166,13 @@ impl AppState {
         lock(&self.events)
             .as_ref()
             .is_some_and(|c| c.send(ev).is_ok())
+    }
+
+    /// Conexión viva por id, o `notfound`.
+    pub fn conn(&self, id: ConnId) -> Result<Arc<Connection>, CmdError> {
+        self.conns
+            .with(id, |c| c.conn.clone())
+            .ok_or_else(|| CmdError::new(ErrorKind::Notfound, "conexión desconocida"))
     }
 
     /// Registra, avisa a la UI y espera la respuesta (`None` = rechazo).
