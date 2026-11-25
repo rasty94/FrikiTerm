@@ -53,6 +53,8 @@ pub enum Command {
     Telnet(TelnetArgs),
     /// Abre un shell local (o la orden dada) en la TUI.
     Shell(ShellArgs),
+    /// Sirve un directorio por TFTP (firmware y configuraciones para equipos de red).
+    TftpServer(TftpServerArgs),
 }
 
 /// Separa `a:b:c` en los `:` fuera de corchetes; los corchetes (IPv6) se quitan.
@@ -487,6 +489,22 @@ pub struct TelnetArgs {
     /// Telnet sobre TLS con verificación de certificado.
     #[arg(long)]
     pub tls: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TftpServerArgs {
+    /// Directorio servido; ninguna ruta puede salir de él.
+    #[arg(long)]
+    pub root: std::path::PathBuf,
+    /// Dirección de escucha; para todas las interfaces, `0.0.0.0:69` explícito.
+    #[arg(long, default_value = "127.0.0.1:6969")]
+    pub bind: std::net::SocketAddr,
+    /// Admite subidas (por defecto solo lectura).
+    #[arg(long)]
+    pub allow_write: bool,
+    /// Con `--allow-write`, permite sustituir ficheros existentes.
+    #[arg(long, requires = "allow_write")]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, clap::Args)]

@@ -84,6 +84,7 @@ async fn run(cli: Cli) -> anyhow::Result<i32> {
         Command::Serial(args) => net::serial(args).await,
         Command::Telnet(args) => net::telnet(args).await,
         Command::Shell(args) => net::shell(args).await,
+        Command::TftpServer(args) => net::tftp_server(args).await,
     }
 }
 
