@@ -4,7 +4,7 @@ Esta guía cubre la instalación desde las releases firmadas, cómo verificar lo
 
 ## 1. Qué publica cada release
 
-Cada release de GitHub (`https://github.com/rasty94/frikiSSH/releases`) incluye:
+Cada release de GitHub (`https://github.com/rasty94/FrikiTerm/releases`) incluye:
 
 | Fichero | Plataforma |
 |---|---|
@@ -33,12 +33,12 @@ Instala [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) y
 ```sh
 cosign verify-blob \
   --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity "https://github.com/rasty94/frikiSSH/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+  --certificate-identity "https://github.com/rasty94/FrikiTerm/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   SHA256SUMS
 ```
 
-La identidad no es una clave pública del proyecto: es el workflow de release de este repositorio, ejecutado sobre la etiqueta `vX.Y.Z`. Si quieres aceptar cualquier versión, cambia `--certificate-identity` por `--certificate-identity-regexp '^https://github.com/rasty94/frikiSSH/\.github/workflows/release\.yml@refs/tags/v'`.
+La identidad no es una clave pública del proyecto: es el workflow de release de este repositorio, ejecutado sobre la etiqueta `vX.Y.Z`. Si quieres aceptar cualquier versión, cambia `--certificate-identity` por `--certificate-identity-regexp '^https://github.com/rasty94/FrikiTerm/\.github/workflows/release\.yml@refs/tags/v'`.
 
 ### 2.2 Hash SHA-256
 
@@ -59,7 +59,7 @@ Debe aparecer `OK` para el fichero que vas a instalar.
 ```sh
 cosign verify-blob \
   --bundle friki-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz.sigstore.json \
-  --certificate-identity "https://github.com/rasty94/frikiSSH/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+  --certificate-identity "https://github.com/rasty94/FrikiTerm/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   friki-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
 ```
@@ -69,7 +69,7 @@ cosign verify-blob \
 Requiere [`gh`](https://cli.github.com/) 2.49 o posterior:
 
 ```sh
-gh attestation verify friki-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz --repo rasty94/frikiSSH
+gh attestation verify friki-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz --repo rasty94/FrikiTerm
 ```
 
 Esto confirma que el fichero se construyó en el workflow de este repositorio y no fuera de él.
@@ -108,8 +108,8 @@ Requisitos:
 - macOS y Windows: ninguna dependencia de sistema adicional.
 
 ```sh
-git clone https://github.com/rasty94/frikiSSH.git
-cd frikiSSH
+git clone https://github.com/rasty94/FrikiTerm.git
+cd FrikiTerm
 cargo build --release --locked -p friki-cli
 ./target/release/friki --help
 ```
