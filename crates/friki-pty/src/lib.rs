@@ -126,6 +126,11 @@ pub async fn spawn(
     // puede no recibir EOF aunque el hijo haya terminado.
     let reader_tx = tx.clone();
     let reader_killer = Mutex::new(killer.clone_killer());
+    // ConPTY pide la posición del cursor (DSR, `ESC[6n`) al arrancar y no ejecuta nada
+    // hasta recibir respuesta.
+    // ponytail: respuesta fija `1;1`; responder con la posición real requiere que el
+    // emulador conteste a las consultas (friki-term no lo hace aún).
+    let dsr_reply = wq.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -133,6 +138,9 @@ pub async fn spawn(
                 // EOF o EIO (Linux) = el proceso cerró el PTY
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    if cfg!(windows) && buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                        let _ = dsr_reply.try_send(b"\x1b[1;1R".to_vec());
+                    }
                     if reader_tx
                         .blocking_send(StreamEvent::Data(buf[..n].to_vec()))
                         .is_err()
