@@ -131,7 +131,7 @@ App.svelte
 ## Seguridad
 
 - **CSP:** `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'`.
-- **Configuración de Tauri:** `withGlobalTauri: false`, `freezePrototype: true`, sin URLs remotas y sin devtools en release.
+- **Configuración de Tauri:** `withGlobalTauri: false` (sin `freezePrototype`: xterm.js asigna `toString` en objetos y con el prototipo congelado la UI no arranca), sin URLs remotas y sin devtools en release.
 - **Capacidades:** una sola, `capabilities/main.json`, con los comandos de la app (lista blanca de build.rs) y `core:event:allow-listen`/`allow-unlisten` (solo para el drag & drop). Sin `fs`, `shell` ni `dialog`.
 - **Validación en Rust de todo lo que llega:** nombres, puertos, bind, que los id existan, que la respuesta coincida con el tipo de prompt, rutas vía `LocalFs`, y que `key_path` esté en `keys_list`.
 - **Secretos:** se deserializan directamente a `Zeroizing`.
