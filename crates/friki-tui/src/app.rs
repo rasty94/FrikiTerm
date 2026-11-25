@@ -2094,7 +2094,9 @@ mod tests {
     async fn connection_failure_shows_error_and_closes_with_a_key() {
         let mut tui = Terminal::new(TestBackend::new(90, 20)).expect("terminal");
         let mut evs = typed("127.0.0.1:1\n");
-        evs.push((800, key(KeyCode::Char('x'))));
+        // Windows reintenta el SYN ante un puerto cerrado: el rechazo tarda ~2 s.
+        let wait = if cfg!(windows) { 5000 } else { 800 };
+        evs.push((wait, key(KeyCode::Char('x'))));
         let r = run_with_test(&mut tui, script(evs), None).await;
         // Un solo panel: se propaga el error de friki_ssh sin envolver.
         let e = r.expect_err("fallo de conexión");
@@ -2549,7 +2551,8 @@ mod tests {
         });
         f.app.cancel_xfer(1).await;
         let n = f.app.notice.clone().expect("aviso");
-        assert!(n.contains("parcial") && n.contains("/dl/a.bin"), "{n}");
+        let partial = PathBuf::from("/dl").join("a.bin").display().to_string();
+        assert!(n.contains("parcial") && n.contains(&partial), "{n}");
         assert!(f.pane().zm_quiet.is_some());
         assert_eq!(f.rec.bytes(), [0x18; 5]);
     }
