@@ -3,6 +3,8 @@
 mod auth;
 mod errors;
 mod forward;
+#[cfg(all(feature = "gssapi", unix))]
+mod gssapi;
 #[cfg(feature = "pkcs11")]
 mod pkcs11;
 mod policy;

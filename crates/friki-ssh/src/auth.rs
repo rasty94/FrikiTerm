@@ -107,6 +107,16 @@ pub(crate) async fn authenticate(
         st.warnings
             .push("pkcs11_provider ignorado: compila con la feature `pkcs11`".into());
     }
+    #[cfg(not(all(feature = "gssapi", unix)))]
+    if cfg.gssapi {
+        st.warnings
+            .push("GSSAPI ignorado: requiere la feature `gssapi` y un sistema Unix".into());
+    }
+    // GSSAPI va antes que los demás métodos (como OpenSSH); no gasta presupuesto.
+    #[cfg(all(feature = "gssapi", unix))]
+    if cfg.gssapi && try_gssapi(&mut st, cfg.gssapi_delegate).await? {
+        return Ok(());
+    }
     for method in &cfg.auth {
         let done = match method {
             AuthMethod::Agent => try_agent(&mut st).await?,
@@ -257,6 +267,38 @@ async fn try_keys(st: &mut State<'_>, files: &[PathBuf]) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// `gssapi-with-mic` con el ticket Kerberos del usuario (`kinit`). Sin ticket o sin KDC
+/// se avisa y se sigue con el resto de métodos.
+#[cfg(all(feature = "gssapi", unix))]
+async fn try_gssapi(st: &mut State<'_>, delegate: bool) -> Result<bool> {
+    use crate::gssapi::{Gssapi, krb5_oid_der};
+
+    if !st.offers(MethodKind::GssapiWithMic) {
+        return Ok(false);
+    }
+    let mut g = match Gssapi::new(st.host, delegate) {
+        Ok(g) => g,
+        Err(e) => {
+            st.warnings.push(format!("GSSAPI: {e}"));
+            return Ok(false);
+        }
+    };
+    let r = st
+        .handle
+        .authenticate_gssapi_with_mic(st.user, vec![krb5_oid_der()], &mut g)
+        .await;
+    if let Some(m) = g.server_error.take() {
+        st.warnings.push(format!("GSSAPI del servidor: {m}"));
+    }
+    match r {
+        Ok(r) => Ok(st.record(r)),
+        Err(e) => {
+            st.warnings.push(format!("GSSAPI: {e}"));
+            Ok(false)
+        }
+    }
 }
 
 /// Claves de un token PKCS#11 (`pkcs11_provider`). El PIN viene del llavero

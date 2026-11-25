@@ -13,6 +13,12 @@ path = "src/lib.rs"
 name = "friki"
 path = "src/main.rs"
 
+[features]
+
+# Reenvían a friki-ssh (desactivadas por defecto).
+pkcs11 = ["friki-ssh/pkcs11"]
+gssapi = ["friki-ssh/gssapi"]
+
 [dependencies]
 friki-core = { path = "../friki-core" }
 friki-ssh = { path = "../friki-ssh" }
