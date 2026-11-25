@@ -399,3 +399,78 @@ async fn bundled_examples() {
     assert_eq!(r.unwrap(), 0);
     assert_eq!(std::fs::read_to_string(file).unwrap(), "\nresultado\n");
 }
+
+async fn cancel_after(src: &'static str) -> (Result<i64, ScriptError>, Duration) {
+    let m = Mock::with_input("");
+    let tok = CancelToken::new();
+    let t2 = tok.clone();
+    let h = tokio::spawn(async move {
+        run_cancellable(
+            src,
+            &[],
+            m,
+            &Permissions::default(),
+            &Limits::default(),
+            &t2,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let t0 = Instant::now();
+    tok.cancel();
+    let r = h.await.unwrap();
+    (r, t0.elapsed())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_stops_sleep_and_compute() {
+    for src in [
+        "loop { crt.Sleep(1000); }",
+        "let i = 0; loop { i += 1; }",
+        r#"loop { crt.Screen.WaitForString("nunca", 30); }"#,
+    ] {
+        let (r, el) = cancel_after(src).await;
+        assert!(
+            matches!(&r, Err(ScriptError::Runtime(m)) if m == "cancelado"),
+            "{r:?}"
+        );
+        assert!(el < Duration::from_millis(200), "{src}: {el:?}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn filesystem_rejects_fifo_symlink_and_big_write() {
+    let root = tmpdir();
+    let (rd, other) = (root.join("r"), root.join("o"));
+    std::fs::create_dir_all(&rd).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("s.txt"), "x").unwrap();
+    std::os::unix::fs::symlink(other.join("s.txt"), rd.join("ln")).unwrap();
+    let fifo = std::ffi::CString::new(rd.join("ff").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let p = Permissions {
+        read: vec![rd.clone()],
+        write: vec![rd.clone()],
+        connect: false,
+    };
+    let m = Mock::with_input("");
+    for f in ["ff", "ln"] {
+        let src = format!(r#"crt.FileSystem.Read("{}");"#, rd.join(f).display());
+        assert!(
+            run(&src, &[], m.clone(), &p, &Limits::default())
+                .await
+                .is_err(),
+            "{f}"
+        );
+    }
+    let src = format!(
+        r#"let s = "x"; for i in 0..25 {{ s += s; }} crt.FileSystem.Write("{}", s);"#,
+        rd.join("big").display()
+    );
+    let lim = Limits {
+        max_operations: u64::MAX,
+        ..Limits::default()
+    };
+    assert!(run(&src, &[], m, &p, &lim).await.is_err());
+}

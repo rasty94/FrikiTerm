@@ -68,12 +68,10 @@ pub async fn receive<T: AsyncRead + AsyncWrite + Unpin + Send>(
     dest_dir: &Path,
     progress: &mut (dyn FnMut(Progress) + Send),
 ) -> io::Result<Vec<PathBuf>> {
-    tokio::fs::create_dir_all(dest_dir).await?;
-    match protocol {
-        FileProtocol::Xmodem => xy::receive(io, false, dest_dir, progress).await,
-        FileProtocol::Ymodem => xy::receive(io, true, dest_dir, progress).await,
-        FileProtocol::Zmodem => z::receive(io, dest_dir, progress).await,
-    }
+    // ponytail: sin tope práctico (u64::MAX); los llamadores con red hostil usan `receive_ex`
+    Ok(receive_ex(io, protocol, dest_dir, progress, u64::MAX)
+        .await?
+        .files)
 }
 
 /// Resultado de `receive_ex`.
@@ -94,8 +92,18 @@ pub async fn receive_ex<T: AsyncRead + AsyncWrite + Unpin + Send>(
     progress: &mut (dyn FnMut(Progress) + Send),
     max_total_bytes: u64,
 ) -> std::io::Result<Received> {
-    let _ = (io, protocol, dest_dir, progress, max_total_bytes);
-    todo!("friki-zmodem: receive_ex")
+    tokio::fs::create_dir_all(dest_dir).await?;
+    let (files, leftover) = match protocol {
+        FileProtocol::Xmodem => xy::receive(io, false, dest_dir, progress, max_total_bytes).await?,
+        FileProtocol::Ymodem => xy::receive(io, true, dest_dir, progress, max_total_bytes).await?,
+        FileProtocol::Zmodem => z::receive(io, dest_dir, progress, max_total_bytes).await?,
+    };
+    Ok(Received { files, leftover })
+}
+
+/// Error de tope superado; los receptores borran el fichero parcial al verlo.
+pub(crate) fn too_large(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::QuotaExceeded, msg.to_string())
 }
 
 /// Envía ficheros. Xmodem admite un único fichero.
@@ -166,6 +174,19 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin + Send> Conn<'a, S> {
         let b = self.buf[self.pos];
         self.pos += 1;
         Ok(b)
+    }
+
+    /// Bytes ya leídos del flujo y aún no consumidos (lo que sigue al fin del protocolo).
+    pub(crate) fn rest(&mut self) -> Vec<u8> {
+        let r = self.buf.get(self.pos..).unwrap_or_default().to_vec();
+        self.buf.clear();
+        self.pos = 0;
+        r
+    }
+
+    /// Devuelve el último byte leído.
+    pub(crate) fn unread(&mut self) {
+        self.pos = self.pos.saturating_sub(1);
     }
 
     pub(crate) async fn write(&mut self, data: &[u8]) -> io::Result<()> {
@@ -239,14 +260,43 @@ pub(crate) fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     crc
 }
 
-/// Deja solo el último componente del nombre, sin controles ni puntos iniciales.
+fn bad_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Deja solo el último componente del nombre, sin controles, bidi, puntos iniciales ni
+/// finales, con `:` sustituido y los nombres reservados de Windows prefijados.
 pub(crate) fn sanitize_name(raw: &[u8]) -> String {
     let s = String::from_utf8_lossy(raw);
     let last = s.rsplit(['/', '\\']).next().unwrap_or("");
-    let clean: String = last.chars().filter(|c| !c.is_control()).take(200).collect();
-    let clean = clean.trim().trim_start_matches('.').trim();
-    if clean.is_empty() {
-        "file".to_string()
+    let clean: String = last
+        .chars()
+        .filter(|&c| !bad_char(c))
+        .map(|c| if c == ':' { '_' } else { c })
+        .take(200)
+        .collect();
+    let clean = clean
+        .trim_start_matches(['.', ' '])
+        .trim_end_matches(['.', ' ']);
+    let one_normal = {
+        let mut it = Path::new(clean).components();
+        matches!(
+            (it.next(), it.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        )
+    };
+    if clean.is_empty() || !one_normal {
+        return "file".to_string();
+    }
+    let stem = clean.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || (stem.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.ends_with(|c: char| c.is_ascii_digit()));
+    if reserved {
+        format!("_{clean}")
     } else {
         clean.to_string()
     }

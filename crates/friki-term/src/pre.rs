@@ -49,7 +49,13 @@ pub(crate) struct Pre {
     /// Las paradas siguen siendo las de fábrica (cada 8): HT pasa tal cual a `vt100`.
     tabs_default: bool,
     awm: bool,
+    /// Bytes de la cadena OSC/DCS/APC/PM/SOS en curso y si se está descartando por larga.
+    slen: usize,
+    sdrop: bool,
 }
+
+/// Tope de una cadena OSC/DCS/APC/PM; lo que pasa se descarta (CAN a `vt100`).
+const MAX_STR: usize = 64 * 1024;
 
 /// DEC Special Graphics (0x5F-0x7E): tabla de xterm (`charsets.c`, `CS_DEC_SPEC_GRAPHIC`)
 /// y de la documentación "XTerm Control Sequences" (ctlseqs), apartado "VT100 Mode" /
@@ -95,6 +101,8 @@ impl Pre {
             tabs: default_tabs(0, usize::from(cols)).collect(),
             tabs_default: true,
             awm: true,
+            slen: 0,
+            sdrop: false,
         }
     }
 
@@ -169,13 +177,23 @@ impl Pre {
                     i += 1;
                 }
                 St::Str(osc) => {
-                    out.push(b);
+                    self.slen += 1;
+                    if self.sdrop || self.slen > MAX_STR {
+                        if !self.sdrop {
+                            self.sdrop = true;
+                            out.push(0x18); // CAN: vt100 abandona la cadena
+                        }
+                    } else {
+                        out.push(b);
+                    }
                     match b {
                         0x07 if osc => self.st = St::Ground,
                         0x18 | 0x1a => self.st = St::Ground,
                         // `ESC \` (ST) llega por Esc, que lo emite como ESC + final.
                         0x1b => {
-                            out.pop();
+                            if !self.sdrop {
+                                out.pop();
+                            }
                             self.st = St::Esc;
                         }
                         _ => {}
@@ -289,6 +307,8 @@ impl Pre {
             }
             b']' | b'P' | b'X' | b'^' | b'_' => {
                 out.extend_from_slice(&[0x1b, b]);
+                self.slen = 0;
+                self.sdrop = false;
                 self.st = St::Str(b == b']');
             }
             b'(' | b')' | b'*' | b'+' => {

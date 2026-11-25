@@ -344,3 +344,40 @@ async fn interop_rz_zmodem() {
 async fn interop_rz_ymodem() {
     us_to_rz("--ymodem", FileProtocol::Ymodem).await;
 }
+
+#[tokio::test]
+async fn zmodem_leftover_after_oo_and_total_cap() {
+    let root = tmpdir("zex");
+    let mut pr = |_: Progress| {};
+    let (mut a, mut b) = duplex(1 << 20);
+    let mut blob = zblob(&[(b"f", b"abc")]);
+    blob.extend(hex_header(&Hdr::pos(8, 0)));
+    blob.extend(b"OOuser@host$ ");
+    a.write_all(&blob).await.unwrap();
+    let r = receive_ex(&mut b, FileProtocol::Zmodem, &root.join("a"), &mut pr, 1000)
+        .await
+        .unwrap();
+    assert_eq!(r.files.len(), 1);
+    assert_eq!(r.leftover, b"user@host$ ");
+
+    // Tope total superado: error y parcial borrado.
+    let dst = root.join("b");
+    let (mut a, mut b) = duplex(1 << 20);
+    a.write_all(&zblob(&[(b"g", b"abcdef")])).await.unwrap();
+    let e = receive_ex(&mut b, FileProtocol::Zmodem, &dst, &mut pr, 4)
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::QuotaExceeded);
+    assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 0);
+}
+
+#[test]
+fn sanitize_hostile_names() {
+    assert_eq!(sanitize_name(b"CON"), "_CON");
+    assert_eq!(sanitize_name(b"nul.txt"), "_nul.txt");
+    assert_eq!(sanitize_name(b"com1"), "_com1");
+    assert_eq!(sanitize_name(b"a:b"), "a_b");
+    assert_eq!(sanitize_name(b"x. . "), "x");
+    assert_eq!(sanitize_name("a\u{202E}txt.exe".as_bytes()), "atxt.exe");
+    assert_eq!(sanitize_name(b"console"), "console");
+}
