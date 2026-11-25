@@ -239,8 +239,13 @@ impl Inner {
     ) -> Result<u64> {
         let (sfs, dfs) = self.ends(job.direction);
         // Se escribe en `<dst>.friki-part` y se renombra al terminar: un fallo no destruye
-        // el destino anterior.
-        let part = format!("{dst}{PART_SUFFIX}");
+        // el destino anterior. Un destino atómico (multipart de S3) escribe directo.
+        let direct = dfs.atomic_writes();
+        let part = if direct {
+            dst.to_string()
+        } else {
+            format!("{dst}{PART_SUFFIX}")
+        };
         let mut offset = 0;
         if job.resume == Resume::Auto {
             if let Some(d) = dfs.stat(dst).await?.filter(|d| d.kind == Kind::File)
@@ -250,7 +255,8 @@ impl Inner {
             {
                 return Ok(0);
             }
-            if let Some(p) = dfs.stat(&part).await?.filter(|p| p.kind == Kind::File)
+            if !direct
+                && let Some(p) = dfs.stat(&part).await?.filter(|p| p.kind == Kind::File)
                 && p.size < s.size
             {
                 offset = p.size;
@@ -307,8 +313,12 @@ impl Inner {
             // Sin escritura para grupo/otros ni setuid/setgid/sticky.
             dfs.set_mode(&part, mode & 0o755).await?;
         }
-        if dfs.rename(&part, dst).await.is_err() {
-            // Algunos servidores (SFTP) no sobrescriben en `rename`.
+        if !direct && let Err(e) = dfs.rename(&part, dst).await {
+            // Solo un rechazo del servidor con el destino presente (SFTP no sobrescribe) borra
+            // el anterior; un fallo de red o E/S deja el destino intacto.
+            if !matches!(e, Error::Protocol(_)) || dfs.stat(dst).await?.is_none() {
+                return Err(e);
+            }
             dfs.remove_file(dst).await?;
             dfs.rename(&part, dst).await?;
         }

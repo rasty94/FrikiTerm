@@ -28,6 +28,9 @@ pub enum Error {
     Protocol(String),
     #[error("cancelado")]
     Cancelled,
+    /// `Both` con caché: una raíz falta o está vacía y antes no lo estaba; no se propaga el borrado.
+    #[error("sincronización abortada: {0}")]
+    UnsafeSync(String),
     #[error(transparent)]
     Ssh(#[from] friki_ssh::Error),
 }
@@ -51,6 +54,7 @@ impl Error {
             Error::PermissionDenied(_) => ErrorKind::PermissionDenied,
             Error::Protocol(_) => ErrorKind::Protocol,
             Error::Cancelled => ErrorKind::Cancelled,
+            Error::UnsafeSync(_) => ErrorKind::Other,
             Error::Ssh(_) => ErrorKind::Network,
             Error::Io(e) => match e.kind() {
                 K::NotFound => ErrorKind::NotFound,
@@ -112,6 +116,11 @@ pub trait RemoteFs: Send + Sync {
     /// Fija los permisos (bits `rwx`). Por defecto no hace nada (FTP, sistemas sin modos).
     async fn set_mode(&self, _path: &str, _mode: u32) -> Result<()> {
         Ok(())
+    }
+    /// `true` si un `open_write` solo deja `path` completo al cerrar con éxito (multipart):
+    /// la cola escribe directo, sin `.friki-part` ni `rename`.
+    fn atomic_writes(&self) -> bool {
+        false
     }
     /// Nombre corto para mensajes (`sftp://user@host`).
     fn label(&self) -> String;

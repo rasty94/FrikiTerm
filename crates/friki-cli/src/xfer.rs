@@ -1,6 +1,6 @@
 //! `ls`, `get`, `put`, `cp`, `sync` y `ftp`: transferencias sin TUI sobre `friki-xfer`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -276,6 +276,7 @@ async fn download_fs(
         )));
     }
     let mut jobs = Vec::new();
+    let mut destinos = HashSet::new();
     for rpath in rpaths {
         let rpath = remote_path(rpath);
         let dest = match local {
@@ -283,12 +284,12 @@ async fn download_fs(
             Some(l) => l.to_path_buf(),
             None => PathBuf::from(base_name(rpath)?),
         };
-        jobs.push(job(
-            Direction::Download,
-            rpath.to_string(),
-            local_rel(&dest)?,
-            recursive,
-        ));
+        let dst = local_rel(&dest)?;
+        // Dos orígenes con el mismo nombre base escribirían el mismo `.friki-part` a la vez.
+        if !destinos.insert(dst.clone()) {
+            return Err(usage(format!("destino duplicado `{}`", dest.display())));
+        }
+        jobs.push(job(Direction::Download, rpath.to_string(), dst, recursive));
     }
     let fs: Fs = Arc::new(LocalFs::new(local_root()?));
     run_jobs(fs, remote, jobs, json).await
@@ -625,7 +626,9 @@ async fn sync_run(args: SyncArgs, remote: Fs, rroot: &str) -> anyhow::Result<()>
         if mode == SyncMode::Upload {
             return Err(friki_xfer::Error::NotFound(dir.display().to_string()).into());
         }
-        if !args.dry_run {
+        // Solo `Download` crea la raíz: en `Both` una raíz ausente (disco desmontado) no debe
+        // reaparecer vacía y disparar borrados; `plan` lo rechaza si hay caché.
+        if mode == SyncMode::Download && !args.dry_run {
             std::fs::create_dir_all(&dir)?;
         }
     }
@@ -924,5 +927,22 @@ mod tests {
         assert_eq!(failure_code(ErrorKind::Network), crate::EXIT_NETWORK);
         assert_eq!(failure_code(ErrorKind::PermissionDenied), EXIT_OTHER);
         assert_eq!(failure_code(ErrorKind::NotFound), EXIT_OTHER);
+    }
+
+    #[tokio::test]
+    async fn get_rechaza_destinos_duplicados_antes_de_encolar() {
+        let d = tempfile::tempdir().unwrap();
+        let remote: Fs = Arc::new(LocalFs::new(d.path()));
+        // Mismo nombre base desde dos carpetas: ambos caerían en `d/app.log`.
+        let e = download_fs(
+            remote,
+            &["a/app.log", "b/app.log"],
+            Some(d.path()),
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.downcast_ref::<UsageError>().is_some());
     }
 }

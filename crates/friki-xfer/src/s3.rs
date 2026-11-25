@@ -4,9 +4,9 @@
 //! `AWS_SESSION_TOKEN`) o de un perfil de `~/.aws/credentials`; nunca se guardan en la
 //! configuración de friki. Los directorios son prefijos: `mkdir`/`remove_dir` no hacen nada.
 //!
-//! Escritura: la cola sube a `<destino>.friki-part` y renombra; aquí el rename es
-//! CopyObject + DeleteObject (un objeto solo aparece al completar la subida, así que un fallo
-//! no deja el destino a medias). El `.friki-part` no se reanuda: `stat` lo oculta.
+//! Escritura: multipart directo al destino (`atomic_writes`): un objeto solo aparece al
+//! completar la subida, así que un fallo no deja el destino a medias y no hay `.friki-part`
+//! ni CopyObject. `rename` (CopyObject + DeleteObject) queda para usos explícitos.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -567,6 +567,11 @@ impl RemoteFs for S3Fs {
         Ok(())
     }
 
+    /// Multipart: el objeto aparece completo solo al cerrar; no hace falta `.friki-part`.
+    fn atomic_writes(&self) -> bool {
+        true
+    }
+
     fn label(&self) -> String {
         format!("s3://{}", self.0.bucket.name())
     }
@@ -588,6 +593,13 @@ mod tests {
             Some(("A2".into(), "S2".into(), Some("T2".into())))
         );
         assert_eq!(parse_profile(t, "otro"), None);
+    }
+
+    #[test]
+    fn copy_200_con_error_en_el_cuerpo_falla() {
+        let err = "<Error><Code>InternalError</Code></Error>";
+        assert!(Inner::check_body(err, "k").is_err());
+        assert!(Inner::check_body("<CopyObjectResult/>", "k").is_ok());
     }
 
     #[test]
