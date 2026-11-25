@@ -2434,6 +2434,7 @@ mod tests {
         assert!(f.app.done.is_none(), "la aplicación no sale");
     }
 
+    #[cfg(unix)]
     #[test]
     fn script_permissions_are_empty_and_connect_needs_a_private_script() {
         use std::os::unix::fs::PermissionsExt;
