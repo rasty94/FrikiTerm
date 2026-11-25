@@ -6,6 +6,8 @@
 mod cmd;
 mod dto;
 mod error;
+#[cfg(test)]
+mod integration;
 mod state;
 
 use cmd::{fwd, hosts, keys, sftp, term};

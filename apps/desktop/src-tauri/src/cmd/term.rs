@@ -1,8 +1,9 @@
 //! Terminales y conexiones SSH. Los comandos son envoltorios finos sobre `open_term`, `write_term`...
 //! Cada terminal tiene una tarea que posee su flujo: avisa al abrir, bombea la salida y atiende órdenes.
 
+use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use friki_core::config::{Forward, Protocol, SessionConfig};
@@ -13,6 +14,7 @@ use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use zeroize::Zeroizing;
 
 use super::hosts::{find_in, validate};
 use crate::dto::{
@@ -30,21 +32,65 @@ const MAX_WRITE: usize = 1 << 20;
 const MAX_DIM: u16 = 1000;
 
 /// `Asker` del escritorio: los prompts viajan a la UI y la respuesta vuelve por `prompt_answer`.
+/// Los secretos se buscan antes en el llavero del sistema (cuenta `password:{user}@{host}:{port}` o
+/// `passphrase:{ruta}`) y, con `remember`, se guardan ahí; nunca pasan por la UI.
 #[derive(Clone)]
-pub struct DeskAsker(pub AppState);
+pub struct DeskAsker {
+    pub state: AppState,
+    pub port: u16,
+    /// Cuentas ya servidas desde el llavero: si vuelven a pedirse, el valor guardado falló.
+    tried: Arc<Mutex<HashSet<String>>>,
+}
+
+impl DeskAsker {
+    pub fn new(state: AppState, port: u16) -> Self {
+        Self {
+            state,
+            port,
+            tried: Arc::default(),
+        }
+    }
+}
+
+fn secret_account(p: &friki_session::Prompt, port: u16) -> Option<String> {
+    match p {
+        friki_session::Prompt::Password { user, host } => {
+            Some(format!("password:{user}@{host}:{port}"))
+        }
+        friki_session::Prompt::Passphrase { key_path } => Some(format!("passphrase:{key_path}")),
+        _ => None,
+    }
+}
 
 #[async_trait::async_trait]
 impl Asker for DeskAsker {
     async fn ask(&self, p: friki_session::Prompt) -> Option<Reply> {
+        let account = secret_account(&p, self.port);
+        if let Some(a) = &account {
+            let first = self
+                .tried
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(a.clone());
+            // ponytail: un error del llavero (sin servicio, bloqueado) cuenta como "no guardado".
+            if let (true, Ok(Some(v))) = (first, friki_core::secrets::get(a)) {
+                return Some(Reply::Secret(Some(Zeroizing::new(v))));
+            }
+        }
         // `None` (sin suscriptor, rechazo o plazo vencido) lo interpreta friki-session como cancelar.
-        match self.0.ask(to_dto(p), PROMPT_TIMEOUT).await? {
+        match self.state.ask(to_dto(p), PROMPT_TIMEOUT).await? {
             PromptAnswer::HostKey { decision } => Some(Reply::HostKey(match decision {
                 HostKeyDecision::Reject => friki_session::HostKeyDecision::Reject,
                 HostKeyDecision::AcceptOnce => friki_session::HostKeyDecision::AcceptOnce,
                 HostKeyDecision::AcceptAndSave => friki_session::HostKeyDecision::AcceptAndSave,
             })),
-            // ponytail: `remember` se ignora; el llavero (T3) define la cuenta y se cablea allí.
-            PromptAnswer::Secret { value, remember: _ } => Some(Reply::Secret(value)),
+            PromptAnswer::Secret { value, remember } => {
+                if let (true, Some(a), Some(v)) = (remember, &account, &value) {
+                    // Si el llavero falla, la conexión sigue; solo no se recuerda.
+                    let _ = friki_core::secrets::set(a, v);
+                }
+                Some(Reply::Secret(value))
+            }
             PromptAnswer::Multi { values } => Some(Reply::Multi(values)),
         }
     }
@@ -130,16 +176,34 @@ fn open_err(e: anyhow::Error) -> CmdError {
     }
 }
 
-/// Estado de una redirección (`Ok` = escuchando en su dirección real).
-fn fwd_status(spec: Forward, r: Result<friki_session::ForwardHandle, String>) -> ForwardStatus {
+/// Estado de una redirección (`Ok` = escuchando en su dirección real). Las activas se registran en
+/// `state.fwds` para que `fwd_list` y `fwd_stop` las vean.
+fn fwd_status(
+    state: &AppState,
+    conn: Option<ConnId>,
+    spec: Forward,
+    r: Result<friki_session::ForwardHandle, String>,
+) -> ForwardStatus {
     match r {
-        Ok(h) => ForwardStatus {
-            id: h.id,
-            spec,
-            listen: h.listen.to_string(),
-            active: true,
-            error: None,
-        },
+        Ok(h) => {
+            let status = ForwardStatus {
+                id: h.id,
+                spec,
+                listen: h.listen.to_string(),
+                active: true,
+                error: None,
+            };
+            if let Some(c) = conn {
+                state
+                    .fwds
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entry(c)
+                    .or_default()
+                    .push((status.clone(), h));
+            }
+            status
+        }
         Err(e) => ForwardStatus {
             id: 0,
             spec,
@@ -224,7 +288,7 @@ async fn run_term(
     events: Channel<TermEvent>,
 ) {
     let open = friki_session::open_stream(
-        DeskAsker(state.clone()),
+        DeskAsker::new(state.clone(), cfg.port),
         &cfg,
         paths::known_hosts_file(),
         size,
@@ -271,7 +335,7 @@ async fn run_term(
         negotiated: negotiated.map(|n| format!("{} {} {} {}", n.kex, n.cipher, n.mac, n.host_key)),
         forwards: forwards
             .into_iter()
-            .map(|(spec, r)| fwd_status(spec, r))
+            .map(|(spec, r)| fwd_status(&state, conn_id, spec, r))
             .collect(),
     });
     if let Some((c, r)) = latest {
@@ -282,6 +346,10 @@ async fn run_term(
     }
     let end = pump(&*writer, &mut *reader, &mut rx, &output).await;
     state.terms.remove(id);
+    if let (TermEvent::Lost { reason }, Some(c)) = (&end, conn_id) {
+        // El transporte murió: la conexión ya no sirve a SFTP ni redirecciones.
+        close_conn(&state, c, reason.clone()).await;
+    }
     let _ = events.send(end);
     drop((writer, reader));
     // Si la conexión sigue en el registro (ConnId), no se cierra aquí.
@@ -385,15 +453,19 @@ pub async fn open_conn(state: &AppState, dir: &Path, host: &str) -> Result<ConnI
         return Err(CmdError::invalid("solo se puede conectar por SSH"));
     }
     let conn = Arc::new(
-        friki_session::connect_ssh(DeskAsker(state.clone()), &cfg, paths::known_hosts_file())
-            .await?,
+        friki_session::connect_ssh(
+            DeskAsker::new(state.clone(), cfg.port),
+            &cfg,
+            paths::known_hosts_file(),
+        )
+        .await?,
     );
     let id = state.conns.insert(ConnHandle { conn: conn.clone() });
     for f in &cfg.forwards {
         let r = conn.start_forward(f).await.map_err(|e| e.to_string());
         state.emit(AppEvent::Forward {
             conn: id,
-            status: fwd_status(f.clone(), r),
+            status: fwd_status(state, Some(id), f.clone(), r),
         });
     }
     Ok(id)
@@ -401,13 +473,19 @@ pub async fn open_conn(state: &AppState, dir: &Path, host: &str) -> Result<ConnI
 
 #[tauri::command]
 pub async fn conn_close(state: State<'_, AppState>, conn: ConnId) -> Result<(), CmdError> {
-    close_conn(&state, conn).await;
+    close_conn(&state, conn, None).await;
     Ok(())
 }
 
-/// Quita la conexión del registro; se desconecta si ya no la usa nadie.
-pub async fn close_conn(state: &AppState, conn: ConnId) {
+/// Quita la conexión del registro (y sus redirecciones), avisa a la UI y se desconecta si ya no la usa nadie.
+pub async fn close_conn(state: &AppState, conn: ConnId, reason: Option<String>) {
     if let Some(h) = state.conns.remove(conn) {
+        state
+            .fwds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&conn);
+        state.emit(AppEvent::ConnClosed { conn, reason });
         friki_session::disconnect(h.conn).await;
     }
 }
@@ -444,7 +522,7 @@ mod tests {
         let state = AppState::default();
         let (events, mut ui) = sink::<AppEvent>();
         state.subscribe(events);
-        let asker = DeskAsker(state.clone());
+        let asker = DeskAsker::new(state.clone(), 22);
         let ask = tokio::spawn(async move {
             asker
                 .ask(friki_session::Prompt::Password {
@@ -468,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn sin_suscriptor_el_prompt_es_rechazo() {
-        let asker = DeskAsker(AppState::default());
+        let asker = DeskAsker::new(AppState::default(), 22);
         let r = asker
             .ask(friki_session::Prompt::Passphrase {
                 key_path: "/k".into(),

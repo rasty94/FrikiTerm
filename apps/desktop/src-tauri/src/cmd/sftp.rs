@@ -112,11 +112,16 @@ fn entry_dto(e: Entry) -> EntryDto {
 
 #[tauri::command]
 pub async fn sftp_open(state: State<'_, AppState>, conn: ConnId) -> Result<SftpId, CmdError> {
+    sftp_open_op(&state, conn).await
+}
+
+pub async fn sftp_open_op(state: &AppState, conn: ConnId) -> Result<SftpId, CmdError> {
     let c = state.conn(conn)?;
     let fs: Arc<dyn RemoteFs> = Arc::from(friki_xfer::sftp::open(&c).await?);
     Ok(state.sftps.insert(SftpHandle {
         fs,
         paused: AtomicBool::new(false),
+        conn: Some(conn),
     }))
 }
 
@@ -301,13 +306,26 @@ fn ensure_queue(state: &AppState, sftp: SftpId, root: &str) -> Result<(), CmdErr
     }
     let handle = state
         .sftps
-        .with(sftp, |h| (h.fs.clone(), h.paused.load(Relaxed)))
+        .with(sftp, |h| (h.fs.clone(), h.paused.load(Relaxed), h.conn))
         .ok_or_else(|| CmdError::new(ErrorKind::Notfound, "sesión SFTP desconocida"))?;
     let local: Arc<dyn RemoteFs> = Arc::new(local_fs(root)?);
     // Las colas nunca se quitan: el número de colas + 1 es un `seq` único.
     let seq = qs.len() as u64 + 1;
     let (tx, rx) = mpsc::unbounded_channel();
-    let queue = Queue::new(local, handle.0, QueueOptions::default(), tx);
+    let mut queue = Queue::new(local, handle.0, QueueOptions::default(), tx);
+    if let Some(conn) = handle.2 {
+        // Tras un corte de red reabre SFTP sobre la misma conexión (si ya no existe, el trabajo falla).
+        let st = state.clone();
+        queue = queue.with_reconnect(Arc::new(move || {
+            let st = st.clone();
+            Box::pin(async move {
+                let c = st
+                    .conn(conn)
+                    .map_err(|e| friki_xfer::Error::Protocol(e.message))?;
+                Ok(Arc::from(friki_xfer::sftp::open(&c).await?))
+            })
+        }));
+    }
     queue.pause(handle.1);
     tokio::spawn(forward_events(state.clone(), sftp, seq, rx));
     qs.insert(key, QueueHandle { seq, queue });
@@ -591,6 +609,7 @@ mod tests {
         let remote = SftpHandle {
             fs: Arc::new(LocalFs::new(&dst.0)),
             paused: AtomicBool::new(false),
+            conn: None,
         };
         let sftp = st.sftps.insert(remote);
         let ids = xfer_enqueue_op(

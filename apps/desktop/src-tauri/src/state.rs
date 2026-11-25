@@ -51,6 +51,8 @@ pub struct SftpHandle {
     pub fs: Arc<dyn RemoteFs>,
     /// Pausa de la sesión: las colas nuevas nacen con ella.
     pub paused: AtomicBool,
+    /// Conexión de origen: las colas la usan para reabrir SFTP tras un corte.
+    pub conn: Option<ConnId>,
 }
 
 /// Cola de transferencias de un (sftp, raíz local). `seq` va en los `JobId`.
