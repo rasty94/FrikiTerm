@@ -416,6 +416,9 @@ struct Pane {
     zm_quiet: Option<Instant>,
     /// Últimos bytes del flujo, por si la señal Zmodem llega partida entre dos lecturas.
     zm_tail: Vec<u8>,
+    /// Respuestas del emulador (DSR, CPR, DA) aún no escritas al remoto. Se escriben antes
+    /// que cualquier otro envío al panel, así quedan en orden con las teclas.
+    replies: Vec<u8>,
     /// Un `connect` de script a la espera de que el panel abra.
     pending_connect: Option<oneshot::Sender<Result<(), String>>>,
     /// Sesión TN3270 (solo protocolo `tn3270`); pinta en `emu`.
@@ -448,6 +451,7 @@ impl Pane {
             zm_hold: None,
             zm_quiet: None,
             zm_tail: vec![],
+            replies: vec![],
             pending_connect: None,
             #[cfg(feature = "tn3270")]
             tn: None,
@@ -810,15 +814,46 @@ impl<'a> App<'a> {
     }
 
     async fn send(&mut self, id: PaneId, bytes: &[u8]) {
+        self.flush_pane(id).await;
         let Some(o) = self.panes.get_mut(&id).and_then(|p| p.out.as_mut()) else {
             return;
         };
         o.send(bytes).await;
     }
 
+    /// Escribe las respuestas pendientes del panel. Va por el mismo escritor, en línea y
+    /// antes que cualquier otro envío, así que no se reordena con las teclas ni entre sí.
+    async fn flush_pane(&mut self, id: PaneId) {
+        let Some(p) = self.panes.get_mut(&id).filter(|p| !p.replies.is_empty()) else {
+            return;
+        };
+        let r = std::mem::take(&mut p.replies);
+        if let Some(o) = p.out.as_ref() {
+            let _ = o.writer.write(&r).await;
+        }
+    }
+
+    /// Tras cada tecla o mensaje: escribe lo que el emulador haya respondido.
+    async fn flush_all(&mut self) {
+        let ids: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, p)| !p.replies.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.flush_pane(id).await;
+        }
+    }
+
     // ---- mensajes de los paneles ----
 
     async fn on_msg(&mut self, m: Msg) {
+        self.handle_msg(m).await;
+        self.flush_all().await;
+    }
+
+    async fn handle_msg(&mut self, m: Msg) {
         match m {
             Msg::Ask(id, mut d, tx) => {
                 if let Some(p) = self.panes.get(&id) {
@@ -971,6 +1006,11 @@ impl<'a> App<'a> {
     // ---- entrada ----
 
     async fn on_event(&mut self, ev: Event) {
+        self.handle_event(ev).await;
+        self.flush_all().await;
+    }
+
+    async fn handle_event(&mut self, ev: Event) {
         match ev {
             Event::Key(k) if !pressed(&k) => {}
             Event::Key(k) => self.on_key(k).await,
@@ -1973,15 +2013,8 @@ fn deliver(p: &mut Pane, d: &[u8]) {
     }
     if let Some(e) = p.emu.as_mut() {
         e.process(d);
-        // Respuestas a consultas del remoto (DSR, CPR, DA).
-        let r = e.take_replies();
-        if !r.is_empty()
-            && let Some(w) = p.out.as_ref().map(|o| o.writer.clone())
-        {
-            tokio::spawn(async move {
-                let _ = w.write(&r).await;
-            });
-        }
+        // Respuestas a consultas del remoto (DSR, CPR, DA): ver `flush_pane`.
+        p.replies.extend(e.take_replies());
         if let Some(sc) = &p.script {
             sc.shared.set_screen(&e.screen());
         }
@@ -2419,6 +2452,19 @@ mod tests {
                 self.app.on_msg(m).await;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn respuestas_del_emulador_van_antes_que_las_teclas() {
+        let mut f = fixture("replies");
+        // CPR en un mensaje y tecla en otro: la respuesta sale al procesar el mensaje y
+        // la tecla después, en ese orden.
+        f.app
+            .on_msg(Msg::Stream(1, StreamEvent::Data(b"ab\x1b[6n".to_vec())))
+            .await;
+        assert_eq!(f.rec.bytes(), b"\x1b[1;3R");
+        f.type_str("x").await;
+        assert_eq!(f.rec.bytes(), b"\x1b[1;3Rx");
     }
 
     #[tokio::test]

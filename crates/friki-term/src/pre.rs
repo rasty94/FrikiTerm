@@ -63,6 +63,10 @@ pub(crate) struct Pre {
 /// Tope de una cadena OSC/DCS/APC/PM; lo que pasa se descarta (CAN a `vt100`).
 const MAX_STR: usize = 64 * 1024;
 
+/// Tope de respuestas sin recoger: un remoto que no deja de preguntar no puede crecer
+/// la memoria. Las respuestas que llegan con el búfer lleno se descartan.
+const MAX_REPLIES: usize = 4 * 1024;
+
 /// DEC Special Graphics (0x5F-0x7E): tabla de xterm (`charsets.c`, `CS_DEC_SPEC_GRAPHIC`)
 /// y de la documentación "XTerm Control Sequences" (ctlseqs), apartado "VT100 Mode" /
 /// "Character Set". 0x5F es el espacio sin ruptura; 0x6F-0x73 son las líneas de escaneo.
@@ -117,6 +121,12 @@ impl Pre {
 
     pub(crate) fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
+    }
+
+    fn reply(&mut self, r: &[u8]) {
+        if self.replies.len() < MAX_REPLIES {
+            self.replies.extend_from_slice(r);
+        }
     }
 
     pub(crate) fn emulate(mut self, e: friki_core::config::Emulation) -> Self {
@@ -377,16 +387,16 @@ impl Pre {
             (b's', []) => out.extend_from_slice(b"\x1b7"),
             (b'u', []) => out.extend_from_slice(b"\x1b8"),
             // Consultas: DSR (estado, posición del cursor) y atributos de dispositivo.
-            (b'n', b"5") => self.replies.extend_from_slice(b"\x1b[0n"),
+            (b'n', b"5") => self.reply(b"\x1b[0n"),
             (b'n', b"6") => {
                 let _ = Self::col(out, p);
                 let (row, col) = p.screen().cursor_position();
                 let cols = p.screen().size().1.get();
                 let r = format!("\x1b[{};{}R", row + 1, col.min(cols - 1) + 1);
-                self.replies.extend_from_slice(r.as_bytes());
+                self.reply(r.as_bytes());
             }
-            (b'c', [] | b"0") => self.replies.extend_from_slice(self.da1),
-            (b'c', b">" | b">0") => self.replies.extend_from_slice(b"\x1b[>0;10;0c"),
+            (b'c', [] | b"0") => self.reply(self.da1),
+            (b'c', b">" | b">0") => self.reply(b"\x1b[>0;10;0c"),
             // CBT (vt100 no lo implementa): a la parada anterior con `CSI n D`.
             (b'Z', [] | b"1") => {
                 let (c, _) = Self::col(out, p);

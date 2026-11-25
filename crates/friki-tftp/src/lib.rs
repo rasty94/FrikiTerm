@@ -11,10 +11,16 @@ use friki_xfer::safe_name;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 const RETRIES: u32 = 5;
+/// Transferencias simultáneas; las peticiones que sobran reciben ERROR "ocupado".
+// ponytail: tope fijo; hacerlo configurable si hace falta más.
+const MAX_TRANSFERS: usize = 32;
+/// Tope del plazo que puede pedir el cliente (RFC 2349 admite hasta 255 s).
+const MAX_TIMEOUT: u64 = 10;
 
 /// Configuración del servidor.
 pub struct Config {
@@ -23,6 +29,8 @@ pub struct Config {
     pub allow_write: bool,
     /// Permite que una subida sustituya un fichero existente.
     pub overwrite: bool,
+    /// Tamaño máximo de una subida en bytes; al pasarlo se aborta y se borra el temporal.
+    pub max_size: u64,
     /// Registro de cada petición y de su resultado.
     pub log: fn(&str),
 }
@@ -51,18 +59,22 @@ pub async fn serve(sock: UdpSocket, cfg: Config) -> io::Result<()> {
     let root = fs::canonicalize(&cfg.root).await?;
     let cfg = Arc::new(cfg);
     let ip = sock.local_addr()?.ip();
+    let slots = Arc::new(Semaphore::new(MAX_TRANSFERS));
     let mut tasks = JoinSet::new();
     let mut buf = vec![0u8; 1024];
     loop {
         let (n, peer) = sock.recv_from(&mut buf).await?;
         while tasks.try_join_next().is_some() {}
-        tasks.spawn(handle(
-            buf[..n].to_vec(),
-            peer,
-            ip,
-            root.clone(),
-            cfg.clone(),
-        ));
+        let Ok(permit) = slots.clone().try_acquire_owned() else {
+            (cfg.log)(&format!("ocupado, rechazada petición de {peer}"));
+            let _ = sock.send_to(&error_pkt(0, "servidor ocupado"), peer).await;
+            continue;
+        };
+        let (req, root, cfg) = (buf[..n].to_vec(), root.clone(), cfg.clone());
+        tasks.spawn(async move {
+            let _permit = permit;
+            handle(req, peer, ip, root, cfg).await;
+        });
     }
 }
 
@@ -159,6 +171,20 @@ fn is_pkt(p: &[u8], op: u8, n: u16) -> bool {
     p.len() >= 4 && p[..2] == [0, op] && p[2..4] == n.to_be_bytes()
 }
 
+/// Mismo fichero (dispositivo e inodo). Fuera de Unix solo cuenta la ruta canónica.
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        a.dev() == b.dev() && a.ino() == b.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        true
+    }
+}
+
 async fn transfer(
     read: bool,
     name: &str,
@@ -167,23 +193,25 @@ async fn transfer(
     root: &Path,
     cfg: &Config,
 ) -> Result<(), TErr> {
-    let path = resolve(root, name)?;
+    let mut path = resolve(root, name)?;
     let mut blk = 512usize;
     let mut peer = Peer {
         sock,
         tmo: Duration::from_secs(3),
         buf: Vec::new(),
     };
-    // Lectura: abre y confina (symlinks incluidos). Escritura: confina el directorio padre.
+    // Lectura: se abre primero y se comprueba el fichero abierto (mismo inodo que la ruta
+    // canónica, dentro de la raíz). Escritura: destino y temporal se nombran desde el
+    // directorio canónico ya confinado.
     let file;
     let mut size = 0;
     let tmp = if read {
+        let f = File::open(&path).await?;
+        let md = f.metadata().await?;
         let real = fs::canonicalize(&path).await?;
-        if !real.starts_with(root) {
+        if !real.starts_with(root) || !same_file(&md, &fs::metadata(&real).await?) {
             return Err(denied("fuera de la raíz"));
         }
-        let f = File::open(&real).await?;
-        let md = f.metadata().await?;
         if !md.is_file() {
             return Err(denied("no es un fichero"));
         }
@@ -194,19 +222,19 @@ async fn transfer(
         if !cfg.allow_write {
             return Err(denied("escritura desactivada"));
         }
-        let dir = path.parent().ok_or_else(|| denied("nombre no permitido"))?;
-        if !fs::canonicalize(dir).await?.starts_with(root) {
+        let last = name.rsplit('/').next().unwrap_or("");
+        let parent = path.parent().ok_or_else(|| denied("nombre no permitido"))?;
+        let dir = fs::canonicalize(parent).await?;
+        if !dir.starts_with(root) {
             return Err(denied("fuera de la raíz"));
         }
+        path = dir.join(last);
         // ponytail: comprobar y renombrar no es atómico; basta para un servidor local.
         if !cfg.overwrite && fs::symlink_metadata(&path).await.is_ok() {
             return Err(TErr(6, "el fichero ya existe".into()));
         }
         let port = sock.local_addr()?.port();
-        let tmp = dir.join(format!(
-            ".{}.{port}.tftp",
-            name.rsplit('/').next().unwrap_or("")
-        ));
+        let tmp = dir.join(format!(".{last}.{port}.tftp"));
         file = File::options()
             .write(true)
             .create_new(true)
@@ -223,6 +251,7 @@ async fn transfer(
                 oack.push(("blksize", blk.to_string()));
             }
             ("timeout", Ok(n @ 1..=255)) => {
+                let n = n.min(MAX_TIMEOUT);
                 peer.tmo = Duration::from_secs(n);
                 oack.push(("timeout", n.to_string()));
             }
@@ -243,7 +272,7 @@ async fn transfer(
         return send_file(&mut peer, file, blk, oack_pkt).await;
     };
     // El ACK final sale tras el rename: al recibirlo, el cliente ya ve el fichero.
-    let res = match recv_file(&mut peer, file, blk, oack_pkt).await {
+    let res = match recv_file(&mut peer, file, blk, oack_pkt, cfg.max_size).await {
         Ok(ack) => fs::rename(&tmp, &path)
             .await
             .map(|()| ack)
@@ -292,12 +321,18 @@ async fn recv_file(
     mut f: File,
     blk: usize,
     oack: Option<Vec<u8>>,
+    max: u64,
 ) -> Result<Vec<u8>, TErr> {
     let mut pkt = oack.unwrap_or_else(|| block_pkt(4, 0, &[]));
     let mut n = 0u16;
+    let mut total = 0u64;
     loop {
         n = n.wrapping_add(1);
         let len = peer.exchange(&pkt, |p| is_pkt(p, 3, n)).await?;
+        total += (len - 4) as u64;
+        if total > max {
+            return Err(TErr(3, "tamaño máximo excedido".into()));
+        }
         f.write_all(&peer.buf[4..len]).await?;
         pkt = block_pkt(4, n, &[]);
         if len - 4 < blk {

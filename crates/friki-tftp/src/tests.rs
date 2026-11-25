@@ -8,12 +8,22 @@ async fn start(
     allow_write: bool,
     overwrite: bool,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    start_max(dir, allow_write, overwrite, 1 << 30).await
+}
+
+async fn start_max(
+    dir: &Path,
+    allow_write: bool,
+    overwrite: bool,
+    max_size: u64,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
     let cfg = Config {
         root: dir.to_path_buf(),
         allow_write,
         overwrite,
+        max_size,
         log: |_| {},
     };
     (
@@ -171,4 +181,64 @@ async fn recorrido_de_rutas_rechazado() {
     #[cfg(unix)]
     assert_eq!(put(addr, "dir/fuera", b"x").await.unwrap_err().0, 2);
     assert!(!d.path().join("fuera").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn subida_sustituye_el_enlace_no_su_destino() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(d.path().join("secreto"), "s").unwrap();
+    std::os::unix::fs::symlink(d.path().join("secreto"), root.join("enlace")).unwrap();
+    let (addr, _srv) = start(&root, true, true).await;
+    put(addr, "enlace", b"nuevo").await.unwrap();
+    assert_eq!(std::fs::read(d.path().join("secreto")).unwrap(), b"s");
+    assert!(
+        !root
+            .join("enlace")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(root.join("enlace")).unwrap(), b"nuevo");
+}
+
+#[tokio::test]
+async fn subida_con_tamano_maximo() {
+    let d = tempfile::tempdir().unwrap();
+    let (addr, _srv) = start_max(d.path(), true, false, 1000).await;
+    assert_eq!(put(addr, "up.bin", &[3u8; 2000]).await.unwrap_err().0, 3);
+    // el temporal se borra al abortar
+    assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
+    put(addr, "ok.bin", &[3u8; 1000]).await.unwrap();
+    assert_eq!(std::fs::read(d.path().join("ok.bin")).unwrap().len(), 1000);
+}
+
+#[tokio::test]
+async fn plazo_negociado_acotado() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("fw.bin"), b"x").unwrap();
+    let (addr, _srv) = start(d.path(), false, false).await;
+    let (out, oack) = get(addr, "fw.bin", &[("timeout", "255")]).await;
+    assert_eq!(out.unwrap(), b"x");
+    assert_eq!(oack.unwrap(), b"\0\x06timeout\x0010\0");
+}
+
+#[tokio::test]
+async fn transferencias_simultaneas_limitadas() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("big.bin"), vec![1u8; 4000]).unwrap();
+    let (addr, _srv) = start(d.path(), false, false).await;
+    // Clientes que piden y no contestan: cada transferencia queda ocupando un hueco.
+    let mut hold = Vec::new();
+    for _ in 0..MAX_TRANSFERS {
+        let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        s.send_to(&rq(1, "big.bin", &[]), addr).await.unwrap();
+        hold.push(s);
+    }
+    let (out, _) = get(addr, "big.bin", &[]).await;
+    assert_eq!(out.unwrap_err().0, 0);
+    drop(hold);
 }
