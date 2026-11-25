@@ -1627,10 +1627,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "directories",
  "friki-core",
  "friki-session",
  "friki-ssh",
  "friki-xfer",
+ "russh",
  "serde",
  "serde_json",
  "tauri",
@@ -1639,6 +1641,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml 1.2.3+spec-1.1.0",
  "zeroize",
 ]
 
