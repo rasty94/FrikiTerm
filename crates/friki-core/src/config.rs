@@ -288,7 +288,7 @@ pub struct AppConfig {
     pub prefix: KeyChord,
     /// Acción → tecla tras el prefijo. Acciones: `quit`, `help`, `new-tab`, `close-pane`,
     /// `next-tab`, `prev-tab`, `split-horizontal`, `split-vertical`, `focus-next`,
-    /// `focus-prev`, `scroll-up`, `scroll-down`, `search`, `copy-mode`, `sessions`, `rename-tab`, `zmodem-send`, `run-script`.
+    /// `focus-prev`, `scroll-up`, `scroll-down`, `search`, `copy-mode`, `sessions`, `rename-tab`, `zmodem-send`, `kermit-send`, `kermit-recv`, `run-script`.
     pub bindings: std::collections::BTreeMap<String, KeyChord>,
     /// Perfil de los destinos ad hoc (`user@host`), que no tienen fichero de sesión.
     pub default_terminal: TerminalProfile,
@@ -317,6 +317,8 @@ impl Default for AppConfig {
                 b("sessions", "s"),
                 b("rename-tab", ","),
                 b("zmodem-send", "z"),
+                b("kermit-send", "y"),
+                b("kermit-recv", "shift+y"),
                 b("run-script", "r"),
             ]
             .into_iter()

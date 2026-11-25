@@ -26,13 +26,15 @@ pub enum Action {
     Search,
     CopyMode,
     ZmodemSend,
+    KermitSend,
+    KermitRecv,
     RunScript,
     Help,
     Quit,
 }
 
 /// (nombre en `AppConfig.bindings`, acción, descripción para la ayuda).
-const ACTIONS: [(&str, Action, &str); 18] = [
+const ACTIONS: [(&str, Action, &str); 20] = [
     ("new-tab", Action::NewTab, "pestaña nueva"),
     ("close-pane", Action::ClosePane, "cerrar el panel"),
     ("next-tab", Action::NextTab, "pestaña siguiente"),
@@ -59,6 +61,16 @@ const ACTIONS: [(&str, Action, &str); 18] = [
         "zmodem-send",
         Action::ZmodemSend,
         "enviar ficheros (Zmodem)",
+    ),
+    (
+        "kermit-send",
+        Action::KermitSend,
+        "enviar ficheros (Kermit)",
+    ),
+    (
+        "kermit-recv",
+        Action::KermitRecv,
+        "recibir ficheros (Kermit)",
     ),
     (
         "run-script",

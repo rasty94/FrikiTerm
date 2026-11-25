@@ -381,3 +381,323 @@ fn sanitize_hostile_names() {
     assert_eq!(sanitize_name("a\u{202E}txt.exe".as_bytes()), "atxt.exe");
     assert_eq!(sanitize_name(b"console"), "console");
 }
+
+// ---- Kermit ----
+
+use crate::kermit::{self, Cfg};
+
+fn kcfg() -> Cfg {
+    Cfg {
+        timeout: Duration::from_millis(300),
+        retries: 20,
+        ..Cfg::default()
+    }
+}
+
+/// Datos con binario, controles, prefijos del protocolo y rachas largas.
+fn kdata() -> Vec<u8> {
+    let mut v = pattern(5000, 3);
+    v.extend(vec![0u8; 500]);
+    v.extend(vec![b'#'; 200]);
+    v.extend(vec![b'~'; 50]);
+    v.extend(vec![0xffu8; 300]);
+    v.extend(vec![b'&'; 60]);
+    v.extend(b"\r\n\x01\x03\x7f\x80\x81");
+    v.extend(pattern(3000, 4));
+    v
+}
+
+async fn ktransfer(cs: Cfg, cr: Cfg, flip: Option<usize>) {
+    let (src, dst) = (tmpdir("ksrc"), tmpdir("kdst"));
+    let data = kdata();
+    let p = src.join("f.bin");
+    std::fs::write(&p, &data).unwrap();
+    let empty = src.join("empty");
+    std::fs::write(&empty, b"").unwrap();
+    let (mut a, mut b) = duplex(1 << 16);
+    if let Some(at) = flip {
+        let (a2, ra) = duplex(1 << 16);
+        let (b2, rb) = duplex(1 << 16);
+        relay(ra, rb, at);
+        a = a2;
+        b = b2;
+    }
+    let files = [p, empty];
+    let (mut p1, mut p2) = (|_: Progress| {}, |_: Progress| {});
+    let (s, r) = tokio::join!(
+        kermit::send(&mut a, &files, &mut p1, cs),
+        kermit::receive(&mut b, &dst, &mut p2, u64::MAX, cr)
+    );
+    s.unwrap();
+    let (got, _) = r.unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(std::fs::read(&got[0]).unwrap(), data);
+    assert!(std::fs::read(&got[1]).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn kermit_loopback_default_and_variants() {
+    let d = kcfg();
+    ktransfer(d, d, None).await;
+    // bloque tipo 1, sin repeticiones, 8.º bit con prefijo `&`
+    let basic = Cfg {
+        chk3: false,
+        rept: false,
+        qbin: b'&',
+        ..d
+    };
+    ktransfer(basic, basic, None).await;
+    // la propuesta de un lado basta si el otro acepta (`Y`)
+    let q = Cfg { qbin: b'&', ..d };
+    ktransfer(q, d, None).await;
+    ktransfer(d, q, None).await;
+    ktransfer(q, Cfg { qbin: b'N', ..d }, None).await;
+    // un lado sin CRC ni repeticiones obliga al otro a bajar a tipo 1
+    ktransfer(d, basic, None).await;
+}
+
+#[tokio::test]
+async fn kermit_corruption_is_retried() {
+    for at in [3, 40, 100, 700, 2500] {
+        ktransfer(kcfg(), kcfg(), Some(at)).await;
+    }
+}
+
+#[tokio::test]
+async fn kermit_big_file_with_default_cfg() {
+    transfer(
+        FileProtocol::Kermit,
+        &[("a", 0), ("b", 1), ("c", 300_000)],
+        None,
+    )
+    .await;
+}
+
+fn kpkt(seq: u8, typ: u8, data: &[u8]) -> Vec<u8> {
+    kermit::test_packet(seq, typ, data)
+}
+
+#[tokio::test]
+async fn kermit_error_and_ctrl_c_abort() {
+    let dst = tmpdir("kabort");
+    for bytes in [kpkt(0, b'E', b"disco lleno"), vec![3, 3, 3]] {
+        let (mut a, mut b) = duplex(4096);
+        a.write_all(&bytes).await.unwrap();
+        let mut p = |_: Progress| {};
+        let e = kermit::receive(&mut b, &dst, &mut p, u64::MAX, kcfg())
+            .await
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionAborted);
+    }
+    // E del receptor hacia el emisor
+    let f = dst.join("x");
+    std::fs::write(&f, b"x").unwrap();
+    let (mut a, mut b) = duplex(4096);
+    a.write_all(&kpkt(0, b'E', b"no")).await.unwrap();
+    let mut p = |_: Progress| {};
+    let e = kermit::send(&mut b, &[f], &mut p, kcfg())
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::ConnectionAborted);
+}
+
+#[tokio::test]
+async fn kermit_silent_peer_times_out() {
+    let (_a, mut b) = duplex(4096);
+    let cfg = Cfg {
+        timeout: Duration::from_millis(20),
+        retries: 2,
+        ..Cfg::default()
+    };
+    let mut p = |_: Progress| {};
+    let e = kermit::receive(&mut b, &tmpdir("ksil"), &mut p, 1, cfg)
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+}
+
+#[tokio::test]
+async fn kermit_hostile_names_and_limits() {
+    let dst = tmpdir("khost");
+    let (mut a, mut b) = duplex(1 << 16);
+    let mut p = |_: Progress| {};
+    let task = tokio::spawn(async move {
+        // emisor manual con bloque tipo 1 y sin compresión
+        let s = [
+            b' ' + 80,
+            b' ' + 5,
+            b' ',
+            0x40,
+            b' ' + 13,
+            b'#',
+            b'N',
+            b'1',
+            b' ',
+        ];
+        let script: Vec<(u8, u8, Vec<u8>)> = vec![
+            (0, b'S', s.to_vec()),
+            (1, b'F', b"../../etc/pass#@wd".to_vec()),
+            (2, b'D', b"12345678901".to_vec()),
+            (3, b'Z', vec![]),
+            (4, b'B', vec![]),
+        ];
+        for (seq, t, d) in script {
+            a.write_all(&kpkt(seq, t, &d)).await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = tokio::time::timeout(Duration::from_millis(500), a.read(&mut buf)).await;
+        }
+    });
+    let (got, _) = kermit::receive(&mut b, &dst, &mut p, u64::MAX, kcfg())
+        .await
+        .unwrap();
+    task.await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].parent().unwrap(), dst);
+    assert!(!got[0].file_name().unwrap().to_string_lossy().contains(".."));
+    // tope total de bytes: se corta y no queda parcial
+    let src = tmpdir("klim");
+    let f = src.join("big");
+    std::fs::write(&f, vec![7u8; 1000]).unwrap();
+    let dst2 = tmpdir("klim-dst");
+    let fl = [f];
+    let (mut a, mut b) = duplex(1 << 16);
+    let (mut p1, mut p2) = (|_: Progress| {}, |_: Progress| {});
+    let (_, r) = tokio::join!(
+        kermit::send(&mut a, &fl, &mut p1, kcfg()),
+        kermit::receive(&mut b, &dst2, &mut p2, 100, kcfg())
+    );
+    assert_eq!(r.unwrap_err().kind(), io::ErrorKind::QuotaExceeded);
+    assert_eq!(std::fs::read_dir(&dst2).unwrap().count(), 0);
+}
+
+/// El lector y el decodificador no entran en pánico con basura arbitraria.
+#[tokio::test]
+async fn kermit_garbage_never_panics() {
+    let mut x = 0x1234_5678u32;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x
+    };
+    let dst = tmpdir("kgarb");
+    for i in 0..300 {
+        let n = (rnd() % 400) as usize;
+        let bytes: Vec<u8> = (0..n)
+            .map(|_| match rnd() % 8 {
+                0 => 1,
+                1 => b'S',
+                _ => (rnd() >> 8) as u8,
+            })
+            .collect();
+        kermit::test_decode(&bytes, i);
+        let (mut a, mut b) = duplex(4096);
+        a.write_all(&bytes).await.unwrap();
+        drop(a);
+        let mut p = |_: Progress| {};
+        let _ = kermit::receive(&mut b, &dst, &mut p, 1 << 20, kcfg()).await;
+    }
+}
+
+/// Proceso C-Kermit con su E/S puenteada a un duplex. C-Kermit abre `/dev/tty` siempre y
+/// sin terminal de control sale con «/dev/tty is not a terminal device», de ahí el pty.
+struct Kid {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+impl Drop for Kid {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+fn spawn_kermit(args: &[&str], dir: &Path) -> (Kid, DuplexStream) {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    let mut cmd = CommandBuilder::new("kermit");
+    cmd.args(["-Y", "-i"]);
+    cmd.args(args);
+    cmd.cwd(dir);
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    drop(pair.slave);
+    let mut rd = pair.master.try_clone_reader().unwrap();
+    let mut wr = pair.master.take_writer().unwrap();
+    let (ours, theirs) = duplex(1 << 16);
+    let (mut tr, mut tw) = tokio::io::split(theirs);
+    // el pty es bloqueante: se lee/escribe en hilos y se pasa por canales
+    let (up_tx, mut up_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let (down_tx, down_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = std::io::Read::read(&mut rd, &mut buf) {
+            if n == 0 || up_tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(c) = up_rx.recv().await {
+            if tw.write_all(&c).await.is_err() {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = tr.read(&mut buf).await {
+            if down_tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut down_rx = down_rx;
+    tokio::task::spawn_blocking(move || {
+        while let Some(c) = down_rx.blocking_recv() {
+            if std::io::Write::write_all(&mut wr, &c).is_err() {
+                break;
+            }
+        }
+    });
+    (
+        Kid {
+            child,
+            _master: pair.master,
+        },
+        ours,
+    )
+}
+
+/// Interoperabilidad con C-Kermit: `FRIKI_KERMIT_INTEROP=1 cargo test -- --ignored kermit`.
+#[tokio::test]
+#[ignore = "requiere c-kermit instalado"]
+async fn kermit_interop_ckermit() {
+    if std::env::var_os("FRIKI_KERMIT_INTEROP").is_none() {
+        return;
+    }
+    let (src, dst) = (tmpdir("kisrc"), tmpdir("kidst"));
+    let data = kdata();
+    let f = src.join("i.bin");
+    std::fs::write(&f, &data).unwrap();
+    let mut p = |_: Progress| {};
+    // nosotros enviamos, C-Kermit recibe. Su `zchko` falla con un fichero nuevo («Write
+    // access denied», ENOENT en open), así que se crea antes y `-w` lo sobrescribe.
+    std::fs::write(dst.join("i.bin"), b"").unwrap();
+    let (_c, mut io) = spawn_kermit(&["-r", "-w"], &dst);
+    send(
+        &mut io,
+        FileProtocol::Kermit,
+        std::slice::from_ref(&f),
+        &mut p,
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(dst.join("i.bin")).unwrap(), data);
+    // C-Kermit envía, nosotros recibimos
+    let dst2 = tmpdir("kidst2");
+    let (_c, mut io) = spawn_kermit(&["-s", f.to_str().unwrap()], &src);
+    let r = receive_ex(&mut io, FileProtocol::Kermit, &dst2, &mut p, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&r.files[0]).unwrap(), data);
+}

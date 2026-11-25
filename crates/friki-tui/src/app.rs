@@ -301,6 +301,10 @@ enum Then {
     ZmodemRecv,
     /// Rutas locales (separadas por `;`) a enviar por Zmodem.
     ZmodemSend,
+    /// Recepción Kermit iniciada por el usuario (Kermit no tiene señal de arranque).
+    KermitRecv,
+    /// Rutas locales (separadas por `;`) a enviar por Kermit.
+    KermitSend,
     /// Script a ejecutar (nombre dentro del directorio de scripts o ruta).
     Script,
 }
@@ -320,11 +324,13 @@ impl Modal {
     }
 }
 
-/// Transferencia Zmodem en curso: el flujo del panel se desvía a `tx`.
+/// Transferencia en curso (Zmodem o Kermit): el flujo del panel se desvía a `tx`.
 struct Xfer {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     task: JoinHandle<()>,
     receiving: bool,
+    /// Nombre del protocolo para los avisos.
+    name: &'static str,
     progress: Option<Progress>,
     /// Directorio de descargas (para avisar del fichero parcial al cancelar).
     dir: PathBuf,
@@ -340,11 +346,12 @@ impl Xfer {
         let tail = " (Esc cancela)";
         let text = match &self.progress {
             Some(p) => format!(
-                "Zmodem {what} {} {}{tail}",
+                "{} {what} {} {}{tail}",
+                self.name,
                 clean(&p.file),
                 bar(p.done, p.total, 20)
             ),
-            None => format!("Zmodem {what}...{tail}"),
+            None => format!("{} {what}...{tail}", self.name),
         };
         text.chars().take(usize::from(width)).collect()
     }
@@ -914,7 +921,7 @@ impl<'a> App<'a> {
                             then: Then::ZmodemRecv,
                         },
                         ZmodemStart::RemoteReceives => Modal {
-                            dialog: send_dialog("El remoto espera ficheros (rz).")
+                            dialog: send_dialog("Zmodem", "El remoto espera ficheros (rz).")
                                 .locked_for(DIALOG_LOCK),
                             then: Then::ZmodemSend,
                         },
@@ -1229,10 +1236,28 @@ impl<'a> App<'a> {
             Action::Search | Action::CopyMode => self.enter_mode(a),
             Action::ZmodemSend => self.open_modal(|_| {
                 (
-                    send_dialog("Ejecute antes `rz` en el remoto."),
+                    send_dialog("Zmodem", "Ejecute antes `rz` en el remoto."),
                     Then::ZmodemSend,
                 )
             }),
+            Action::KermitSend => self.open_modal(|_| {
+                (
+                    send_dialog("Kermit", "Ejecute antes `kermit -r` en el remoto."),
+                    Then::KermitSend,
+                )
+            }),
+            Action::KermitRecv => {
+                let dir = clean(&self.paths.downloads_dir.display().to_string());
+                self.open_modal(|_| {
+                    (
+                        Dialog::confirm_yes(
+                            "Kermit",
+                            &format!("Recibir ficheros por Kermit en {dir}? (ejecute `kermit -s`)"),
+                        ),
+                        Then::KermitRecv,
+                    )
+                });
+            }
             Action::RunScript => {
                 let dir = self.paths.scripts_dir.clone();
                 self.open_modal(|_| (script_dialog(&dir), Then::Script));
@@ -1259,19 +1284,24 @@ impl<'a> App<'a> {
             (Then::Paste(t), Answer::Confirm(true)) => self.paste_to(id, &t).await,
             (Then::ZmodemRecv, Answer::Confirm(true)) => {
                 let dir = self.paths.downloads_dir.clone();
-                self.start_zmodem(id, ZKind::Recv(dir));
+                self.start_xfer(id, FileProtocol::Zmodem, ZKind::Recv(dir));
+            }
+            (Then::KermitRecv, Answer::Confirm(true)) => {
+                let dir = self.paths.downloads_dir.clone();
+                self.start_xfer(id, FileProtocol::Kermit, ZKind::Recv(dir));
             }
             (Then::ZmodemSend, Answer::Secret(Some(v))) => {
-                let files: Vec<PathBuf> = v
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|x| !x.is_empty())
-                    .map(PathBuf::from)
-                    .collect();
+                let files = split_paths(&v);
                 if files.is_empty() {
                     self.zmodem_decline(id).await;
                 } else {
-                    self.start_zmodem(id, ZKind::Send(files));
+                    self.start_xfer(id, FileProtocol::Zmodem, ZKind::Send(files));
+                }
+            }
+            (Then::KermitSend, Answer::Secret(Some(v))) => {
+                let files = split_paths(&v);
+                if !files.is_empty() {
+                    self.start_xfer(id, FileProtocol::Kermit, ZKind::Send(files));
                 }
             }
             (Then::ZmodemRecv | Then::ZmodemSend, _) => self.zmodem_decline(id).await,
@@ -1294,7 +1324,7 @@ impl<'a> App<'a> {
         self.send(id, &CANCEL).await;
     }
 
-    fn start_zmodem(&mut self, id: PaneId, kind: ZKind) {
+    fn start_xfer(&mut self, id: PaneId, proto: FileProtocol, kind: ZKind) {
         let ui = self.tx.clone();
         let Some(p) = self.panes.get_mut(&id).filter(|p| p.xfer.is_none()) else {
             return;
@@ -1314,20 +1344,14 @@ impl<'a> App<'a> {
                 let _ = ui.send(Msg::Xfer(id, XferMsg::Progress(x)));
             };
             let r = match kind {
-                ZKind::Recv(dir) => friki_zmodem::receive_ex(
-                    &mut io,
-                    FileProtocol::Zmodem,
-                    &dir,
-                    &mut prog,
-                    ZMODEM_MAX_BYTES,
-                )
-                .await
-                .map(|r| (r.files, r.leftover)),
-                ZKind::Send(files) => {
-                    friki_zmodem::send(&mut io, FileProtocol::Zmodem, &files, &mut prog)
+                ZKind::Recv(dir) => {
+                    friki_zmodem::receive_ex(&mut io, proto, &dir, &mut prog, ZMODEM_MAX_BYTES)
                         .await
-                        .map(|()| (files, Vec::new()))
+                        .map(|r| (r.files, r.leftover))
                 }
+                ZKind::Send(files) => friki_zmodem::send(&mut io, proto, &files, &mut prog)
+                    .await
+                    .map(|()| (files, Vec::new())),
             };
             let _ = ui.send(Msg::Xfer(id, XferMsg::Done(r, Box::new(io))));
         });
@@ -1335,6 +1359,7 @@ impl<'a> App<'a> {
             tx,
             task,
             receiving,
+            name: proto_name(proto),
             progress: None,
             dir,
         });
@@ -1358,10 +1383,11 @@ impl<'a> App<'a> {
             .and_then(|pr| Path::new(&pr.file).file_name().map(|n| x.dir.join(n)));
         self.notice = Some(match partial {
             Some(f) => format!(
-                "transferencia Zmodem cancelada; fichero parcial: {}",
+                "transferencia {} cancelada; fichero parcial: {}",
+                x.name,
                 clean(&f.display().to_string())
             ),
-            None => "transferencia Zmodem cancelada".into(),
+            None => format!("transferencia {} cancelada", x.name),
         });
     }
 
@@ -1397,11 +1423,13 @@ impl<'a> App<'a> {
                             files.len()
                         )];
                         l.extend(files.iter().map(|f| f.display().to_string()));
-                        Modal::notice("Zmodem", &l, false)
+                        Modal::notice(x.name, &l, false)
                     }
-                    Err(e) => {
-                        Modal::notice("Zmodem: transferencia fallida", &[e.to_string()], true)
-                    }
+                    Err(e) => Modal::notice(
+                        &format!("{}: transferencia fallida", x.name),
+                        &[e.to_string()],
+                        true,
+                    ),
                 });
             }
         }
@@ -1912,10 +1940,32 @@ fn loose_mode(p: &Path) -> bool {
     }
 }
 
-fn send_dialog(first_line: &str) -> Dialog {
-    let mut d = Dialog::text("Zmodem: enviar ficheros", "Rutas (separadas por ;): ", "");
+fn send_dialog(name: &str, first_line: &str) -> Dialog {
+    let mut d = Dialog::text(
+        &format!("{name}: enviar ficheros"),
+        "Rutas (separadas por ;): ",
+        "",
+    );
     d.body = vec![first_line.into()];
     d
+}
+
+fn proto_name(p: FileProtocol) -> &'static str {
+    match p {
+        FileProtocol::Xmodem => "Xmodem",
+        FileProtocol::Ymodem => "Ymodem",
+        FileProtocol::Zmodem => "Zmodem",
+        FileProtocol::Kermit => "Kermit",
+    }
+}
+
+/// Rutas separadas por `;` tal como las escribe el usuario.
+fn split_paths(v: &str) -> Vec<PathBuf> {
+    v.split(';')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Selector de script: lista los `.rhai` de `dir` y pide un nombre o una ruta.
@@ -2523,6 +2573,7 @@ mod tests {
             tx,
             task: tokio::spawn(async {}),
             receiving: true,
+            name: "Zmodem",
             progress: None,
             dir: PathBuf::new(),
         });
@@ -2542,6 +2593,7 @@ mod tests {
             tx,
             task: tokio::spawn(async {}),
             receiving: true,
+            name: "Zmodem",
             progress: Some(Progress {
                 file: "../a.bin".into(),
                 done: 3,
