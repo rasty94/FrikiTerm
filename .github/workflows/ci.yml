@@ -91,6 +91,47 @@ jobs:
       - name: Tests (legacy)
         run: cargo test -p friki-ssh --features legacy
 
+  fuzz:
+    name: fuzzing (30 s por objetivo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependencias de sistema (keyring/dbus)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - name: Instalar nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Instalar cargo-fuzz
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-fuzz
+
+      - name: Compilar objetivos
+        working-directory: fuzz
+        run: cargo +nightly fuzz build
+
+      - name: Ejecutar objetivos
+        working-directory: fuzz
+        run: |
+          for t in $(cargo +nightly fuzz list); do
+            cargo +nightly fuzz run "$t" -- -max_total_time=30 -timeout=10
+          done
+
+      - name: Subir artefactos de fallos
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
   msrv:
     name: MSRV (1.89.0)
     runs-on: ubuntu-latest

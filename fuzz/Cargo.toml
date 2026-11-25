@@ -1,0 +1,54 @@
+[package]
+name = "friki-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Fuera del workspace principal: necesita nightly y no debe afectar a stable/MSRV.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "io-util", "time"] }
+friki-core = { path = "../crates/friki-core" }
+friki-term = { path = "../crates/friki-term" }
+friki-telnet = { path = "../crates/friki-telnet" }
+friki-xfer = { path = "../crates/friki-xfer" }
+friki-zmodem = { path = "../crates/friki-zmodem" }
+
+[[bin]]
+name = "term_process"
+path = "fuzz_targets/term_process.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "zmodem"
+path = "fuzz_targets/zmodem.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "telnet"
+path = "fuzz_targets/telnet.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "core_files"
+path = "fuzz_targets/core_files.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "xfer"
+path = "fuzz_targets/xfer.rs"
+test = false
+doc = false
