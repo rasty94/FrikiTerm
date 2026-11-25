@@ -91,6 +91,13 @@
 
     let id: TermId | null = null;
     let closed = false;
+    // Sesión terminada: se deja de enviar y la pestaña sale de sessions (SnippetRunner, etc.).
+    let dead = false;
+    const endSession = () => {
+      dead = true;
+      if (id !== null) removeTerm(id);
+      id = null;
+    };
     const sub = t.onData((d) => {
       if (id !== null) termWrite(id, new TextEncoder().encode(d)).catch((e) => toast(errMsg(e)));
     });
@@ -108,10 +115,13 @@
       t.cols,
       t.rows,
       (buf) => t.write(new Uint8Array(buf)),
-      onEvent,
+      (ev) => {
+        if (ev.type === "exit" || ev.type === "closed" || ev.type === "lost" || ev.type === "failed") endSession();
+        onEvent(ev);
+      },
     )
       .then((tid) => {
-        if (closed) return void termClose(tid).catch(() => {});
+        if (closed || dead) return void termClose(tid).catch(() => {});
         id = tid;
         addTerm({ id: tid, label: leaf.title });
         // Por si el panel cambió de tamaño mientras conectaba.
@@ -124,6 +134,7 @@
 
     return () => {
       closed = true;
+      endSession();
       ro.disconnect();
       sub.dispose();
       rs.dispose();

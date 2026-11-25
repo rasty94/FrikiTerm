@@ -51,6 +51,31 @@ export function breadcrumb(path: string): Crumb[] {
   return crumbs;
 }
 
+/**
+ * Rutas locales: relativas a la raíz del panel, donde "" es la propia raíz.
+ * El backend (LocalFs) sólo acepta rutas relativas; la raíz absoluta vive en `FsRef.root`.
+ */
+export function relParent(rel: string): string {
+  const idx = rel.lastIndexOf("/");
+  return idx < 0 ? "" : rel.slice(0, idx);
+}
+
+/** Nombre visible de una raíz absoluta ("/Users/x" -> "x", "/" -> "/"). */
+export function rootLabel(root: string): string {
+  return root.split(/[\\/]/).filter((s) => s !== "").pop() ?? "/";
+}
+
+/** Migas de una ruta local relativa: la primera es la raíz, etiquetada con `rootName`. */
+export function relBreadcrumb(rootName: string, rel: string): Crumb[] {
+  const crumbs: Crumb[] = [{ label: rootName, path: "" }];
+  let acc = "";
+  for (const seg of rel.split("/").filter((s) => s !== "")) {
+    acc = joinPath(acc, seg);
+    crumbs.push({ label: seg, path: acc });
+  }
+  return crumbs;
+}
+
 const UNITS = ["B", "KB", "MB", "GB", "TB"];
 
 /** 1536 -> "1.5 KB". Base 1024. */

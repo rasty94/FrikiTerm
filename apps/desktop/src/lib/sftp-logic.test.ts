@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { EntryDto } from "./types";
-import { breadcrumb, formatSize, joinPath, parentPath, sortEntries } from "./sftp-logic";
+import { breadcrumb, formatSize, joinPath, parentPath, relBreadcrumb, relParent, rootLabel, sortEntries } from "./sftp-logic";
 
 const e = (name: string, kind: EntryDto["kind"], size = 0, mtime: number | null = null): EntryDto => ({
   name,
@@ -51,6 +51,34 @@ describe("rutas", () => {
       { label: "u", path: "/home/u" },
     ]);
     expect(breadcrumb("/")).toEqual([{ label: "/", path: "/" }]);
+  });
+});
+
+describe("rutas locales relativas a la raíz", () => {
+  test("joinPath desde la raíz relativa (\"\") no añade barra inicial", () => {
+    expect(joinPath("", "docs")).toBe("docs");
+    expect(joinPath("docs", "a.txt")).toBe("docs/a.txt");
+  });
+
+  test("relParent: la raíz es su propio padre; sube un nivel en anidadas", () => {
+    expect(relParent("")).toBe("");
+    expect(relParent("docs")).toBe("");
+    expect(relParent("docs/2024/x")).toBe("docs/2024");
+  });
+
+  test("rootLabel toma el último segmento de la raíz absoluta", () => {
+    expect(rootLabel("/Users/x")).toBe("x");
+    expect(rootLabel("/Users/x/")).toBe("x");
+    expect(rootLabel("/")).toBe("/");
+  });
+
+  test("relBreadcrumb: raíz con su nombre, luego segmentos relativos", () => {
+    expect(relBreadcrumb("x", "")).toEqual([{ label: "x", path: "" }]);
+    expect(relBreadcrumb("x", "docs/2024")).toEqual([
+      { label: "x", path: "" },
+      { label: "docs", path: "docs" },
+      { label: "2024", path: "docs/2024" },
+    ]);
   });
 });
 

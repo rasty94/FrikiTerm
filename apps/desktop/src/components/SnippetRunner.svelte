@@ -11,6 +11,8 @@
   let { command }: Props = $props();
 
   let picked = $state<TermId[]>([]);
+  // Sólo sesiones vivas: una pestaña cerrada deja de figurar aunque estuviera marcada.
+  const targets = $derived(picked.filter((id) => sessions.terms.some((t) => t.id === id)));
   let newline = $state(true);
   let status = $state<string | null>(null);
   let sending = $state(false);
@@ -20,15 +22,15 @@
   }
 
   async function send() {
-    if (picked.length === 0 || command.trim() === "") return;
+    if (targets.length === 0 || command.trim() === "") return;
     sending = true;
     status = null;
     const bytes = snippetBytes(command, newline);
-    const results = await Promise.allSettled(picked.map((id) => termWrite(id, bytes)));
+    const results = await Promise.allSettled(targets.map((id) => termWrite(id, bytes)));
     const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
     status = failed.length === 0
-      ? `Enviado a ${picked.length} sesión(es)`
-      : `Fallos: ${failed.length} de ${picked.length} (${errorMessage(failed[0].reason)})`;
+      ? `Enviado a ${targets.length} sesión(es)`
+      : `Fallos: ${failed.length} de ${targets.length} (${errorMessage(failed[0].reason)})`;
     sending = false;
   }
 </script>
@@ -48,7 +50,7 @@
   {/if}
   <label class="nl"><input type="checkbox" bind:checked={newline} /> Añadir salto de línea (Enter)</label>
   <pre class="preview">{command || " "}</pre>
-  <button onclick={send} disabled={picked.length === 0 || command.trim() === "" || sending}>
+  <button onclick={send} disabled={targets.length === 0 || command.trim() === "" || sending}>
     {sending ? "Enviando…" : "Enviar"}
   </button>
   {#if status}<p class="dim">{status}</p>{/if}
