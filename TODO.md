@@ -11,18 +11,17 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - **Fase 3**: SFTP, SCP (nombre esperado validado), FTP/FTPS; cola con paralelismo, reintentos, reconexión, reanudación sobre `.friki-part` y límite de ancho de banda; sincronización con filtros, conflictos y tope de borrados; CLI `ls/get/put/cp/sync/ftp`.
 - **Fase 4**: ProxyJump, `-L/-R/-D`, reenvío de agente (solo en shell interactivo), exigir strict KEX, Telnet/TLS, RAW, serie, shell local, X/Y/Zmodem en paneles, scripting Rhai cancelable con sandbox, `pubkey-install` atómico.
 - **Fase 5**: release firmada (cosign, atestación) tras tests/deny/audit, `.deb`, SHA256SUMS, man y completions, `docs/INSTALL.md`, licencias MIT/Apache-2.0.
+- **Fase 6**: respuestas a consultas de la terminal (DSR/CPR/DA) y reenvío del ratón; agente SSH en Windows (pipes de OpenSSH y Pageant); PKCS#11 y GSSAPI (features opcionales); `sync --both` con caché (aborta si una raíz falta o queda vacía) y `cp` con varios orígenes; fecha local en el log; HTTP/S (solo lectura) y S3; servidor TFTP (`friki tftp-server`); Kermit; Wyse 50/60 y TVI 910/925; TN3270 (feature `tn3270`); fuzzing con `cargo-fuzz` de todos los parsers propios (job en CI); prueba negativa de strict KEX contra OpenSSH 9.5. 485 pruebas; revisión con Opus y hallazgos corregidos.
 
 **Pendiente:**
 - [ ] Probar a mano la TUI en una terminal real en las tres plataformas (las pruebas usan un backend simulado).
-- [ ] Sin probar en real: puerto serie con hardware (la prueba con par PTY corre en el CI de Linux), FTP contra un servidor real, el caso negativo de strict KEX, interoperabilidad Zmodem con `rz/sz` fuera del contenedor. (ConPTY sí se prueba en el CI de Windows.)
-- [ ] El emulador no responde a consultas de la terminal (DSR, DA). En Windows, `friki-pty` responde a la de ConPTY al arrancar con una posición fija `1;1`.
-- [ ] Agente SSH en Windows (Pageant / named pipe).
+- [ ] Sin probar en real: puerto serie con hardware (la prueba con par PTY corre en el CI de Linux), FTP contra un servidor real, interoperabilidad Zmodem con `rz/sz` fuera del contenedor. (ConPTY sí se prueba en el CI de Windows.)
 - [ ] Mantenedor del `.deb`: hoy `FrikiTerm <noreply@invalid>`.
 - [ ] Crear el entorno `release` con revisores y proteger los tags `v*` en GitHub (`docs/INSTALL.md` §5).
+- [ ] Sin probar en real (fase 6): agente de Windows y reenvío (solo compila en el CI de Windows), PKCS#11 con un token y login SSH real, GSSAPI contra un KDC, TN3270 contra un host, S3 en la CI (MinIO solo en local), Kermit con C-Kermit solo en local.
+- [ ] Decidir si `http` y `s3` siguen activadas por defecto en `friki-cli` (añaden ~75 crates).
+- [ ] Los scripts Rhai no contestan a consultas DSR/DA del remoto (las respuestas se descartan, acotadas a 4 KiB).
 - [ ] Revisar las excepciones de `deny.toml` / `.cargo/audit.toml` antes del 2027-05-25.
-- [ ] Fecha del nombre del log en UTC (`time` no da el desfase local con varios hilos).
-- [ ] Reenvío del ratón al remoto; Kermit; TN3270, Wyse y TVI (fuera del alcance actual).
-- [ ] `sync --both` sin caché en la CLI; `cp` descarga un solo origen remoto.
 
 ## 0. Reglas del proyecto
 
