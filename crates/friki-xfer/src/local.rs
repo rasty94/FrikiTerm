@@ -175,18 +175,44 @@ impl RemoteFs for LocalFs {
 
     async fn open_write(&self, path: &str, offset: u64) -> Result<Writer> {
         let p = self.resolve(path, true)?;
+        // Nunca se escribe a través de un enlace (ni colgante, que `resolve` no detecta).
+        if let Ok(md) = tokio::fs::symlink_metadata(&p).await
+            && md.file_type().is_symlink()
+        {
+            return Err(Error::PermissionDenied(format!(
+                "el destino es un enlace simbólico: {path}"
+            )));
+        }
         let mut o = tokio::fs::OpenOptions::new();
         o.write(true).create(true);
         if offset == 0 {
             o.truncate(true);
         }
+        // 0600 al crear; el modo remoto (acotado) se aplica después con `set_mode`.
         #[cfg(unix)]
-        o.mode(0o644);
+        {
+            o.mode(0o600);
+            o.custom_flags(libc::O_NOFOLLOW);
+        }
         let mut f = o.open(&p).await.map_err(|e| map_err(e, path))?;
         if offset > 0 {
             f.seek(SeekFrom::Start(offset)).await?;
         }
         Ok(Box::new(f))
+    }
+
+    async fn set_mode(&self, path: &str, mode: u32) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = self.resolve(path, true)?;
+            tokio::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o7777))
+                .await
+                .map_err(|e| map_err(e, path))?;
+        }
+        #[cfg(not(unix))]
+        let _ = (path, mode);
+        Ok(())
     }
 
     async fn set_mtime(&self, path: &str, mtime: i64) -> Result<()> {

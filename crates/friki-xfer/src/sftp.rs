@@ -38,13 +38,20 @@ struct Sftp {
     label: String,
 }
 
-fn map_err(e: SftpError) -> Error {
+pub(crate) fn map_err(e: SftpError) -> Error {
+    use std::io::{Error as IoError, ErrorKind as K};
     match e {
         SftpError::Status(s) => match s.status_code {
             StatusCode::NoSuchFile => Error::NotFound(s.error_message),
             StatusCode::PermissionDenied => Error::PermissionDenied(s.error_message),
+            StatusCode::NoConnection | StatusCode::ConnectionLost => Error::Io(IoError::new(
+                K::ConnectionAborted,
+                s.status_code.to_string(),
+            )),
             _ => Error::Protocol(format!("{}: {}", s.status_code, s.error_message)),
         },
+        SftpError::IO(m) => Error::Io(IoError::new(K::BrokenPipe, m)),
+        SftpError::Timeout => Error::Io(K::TimedOut.into()),
         e => Error::Protocol(e.to_string()),
     }
 }
@@ -142,7 +149,33 @@ impl RemoteFs for Sftp {
             .map_err(map_err)
     }
 
+    async fn set_mode(&self, path: &str, mode: u32) -> Result<()> {
+        let attrs = FileAttributes {
+            permissions: Some(mode),
+            ..FileAttributes::empty()
+        };
+        self.session
+            .set_metadata(path, attrs)
+            .await
+            .map_err(map_err)
+    }
+
     fn label(&self) -> String {
         self.label.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_errors_are_io() {
+        assert!(matches!(map_err(SftpError::Timeout), Error::Io(_)));
+        assert!(matches!(map_err(SftpError::IO("x".into())), Error::Io(_)));
+        assert!(matches!(
+            map_err(SftpError::UnexpectedPacket),
+            Error::Protocol(_)
+        ));
     }
 }

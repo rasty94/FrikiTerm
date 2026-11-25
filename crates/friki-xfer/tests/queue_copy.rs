@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use friki_xfer::local::LocalFs;
 use friki_xfer::queue::{Direction, Job, Queue, QueueEvent, QueueOptions, Resume};
-use friki_xfer::{Entry, Error, Reader, RemoteFs, Result, Writer};
+use friki_xfer::{Entry, Error, ErrorKind, Reader, RemoteFs, Result, Writer};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 /// Envoltorio que falla las `fails` primeras llamadas a `open_write`.
@@ -116,7 +116,7 @@ async fn reanuda_fichero_a_medias_y_da_por_hecho_el_completo() {
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let all = data(200_000);
     std::fs::write(a.path().join("f"), &all).unwrap();
-    std::fs::write(b.path().join("f"), &all[..50_000]).unwrap();
+    std::fs::write(b.path().join("f.friki-part"), &all[..50_000]).unwrap();
     let (l, r) = (fs(a.path()), fs(b.path()));
     l.set_mtime("f", 1_000_000_000).await.unwrap();
     let (q, mut rx) = queue(l, r, QueueOptions::default());
@@ -187,7 +187,8 @@ async fn cancelar_detiene_el_trabajo() {
     assert_eq!(q.wait().await, (0, 0));
     assert!(t.elapsed() < Duration::from_secs(3));
     assert!(drain(&mut rx).contains(&QueueEvent::Cancelled { id }));
-    assert!(std::fs::metadata(b.path().join("f")).unwrap().len() < 1 << 20);
+    assert!(!b.path().join("f").exists());
+    assert!(!b.path().join("f.friki-part").exists());
 }
 
 #[tokio::test]
@@ -222,4 +223,79 @@ async fn limite_de_ancho_de_banda() {
         "{:?}",
         t.elapsed()
     );
+}
+
+#[tokio::test]
+async fn fallo_no_destruye_el_destino_anterior() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("f"), data(1 << 20)).unwrap();
+    std::fs::write(b.path().join("f"), b"anterior").unwrap();
+    let opts = QueueOptions {
+        bandwidth: Some(256 * 1024),
+        ..Default::default()
+    };
+    let (q, _rx) = queue(fs(a.path()), fs(b.path()), opts);
+    let id = q.push(job("f", "f", false));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    q.cancel(id);
+    q.wait().await;
+    assert_eq!(std::fs::read(b.path().join("f")).unwrap(), b"anterior");
+    assert!(!b.path().join("f.friki-part").exists());
+}
+
+#[tokio::test]
+async fn resume_no_reanuda_sobre_un_destino_ajeno() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let all = data(100_000);
+    std::fs::write(a.path().join("f"), &all).unwrap();
+    // Destino más corto que NO es un parcial propio: se reescribe entero, no se continúa.
+    std::fs::write(b.path().join("f"), b"otra cosa").unwrap();
+    let (q, mut rx) = queue(fs(a.path()), fs(b.path()), QueueOptions::default());
+    q.push(job("f", "f", false));
+    assert_eq!(q.wait().await, (1, 0));
+    assert_eq!(std::fs::read(b.path().join("f")).unwrap(), all);
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .any(|e| matches!(e, QueueEvent::Finished { bytes: 100_000, .. }))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn permisos_descargados_acotados() {
+    use std::os::unix::fs::PermissionsExt;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("f"), b"x").unwrap();
+    std::fs::set_permissions(a.path().join("f"), std::fs::Permissions::from_mode(0o4777)).unwrap();
+    std::fs::write(a.path().join("s"), b"x").unwrap();
+    std::fs::set_permissions(a.path().join("s"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (q, _rx) = queue(fs(a.path()), fs(b.path()), QueueOptions::default());
+    q.push(job("f", "f", false));
+    q.push(job("s", "s", false));
+    assert_eq!(q.wait().await, (2, 0));
+    let m = |n: &str| {
+        std::fs::metadata(b.path().join(n))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(m("f"), 0o755);
+    assert_eq!(m("s"), 0o600);
+}
+
+#[tokio::test]
+async fn failed_lleva_el_tipo_de_error() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (q, mut rx) = queue(fs(a.path()), fs(b.path()), QueueOptions::default());
+    q.push(job("no-existe", "f", false));
+    assert_eq!(q.wait().await, (0, 1));
+    assert!(drain(&mut rx).iter().any(|e| matches!(
+        e,
+        QueueEvent::Failed {
+            kind: ErrorKind::NotFound,
+            ..
+        }
+    )));
 }

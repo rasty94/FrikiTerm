@@ -51,7 +51,16 @@ pub async fn download(
     let mut s = conn
         .open_exec_stream(&format!("scp {flags} -- {}", quote(remote)))
         .await?;
-    download_stream(&mut s, local_dir, recursive).await
+    // Nombre que debe anunciar el servidor: el último componente de la ruta pedida.
+    let expected = remote
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    if !safe_name(expected) {
+        return Err(proto(format!("no se puede descargar la ruta {remote:?}")));
+    }
+    download_stream_named(&mut s, local_dir, recursive, expected).await
 }
 
 // ---------------------------------------------------------------- subida (lado fuente)
@@ -202,11 +211,54 @@ fn parse_header(line: &str) -> Result<(u32, u64, &str)> {
     Ok((mode, size, name))
 }
 
-/// Descarga desde un flujo ya abierto hacia `scp -f`.
+/// Descarga desde un flujo ya abierto hacia `scp -f` aceptando cualquier nombre de nivel
+/// superior que anuncie el servidor. Solo para servidores de confianza: prefiere
+/// [`download_stream_named`], que evita que un servidor hostil escriba otros ficheros
+/// (CVE-2019-6111).
 pub async fn download_stream<S>(s: &mut S, local_dir: &Path, recursive: bool) -> Result<u64>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    download_impl(s, local_dir, recursive, None).await
+}
+
+/// Como [`download_stream`], pero el único `C`/`D` de nivel superior debe llamarse
+/// `expected` (nombre base de lo pedido); cualquier otra cosa es un error sin escribir nada.
+pub async fn download_stream_named<S>(
+    s: &mut S,
+    local_dir: &Path,
+    recursive: bool,
+    expected: &str,
+) -> Result<u64>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    download_impl(s, local_dir, recursive, Some(expected)).await
+}
+
+/// Comprueba el nombre de una entrada de nivel superior (una sola, con el nombre esperado).
+fn check_top(expected: Option<&str>, depth: usize, seen: &mut bool, name: &str) -> Result<()> {
+    let (Some(exp), 1) = (expected, depth) else {
+        return Ok(());
+    };
+    if name != exp || std::mem::replace(seen, true) {
+        return Err(proto(format!(
+            "el servidor envía {name:?} en vez de {exp:?}: transferencia rechazada"
+        )));
+    }
+    Ok(())
+}
+
+async fn download_impl<S>(
+    s: &mut S,
+    local_dir: &Path,
+    recursive: bool,
+    expected: Option<&str>,
+) -> Result<u64>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let mut top_seen = false;
     let mut dirs = vec![local_dir.to_path_buf()];
     let mut total = 0u64;
     let mut mtime: Option<u64> = None;
@@ -230,6 +282,7 @@ where
                 if size > MAX_FILE_SIZE {
                     return Err(proto(format!("tamaño absurdo: {size}")));
                 }
+                check_top(expected, dirs.len(), &mut top_seen, name)?;
                 // dirs nunca está vacío: siempre contiene `local_dir`.
                 let base = dirs
                     .last()
@@ -237,7 +290,13 @@ where
                 let dest = local_target(base, name).ok_or_else(|| proto("nombre rechazado"))?;
                 refuse_symlink(&dest).await?;
                 s.write_all(&[0]).await?;
-                let mut f = tokio::fs::File::create(&dest).await?;
+                let mut f = {
+                    let mut o = tokio::fs::OpenOptions::new();
+                    o.write(true).create(true).truncate(true);
+                    #[cfg(unix)]
+                    o.mode(0o600);
+                    o.open(&dest).await?
+                };
                 let mut left = size;
                 let mut buf = vec![0u8; 32 * 1024];
                 while left > 0 {
@@ -262,6 +321,7 @@ where
                 }
                 let line = read_line(s).await?;
                 let (_, _, name) = parse_header(&line)?;
+                check_top(expected, dirs.len(), &mut top_seen, name)?;
                 let base = dirs
                     .last()
                     .ok_or_else(|| proto("pila de directorios vacía"))?;
@@ -317,8 +377,8 @@ fn finish_file(f: &std::fs::File, mode: u32, mtime: Option<u64>) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // Sin setuid/setgid/sticky: solo rwx.
-        f.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+        // Sin setuid/setgid/sticky ni escritura para grupo/otros.
+        f.set_permissions(std::fs::Permissions::from_mode(mode & 0o755))?;
     }
     #[cfg(not(unix))]
     let _ = mode;
@@ -478,5 +538,67 @@ mod tests {
         assert!(s.contains(" f.txt\nabc\0"), "{s:?}");
         let (r, _) = run_upload(d.path(), false).await;
         assert!(r.is_err(), "directorio sin recursive");
+    }
+
+    async fn run_named(script: Vec<u8>, dir: &Path, rec: bool, name: &str) -> Result<u64> {
+        let (mut c, mut srv) = duplex(1 << 16);
+        let h = tokio::spawn(async move {
+            let _ = srv.write_all(&script).await;
+            let _ = srv.shutdown().await;
+            let mut sink = Vec::new();
+            let _ = srv.read_to_end(&mut sink).await;
+        });
+        let r = download_stream_named(&mut c, dir, rec, name).await;
+        drop(c);
+        let _ = h.await;
+        r
+    }
+
+    #[tokio::test]
+    async fn hostile_server_cannot_pick_names() {
+        let d = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        // Pedimos `a.txt`; el servidor envía `.bashrc`.
+        assert!(
+            run_named(file_msg(".bashrc", b"x"), d.path(), false, "a.txt")
+                .await
+                .is_err()
+        );
+        // Dos ficheros de nivel superior, aunque uno sea el esperado.
+        let mut two = file_msg("a.txt", b"1");
+        two.extend(file_msg("b.txt", b"2"));
+        assert!(run_named(two, d2.path(), false, "a.txt").await.is_err());
+        // Con -r el directorio de nivel superior tampoco puede ser otro.
+        let mut dir = b"D0755 0 .ssh\n".to_vec();
+        dir.extend(file_msg("authorized_keys", b"k"));
+        dir.extend(b"E\n");
+        assert!(run_named(dir, d.path(), true, "sub").await.is_err());
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
+        // Lo legítimo funciona, también anidado.
+        assert_eq!(
+            run_named(file_msg("a.txt", b"ok"), d.path(), false, "a.txt")
+                .await
+                .unwrap(),
+            2
+        );
+        let mut dir = b"D0755 0 sub\n".to_vec();
+        dir.extend(file_msg("a.txt", b"ok"));
+        dir.extend(b"E\n");
+        assert_eq!(run_named(dir, d.path(), true, "sub").await.unwrap(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn downloaded_mode_is_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let msg = b"C4777 1 x\nZ\0".to_vec();
+        run_named(msg, d.path(), false, "x").await.unwrap();
+        let m = std::fs::metadata(d.path().join("x"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(m, 0o755);
     }
 }
