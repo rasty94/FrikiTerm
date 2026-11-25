@@ -1,5 +1,7 @@
 [package]
 name = "friki-cli"
+description = "Cliente SSH, Telnet, serie y de transferencia de ficheros para terminal"
+repository = "https://github.com/rasty94/FrikiTerm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -48,7 +50,7 @@ tempfile = "3"
 [package.metadata.deb]
 name = "friki"
 # ponytail: placeholder hasta fijar el mantenedor real del paquete (obligatorio en control de .deb).
-maintainer = "FrikiTerm <noreply@invalid>"
+maintainer = "rasty94 <rasty94@users.noreply.github.com>"
 extended-description = "Cliente SSH y de terminal con sesiones TOML, known_hosts compatible con OpenSSH y llavero del sistema."
 section = "net"
 priority = "optional"

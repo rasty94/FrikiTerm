@@ -1,4 +1,4 @@
-//! Scripting con Rhai (TODO.md §7). La API imita la de SecureCRT (docs/12) en lo esencial:
+//! Scripting con Rhai (TODO.md §7). La API imita la de SecureCRT en lo esencial:
 //! `crt.Screen.Send`, `WaitForString(s)`, `ReadString`, `Get`, `crt.Session.Connect`, …
 //! con timeouts obligatorios y sandbox: sin disco ni red salvo permiso explícito.
 

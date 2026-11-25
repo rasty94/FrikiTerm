@@ -114,7 +114,7 @@ pub enum FlowControl {
     None,
     /// XON/XOFF.
     Software,
-    /// RTS/CTS. DTR/DSR no se ofrece: no existe en macOS ni Linux (docs/16).
+    /// RTS/CTS. DTR/DSR no se ofrece: no existe en macOS ni Linux.
     Hardware,
 }
 

@@ -22,7 +22,7 @@ friki-cli ──► friki-tui ──► friki-ssh ──► friki-core
 
 1. **Las firmas públicas de los `lib.rs` son el contrato.** Se pueden añadir funciones, campos privados y módulos; no se cambian ni se quitan firmas públicas. Si una firma impide hacer bien el trabajo, se documenta en `CONTRACT-CHANGES.md` en la raíz con la propuesta, y se sigue con la firma actual.
 2. **Cada agente solo toca su crate** (y lo indicado en su tarea). Dependencias nuevas, solo en el `Cargo.toml` de su crate.
-3. Sin criptografía propia ni parsers de protocolo propios cuando exista crate mantenido. Sala limpia: nada de los binarios de VanDyke.
+3. Sin criptografía propia ni parsers de protocolo propios cuando exista crate mantenido. Sala limpia: no se copia ni se traduce código de otros productos.
 4. Sin `unwrap()`/`expect()` en rutas de producción; sin `unsafe` salvo justificado en comentario.
 5. `cargo fmt`, `cargo clippy --all-targets -- -D warnings` y `cargo test` del crate en verde antes de entregar.
 6. Commits sin atribución a herramientas.

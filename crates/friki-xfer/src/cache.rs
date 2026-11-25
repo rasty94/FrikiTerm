@@ -1,5 +1,5 @@
 //! Caché de listados para la sincronización (SQLite, tablas `config` y `direntries`, como
-//! hace SecureFX según docs/13). Guarda el estado de la última sincronización para detectar
+//! hace SecureFX). Guarda el estado de la última sincronización para detectar
 //! conflictos en modo `Both`.
 //!
 //! Esquema: `config(id,name,value)` y `direntries(id,parentid,name,mtime,size,attrs)` de

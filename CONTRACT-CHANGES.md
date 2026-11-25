@@ -33,10 +33,8 @@ no puede importarlos sin copiar la definición (drift garantizado) ni incluir `m
 
 ## Otros puntos para el integrador (fuera de la sección `[package.metadata.deb]`)
 
-- `crates/friki-cli/Cargo.toml` no tiene `description` en `[package]`: `cargo deb` avisa y la
-  descripción del control queda vacía. Añadir `description = "..."` en `[package]`.
-- `[package.metadata.deb].maintainer` es un marcador (`FrikiTerm <noreply@invalid>`) hasta fijar
-  el mantenedor real. Es obligatorio para el `.deb`.
+- `description` de friki-cli añadida (resuelto).
+- `[package.metadata.deb].maintainer`: `rasty94 <rasty94@users.noreply.github.com>` (resuelto).
 - `LICENSE` sigue sin existir (TODO §0). Cuando exista, añadir `license-file` en
   `[package.metadata.deb]`.
 - El workflow de release usa `ubuntu-24.04-arm` y `macos-15-intel` como etiquetas de runner.

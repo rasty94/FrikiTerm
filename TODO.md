@@ -1,6 +1,6 @@
 # FrikiTerm: TODO
 
-Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capacidades de SecureCRT/SecureFX documentadas en `docs/`.
+Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capacidades de clientes como SecureCRT/SecureFX y Termius.
 
 ## Estado (2026-11-25)
 
@@ -16,7 +16,6 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 **Pendiente:**
 - [ ] Probar a mano la TUI en Linux y Windows (en macOS probada a mano el 2026-11-25: funciona).
 - [ ] Sin probar en real: puerto serie con hardware (la prueba con par PTY corre en el CI de Linux), FTP contra un servidor real, interoperabilidad Zmodem con `rz/sz` fuera del contenedor. (ConPTY sí se prueba en el CI de Windows.)
-- [ ] Mantenedor del `.deb`: hoy `FrikiTerm <noreply@invalid>`.
 - [ ] Crear el entorno `release` con revisores y proteger los tags `v*` en GitHub (`docs/INSTALL.md` §5).
 - [ ] Sin probar en real (fase 6): agente de Windows y reenvío (solo compila en el CI de Windows), PKCS#11 con un token y login SSH real, GSSAPI contra un KDC, TN3270 contra un host, S3 en la CI (MinIO solo en local), Kermit con C-Kermit solo en local.
 - [ ] Los scripts Rhai no contestan a consultas DSR/DA del remoto (las respuestas se descartan, acotadas a 4 KiB).
@@ -24,9 +23,9 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 
 ## 0. Reglas del proyecto
 
-- [ ] **Sala limpia.** Se implementa desde RFC y documentación pública. No se copia ni se traduce código de los binarios de VanDyke; los informes de `docs/` describen *qué hace* el producto, no *cómo*. No hay nada de licencias, ofuscación ni credenciales ajenas.
+- [ ] **Sala limpia.** Se implementa desde RFC y documentación pública. No se copia ni se traduce código de ningún producto; solo se toma como referencia qué hace, a partir de su documentación pública. No hay nada de licencias, ofuscación ni credenciales ajenas.
 - [ ] **Reutilizar antes que escribir.** Ninguna criptografía ni parser de protocolo propios si hay crate mantenido (ver sección 12).
-- [ ] **Seguro por defecto.** Los puntos débiles observados en `docs/03`, `07`, `09`, `14` y `15` son requisitos negativos (sección 11).
+- [ ] **Seguro por defecto.** Los puntos débiles conocidos de los clientes de referencia son requisitos negativos (sección 11).
 - [ ] Licencia del repositorio decidida y declarada (`LICENSE`).
 - [ ] CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo deny`, `cargo audit`.
 - [ ] MSRV fijada; builds para macOS (arm64/x86_64), Linux (x86_64/aarch64) y Windows (x86_64).
@@ -34,11 +33,11 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 ## 1. Decisiones abiertas (resolver antes de la fase 2)
 
 - [ ] **Interfaz:** TUI (ratatui) primero, GUI después (egui/Tauri) o solo CLI+TUI. Recomendación: TUI, porque el núcleo es el mismo y se valida antes.
-- [ ] **Scripting:** Lua, Rhai o Python embebido. SecureCRT usa Python (`docs/12`); un Python embebido arrastra su ciclo de CVEs (`docs/14`).
+- [ ] **Scripting:** Lua, Rhai o Python embebido. SecureCRT usa Python; un Python embebido arrastra su ciclo de CVEs.
 - [ ] **Formato de configuración:** TOML por sesión, o directorio de sesiones compatible con `~/.ssh/config`.
 - [ ] **Alcance de compatibilidad:** ¿importar sesiones de SecureCRT/OpenSSH? ¿qué se considera "compatible"?
 
-## 2. Núcleo SSH-2 (ver `docs/01`, `05`, `06`, `09`, `10`)
+## 2. Núcleo SSH-2
 
 - [ ] Conexión, transporte y canales sobre un crate SSH existente (p. ej. `russh`); sin pila propia.
 - [ ] **KEX:** curve25519-sha256 (y @libssh.org), ECDH NIST P-256/384/521, DH grupo 14-18 sha256/512, group-exchange-sha256.
@@ -47,7 +46,7 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - [ ] **Claves de host y de usuario:** Ed25519, ECDSA (P-256/384/521), RSA con rsa-sha2-256/512; certificados OpenSSH.
 - [ ] **Strict KEX** (mitigación Terrapin) y `ext-info`.
 - [ ] Autenticación: password, publickey, keyboard-interactive, agente (`SSH_AUTH_SOCK`/Pageant/OpenSSH agent), GSSAPI (opcional, fase 4), PKCS#11 (opcional, fase 4).
-- [ ] Orden de métodos configurable y número máximo de intentos explícito (SecureCRT no lo documenta: `docs/10` no se pudo escribir).
+- [ ] Orden de métodos configurable y número máximo de intentos explícito (SecureCRT no lo documenta: no se pudo escribir).
 - [ ] Compresión `zlib@openssh.com` opcional, desactivada por defecto.
 - [ ] Verificación de claves de host: `known_hosts` propio y compatible con OpenSSH, avisos ante cambio de clave, nunca aceptar en silencio.
 - [ ] Reenvío de puertos local/remoto/dinámico (SOCKS), X11 y agente (opt-in).
@@ -55,7 +54,7 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - [ ] Jump hosts / ProxyJump y proxy HTTP/SOCKS.
 - [ ] Algoritmos heredados (3DES, CBC, SHA-1, DH group1, DSA, RC4) **fuera por defecto**; solo accesibles con una opción explícita por sesión que lo registre en el log.
 
-## 3. Terminal (ver `docs/16`)
+## 3. Terminal
 
 - [ ] Emulación basada en un crate existente (`alacritty_terminal`, `vt100` o `termwiz`); valorar cobertura antes de escribir nada.
 - [ ] Emulaciones objetivo: xterm-256color, VT100/102/220, ANSI, Linux, SCO ANSI; después Wyse 50/60 y TVI si hay demanda.
@@ -65,35 +64,35 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - [ ] Pestañas, paneles divididos, buscar en el buffer, scrollback configurable.
 - [ ] Registro de sesión con variables en el nombre. **Enmascarado de contraseñas en el log** (requisito negativo: SecureCRT no lo documenta).
 
-## 4. Otros tipos de sesión (ver `docs/01`, `16`)
+## 4. Otros tipos de sesión
 
 - [ ] Local shell (pty).
 - [ ] Telnet (NAWS, LFLOW, SGA, terminal type) y Telnet sobre TLS con verificación activa.
-- [ ] Puerto serie: baud, paridad, bits, parada, control de flujo XON/XOFF y RTS/CTS (DTR/DSR no existe en macOS/Linux, `docs/16`).
+- [ ] Puerto serie: baud, paridad, bits, parada, control de flujo XON/XOFF y RTS/CTS (DTR/DSR no existe en macOS/Linux.
 - [ ] RAW (host y puerto).
 - [ ] Transferencia en terminal: Xmodem, Ymodem, Zmodem; Kermit opcional.
 
-## 5. Transferencia de archivos (ver `docs/13`)
+## 5. Transferencia de archivos
 
 - [ ] SFTP y SCP; FTP y FTPS (verificación de certificado activa); HTTP/S; S3 (SigV4, STS, token de sesión) como opcional.
-- [ ] OneDrive **no** es un protocolo del producto de referencia (`docs/13`); no se implementa.
+- [ ] OneDrive **no** es un protocolo del producto de referencia; no se implementa.
 - [ ] Cola de transferencias: pausar, reanudar (ahora/luego/nunca), reintentos, reconexión, paralelismo y límite de ancho de banda.
 - [ ] Sincronización de carpetas con comparación de directorios y filtros; caché de directorios (SQLite, esquema simple: `config` y `direntries`).
 - [ ] Servidor TFTP opcional.
 
-## 6. CLI y automatización (ver `docs/13`)
+## 6. CLI y automatización
 
 - [ ] Binario principal `friki` con subcomandos: `ssh`, `sftp`, `scp`, `keygen`, `pubkey-assist`, `sync`.
 - [x] Códigos de salida **que funcionen** y estén documentados: 0 / 250 uso / 251 red / 252 autenticación / 253 clave de host / 254 otros (`ARCHITECTURE.md`). El esquema 100-400 de `sfxcl` no cabe en 8 bits en Unix, y el ejemplo `if not errorlevel 0` de su manual no detecta fallos nunca.
 - [ ] Salida `--json` para scripts.
 - [ ] Generación de claves (Ed25519 por defecto) y gestión de claves públicas.
 
-## 7. Scripting (ver `docs/12`)
+## 7. Scripting
 
 - [ ] Lenguaje decidido (sección 1) y API pública mínima equivalente: `Application`, `Session`, `Screen`, `Tab`, `FileTransfer`, `Dialog`, `GlobalConfiguration`, `SessionConfiguration`.
 - [ ] Operaciones de pantalla: `Send`, `WaitForString(s)`, `ReadString`, `Get`, lectura de coordenadas; con timeouts obligatorios.
 - [ ] Sandbox: sin red ni disco por defecto; permisos explícitos por script.
-- [ ] Sin ejemplos con contraseñas literales ni HTML sin sanear (`docs/15`).
+- [ ] Sin ejemplos con contraseñas literales ni HTML sin sanear.
 
 ## 8. Sesiones y configuración
 
@@ -102,7 +101,7 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - [ ] Importar `~/.ssh/config` y `known_hosts`; exportar a OpenSSH.
 - [ ] Configuración con esquema versionado y migraciones.
 
-## 9. TLS (ver `docs/07`)
+## 9. TLS
 
 - [ ] `rustls` por defecto; sin SSLv3 ni TLS 1.0/1.1; mínimo TLS 1.2.
 - [ ] Verificación de certificado **siempre** con comprobación de hostname; sin nombre de destino vacío que la omita.
@@ -119,13 +118,13 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 
 ## 11. Requisitos negativos: lo que el producto de referencia hace peor o no documenta
 
-- [ ] Hostname TLS no comprobado con destino vacío (`docs/07`): aquí es imposible.
+- [ ] Hostname TLS no comprobado con destino vacío: aquí es imposible.
 - [ ] Mínimo de versión TLS decidido por flags del llamador: aquí es una constante.
 - [ ] Algoritmos débiles registrados en el código (RC4, 3DES, CBC, MD5, SHA-1, DH group1, DSA) sin garantía de que estén desactivados por defecto: aquí **nunca se ofrecen** salvo `legacy_algorithms` con `--features legacy`, y una prueba falla si la lista segura contiene `none`, `-cbc`, `sha1`, `md5`, `group1` o `dss`. Nota: `russh` compila siempre CBC, SHA-1 y DH group1; la feature `legacy` solo añade 3DES y DSA, así que la barrera es la lista ofrecida, no la compilación.
-- [ ] Librerías propias con RELRO parcial (`docs/03`): compilar con RELRO completo, PIE y `-C control-flow-guard` en Windows.
-- [ ] Dependencias fuera de soporte empaquetadas (Python 2.7, zlib 1.2.11, `docs/15`): `cargo deny` bloquea las vulnerables y sin mantenimiento.
+- [ ] Librerías propias con RELRO parcial: compilar con RELRO completo, PIE y `-C control-flow-guard` en Windows.
+- [ ] Dependencias fuera de soporte empaquetadas (Python 2.7, zlib 1.2.11: `cargo deny` bloquea las vulnerables y sin mantenimiento.
 - [ ] Ejecutable sin firma por binario en Linux: firmar releases (cosign) y publicar SHA-256.
-- [ ] `Depends:` incompleto en el `.deb` (`docs/03`): empaquetado con dependencias completas o estático.
+- [ ] `Depends:` incompleto en el `.deb`: empaquetado con dependencias completas o estático.
 - [ ] Scripts de instalación que no verifican nada: sin scripts de mantenedor ni ejecución como root.
 
 ## 12. Dependencias candidatas (a validar con `cargo deny`)
