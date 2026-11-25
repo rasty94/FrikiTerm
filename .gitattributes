@@ -1,0 +1,4 @@
+# Los casos golden se comparan byte a byte: sin conversión de finales de línea en Windows.
+crates/friki-term/tests/golden/** -text
+# Scripts de shell siempre con LF.
+*.sh text eol=lf
