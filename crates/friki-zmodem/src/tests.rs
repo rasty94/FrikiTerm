@@ -517,6 +517,49 @@ async fn kermit_silent_peer_times_out() {
 }
 
 #[tokio::test]
+async fn kermit_f_sin_z_descarta_el_parcial() {
+    let dst = tmpdir("kparcial");
+    let (mut a, mut b) = duplex(1 << 16);
+    let mut p = |_: Progress| {};
+    let task = tokio::spawn(async move {
+        // S con bloque tipo 1 y sin compresión, como en `kermit_hostile_names_and_limits`.
+        let s = [
+            b' ' + 80,
+            b' ' + 5,
+            b' ',
+            0x40,
+            b' ' + 13,
+            b'#',
+            b'N',
+            b'1',
+            b' ',
+        ];
+        let script: Vec<(u8, u8, Vec<u8>)> = vec![
+            (0, b'S', s.to_vec()),
+            (1, b'F', b"a".to_vec()),
+            (2, b'D', b"xyz".to_vec()),
+            // el emisor cambia de fichero sin cerrar el anterior con Z
+            (3, b'F', b"b".to_vec()),
+            (4, b'D', b"uvw".to_vec()),
+            (5, b'Z', vec![]),
+            (6, b'B', vec![]),
+        ];
+        for (seq, t, d) in script {
+            a.write_all(&kpkt(seq, t, &d)).await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = tokio::time::timeout(Duration::from_millis(500), a.read(&mut buf)).await;
+        }
+    });
+    let (got, _) = kermit::receive(&mut b, &dst, &mut p, u64::MAX, kcfg())
+        .await
+        .unwrap();
+    task.await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(std::fs::read(&got[0]).unwrap(), b"uvw");
+    assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 1);
+}
+
+#[tokio::test]
 async fn kermit_hostile_names_and_limits() {
     let dst = tmpdir("khost");
     let (mut a, mut b) = duplex(1 << 16);

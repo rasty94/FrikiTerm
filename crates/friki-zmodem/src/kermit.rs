@@ -561,8 +561,11 @@ async fn recv_inner<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 continue;
             }
             b'F' if started => {
+                // Sin Z, el fichero anterior quedó a medias: se borra y no cuenta como recibido.
                 if let Some(k) = cur.take() {
-                    done_total = done_total.saturating_add(k.written);
+                    drop(k.file);
+                    let _ = tokio::fs::remove_file(&k.path).await;
+                    out.pop();
                 }
                 if out.len() >= MAX_FILES {
                     return Err(proto("demasiados ficheros en el lote"));

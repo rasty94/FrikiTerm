@@ -38,6 +38,13 @@ enum St {
     Cup60,
     /// Descarta hasta el terminador (CR o DEL), con tope.
     Until(u8, u16),
+    /// CSI estándar (`ESC [`) de los terminales que no la usan: se pasa tal cual a `pre`,
+    /// que es quien responde DSR/CPR/DA (p. ej. el `ESC [ 6 n` inicial de ConPTY).
+    Csi,
+    /// `ESC [` de TVI910: VPA de un byte.
+    Vpa910,
+    /// `ESC [ 5` o `ESC [ 6` en TVI910: si sigue `n` es un DSR, si no, VPA.
+    Dsr910(u8),
 }
 
 pub(crate) struct Wyse {
@@ -161,6 +168,34 @@ impl Wyse {
                     self.st = St::Until(t, n + 1);
                 }
             }
+            St::Csi => match b {
+                0x1b => self.st = St::Esc,
+                0x20..=0x3f => out.push(b),
+                0x40..=0x7e => {
+                    out.push(b);
+                    self.st = St::Ground;
+                }
+                // C0 dentro de CSI: `pre` la ejecuta; el resto se descarta.
+                0..=0x1f => out.push(b),
+                _ => self.st = St::Ground,
+            },
+            St::Vpa910 => match b {
+                0x1b => self.st = St::Esc,
+                b'5' | b'6' => self.st = St::Dsr910(b),
+                _ => {
+                    self.st = St::Ground;
+                    self.finish(Op::Vpa, &[b], out);
+                }
+            },
+            St::Dsr910(q) => {
+                self.st = St::Ground;
+                if b == b'n' {
+                    out.extend_from_slice(format!("\x1b[{}n", char::from(q)).as_bytes());
+                } else {
+                    self.finish(Op::Vpa, &[q], out);
+                    self.byte(b, out);
+                }
+            }
         }
     }
 
@@ -211,7 +246,11 @@ impl Wyse {
             b'`' if wy => take(self, Op::Backtick, 1),
             b'H' if wy => take(self, Op::Gfx, 1),
             b']' if e == Emulation::Tvi910 => take(self, Op::Hpa, 1),
-            b'[' if e == Emulation::Tvi910 => take(self, Op::Vpa, 1),
+            b'[' if e == Emulation::Tvi910 => self.st = St::Vpa910,
+            b'[' => {
+                out.extend_from_slice(b"\x1b[");
+                self.st = St::Csi;
+            }
             b'.' if tvi => take(self, Op::Dot, 1),
             b'c' if e == Emulation::Wyse60 => take(self, Op::Cset, 1),
             b'd' | b'e' | b'w' | b'~' if e == Emulation::Wyse60 => take(self, Op::Ign, 1),
@@ -367,6 +406,18 @@ mod tests {
         assert_eq!(tr(T25, &[b"\x1bqab\x1brc"]), b"\x1b[@a\x1b[@bc");
         assert_eq!(tr(T25, &[b"\x1b+"]), CLEAR);
         assert_eq!(tr(T9, &[b"\x1a"]), CLEAR);
+    }
+
+    #[test]
+    fn csi_estandar_pasa_tal_cual() {
+        // Las consultas (DSR) deben llegar a `pre` para responderlas.
+        assert_eq!(tr(W5, &[b"\x1b[6n"]), b"\x1b[6n");
+        assert_eq!(tr(T25, &[b"\x1b[", b"6n"]), b"\x1b[6n");
+        assert_eq!(tr(W6, &[b"\x1b[6\x1bT"]), b"\x1b[6\x1b[K");
+        // TVI910: `ESC [ 5 n` y `ESC [ 6 n` son DSR; el resto sigue siendo VPA.
+        assert_eq!(tr(T9, &[b"\x1b[6n"]), b"\x1b[6n");
+        assert_eq!(tr(T9, &[b"\x1b[!x"]), b"\x1b[2dx");
+        assert_eq!(tr(T9, &[b"\x1b[6!"]), b"\x1b[23d!");
     }
 
     #[test]

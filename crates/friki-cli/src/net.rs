@@ -28,6 +28,7 @@ pub async fn tftp_server(args: TftpServerArgs) -> anyhow::Result<i32> {
         root: args.root.clone(),
         allow_write: args.allow_write,
         overwrite: args.overwrite,
+        max_size: args.max_size,
         log: |m| eprintln!("tftp: {}", sanitize_remote(m)),
     };
     tokio::select! {

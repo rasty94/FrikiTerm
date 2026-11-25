@@ -519,6 +519,9 @@ pub struct TftpServerArgs {
     /// Con `--allow-write`, permite sustituir ficheros existentes.
     #[arg(long, requires = "allow_write")]
     pub overwrite: bool,
+    /// Tamaño máximo de una subida, en bytes (por defecto 1 GiB).
+    #[arg(long, default_value_t = 1 << 30)]
+    pub max_size: u64,
 }
 
 #[derive(Debug, clap::Args)]

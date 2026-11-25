@@ -1969,6 +1969,28 @@ mod tests {
         assert!(t.take_replies().is_empty());
     }
 
+    #[test]
+    fn cpr_con_emulacion_wyse_y_tvi() {
+        for e in [
+            Emulation::Wyse50,
+            Emulation::Wyse60,
+            Emulation::Tvi910,
+            Emulation::Tvi925,
+        ] {
+            assert_eq!(replies(e, b"ab\x1b[6n"), b"\x1b[1;3R", "{e:?}");
+        }
+    }
+
+    #[test]
+    fn respuestas_sin_recoger_acotadas() {
+        let mut t = Terminal::new(5, 20, 0);
+        for _ in 0..10_000 {
+            t.process(b"\x1b[c");
+        }
+        // Tope de 4 KiB: como mucho una respuesta de más (DA1 mide 10 bytes).
+        assert!(t.take_replies().len() <= 4 * 1024 + 16);
+    }
+
     fn mouse(mode: &str, kind: MouseKind, m: Modifiers) -> Option<Vec<u8>> {
         let mut t = Terminal::new(5, 20, 0);
         t.process(mode.as_bytes());
