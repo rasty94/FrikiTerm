@@ -52,6 +52,10 @@ pub(crate) struct Pre {
     /// Bytes de la cadena OSC/DCS/APC/PM/SOS en curso y si se está descartando por larga.
     slen: usize,
     sdrop: bool,
+    /// Respuestas a consultas del remoto (DSR, CPR, DA) aún sin recoger.
+    replies: Vec<u8>,
+    /// Respuesta a DA1 según la emulación.
+    da1: &'static [u8],
 }
 
 /// Tope de una cadena OSC/DCS/APC/PM; lo que pasa se descarta (CAN a `vt100`).
@@ -90,7 +94,7 @@ fn push_char(out: &mut Vec<u8>, c: char) {
 }
 
 impl Pre {
-    pub(crate) fn new(cols: u16) -> Self {
+    pub(crate) fn new(cols: u16, da1: &'static [u8]) -> Self {
         Self {
             st: St::Ground,
             graphic: [false; 4],
@@ -103,7 +107,13 @@ impl Pre {
             awm: true,
             slen: 0,
             sdrop: false,
+            replies: Vec::new(),
+            da1,
         }
+    }
+
+    pub(crate) fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.replies)
     }
 
     pub(crate) fn resize(&mut self, cols: u16) {
@@ -347,6 +357,17 @@ impl Pre {
             // ANSI.SYS: guardar / restaurar cursor. Con parámetros `CSI s` es DECSLRM.
             (b's', []) => out.extend_from_slice(b"\x1b7"),
             (b'u', []) => out.extend_from_slice(b"\x1b8"),
+            // Consultas: DSR (estado, posición del cursor) y atributos de dispositivo.
+            (b'n', b"5") => self.replies.extend_from_slice(b"\x1b[0n"),
+            (b'n', b"6") => {
+                let _ = Self::col(out, p);
+                let (row, col) = p.screen().cursor_position();
+                let cols = p.screen().size().1.get();
+                let r = format!("\x1b[{};{}R", row + 1, col.min(cols - 1) + 1);
+                self.replies.extend_from_slice(r.as_bytes());
+            }
+            (b'c', [] | b"0") => self.replies.extend_from_slice(self.da1),
+            (b'c', b">" | b">0") => self.replies.extend_from_slice(b"\x1b[>0;10;0c"),
             (b'g', [] | b"0") => {
                 let (c, _) = Self::col(out, p);
                 self.tabs_default = false;
