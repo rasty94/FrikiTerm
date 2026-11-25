@@ -18,6 +18,9 @@ path = "src/main.rs"
 default = ["http", "s3"]
 http = ["friki-xfer/http"]
 s3 = ["friki-xfer/s3"]
+# Reenvían a friki-ssh (desactivadas por defecto).
+pkcs11 = ["friki-ssh/pkcs11"]
+gssapi = ["friki-ssh/gssapi"]
 
 [dependencies]
 friki-core = { path = "../friki-core" }

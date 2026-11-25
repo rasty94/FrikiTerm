@@ -9,6 +9,10 @@ publish = false
 [features]
 # Algoritmos heredados (3DES, CBC, SHA-1, DH group1, DSA). Desactivado por defecto (TODO.md §11).
 legacy = ["russh/des", "russh/dsa"]
+# Claves en smartcard/HSM por PKCS#11 (módulo dinámico en `pkcs11_provider`). Desactivado por defecto.
+pkcs11 = ["dep:cryptoki", "dep:sha2"]
+# GSSAPI/Kerberos (gssapi-with-mic, RFC 4462). Solo Unix; requiere libgssapi (MIT krb5) del sistema.
+gssapi = ["dep:libgssapi"]
 
 [dependencies]
 friki-core = { path = "../friki-core" }
@@ -17,8 +21,13 @@ thiserror = "2"
 # Sin features por defecto: fuera flate2 (compresión) y la cripto se fija a aws-lc-rs + rsa.
 russh = { version = "0.65", default-features = false, features = ["aws-lc-rs", "rsa"] }
 zeroize = "1"
+cryptoki = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
 rand = "0.10"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "fs", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[target.'cfg(unix)'.dependencies]
+libgssapi = { version = "0.11", optional = true, default-features = false }

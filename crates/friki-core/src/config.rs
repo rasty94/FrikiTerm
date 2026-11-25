@@ -73,6 +73,13 @@ pub struct SessionConfig {
     pub forward_agent: bool,
     /// Exigir strict KEX: si el servidor no lo anuncia, se aborta (mitigación Terrapin).
     pub require_strict_kex: bool,
+    /// Módulo PKCS#11 (smartcard/HSM). Solo con la feature `pkcs11` de friki-ssh.
+    /// El PIN nunca va aquí: se pide al conectar.
+    pub pkcs11_provider: Option<PathBuf>,
+    /// Autenticación GSSAPI/Kerberos (`gssapi-with-mic`). Solo con la feature `gssapi` (Unix).
+    pub gssapi: bool,
+    /// Delegar el TGT al servidor (opt-in, como `GSSAPIDelegateCredentials`).
+    pub gssapi_delegate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -189,6 +196,9 @@ impl Default for SessionConfig {
             forwards: Vec::new(),
             forward_agent: false,
             require_strict_kex: false,
+            pkcs11_provider: None,
+            gssapi: false,
+            gssapi_delegate: false,
         }
     }
 }

@@ -102,10 +102,33 @@ pub(crate) async fn authenticate(
         key_left: KEY_TRIES,
         offered: None,
     };
+    #[cfg(not(feature = "pkcs11"))]
+    if cfg.pkcs11_provider.is_some() {
+        st.warnings
+            .push("pkcs11_provider ignorado: compila con la feature `pkcs11`".into());
+    }
+    #[cfg(not(all(feature = "gssapi", unix)))]
+    if cfg.gssapi {
+        st.warnings
+            .push("GSSAPI ignorado: requiere la feature `gssapi` y un sistema Unix".into());
+    }
+    // GSSAPI va antes que los demás métodos (como OpenSSH); no gasta presupuesto.
+    #[cfg(all(feature = "gssapi", unix))]
+    if cfg.gssapi && try_gssapi(&mut st, cfg.gssapi_delegate).await? {
+        return Ok(());
+    }
     for method in &cfg.auth {
         let done = match method {
             AuthMethod::Agent => try_agent(&mut st).await?,
-            AuthMethod::PublicKey => try_keys(&mut st, &cfg.identity_files).await?,
+            AuthMethod::PublicKey => {
+                #[cfg(feature = "pkcs11")]
+                if let Some(p) = &cfg.pkcs11_provider
+                    && try_pkcs11(&mut st, p).await?
+                {
+                    return Ok(());
+                }
+                try_keys(&mut st, &cfg.identity_files).await?
+            }
             AuthMethod::KeyboardInteractive => try_kbd(&mut st).await?,
             AuthMethod::Password => try_password(&mut st).await?,
         };
@@ -246,6 +269,108 @@ async fn try_keys(st: &mut State<'_>, files: &[PathBuf]) -> Result<bool> {
     Ok(false)
 }
 
+/// `gssapi-with-mic` con el ticket Kerberos del usuario (`kinit`). Sin ticket o sin KDC
+/// se avisa y se sigue con el resto de métodos.
+#[cfg(all(feature = "gssapi", unix))]
+async fn try_gssapi(st: &mut State<'_>, delegate: bool) -> Result<bool> {
+    use crate::gssapi::{Gssapi, krb5_oid_der};
+
+    if !st.offers(MethodKind::GssapiWithMic) {
+        return Ok(false);
+    }
+    let mut g = match Gssapi::new(st.host, delegate) {
+        Ok(g) => g,
+        Err(e) => {
+            st.warnings.push(format!("GSSAPI: {e}"));
+            return Ok(false);
+        }
+    };
+    let r = st
+        .handle
+        .authenticate_gssapi_with_mic(st.user, vec![krb5_oid_der()], &mut g)
+        .await;
+    if let Some(m) = g.server_error.take() {
+        st.warnings.push(format!("GSSAPI del servidor: {m}"));
+    }
+    match r {
+        Ok(r) => Ok(st.record(r)),
+        Err(e) => {
+            st.warnings.push(format!("GSSAPI: {e}"));
+            Ok(false)
+        }
+    }
+}
+
+/// Claves de un token PKCS#11 (`pkcs11_provider`). El PIN viene del llavero
+/// (`pkcs11-pin:<etiqueta>`) o se pide; nunca de la configuración. Un PIN erróneo
+/// no se reintenta: gastaría intentos del token.
+#[cfg(feature = "pkcs11")]
+async fn try_pkcs11(st: &mut State<'_>, path: &std::path::Path) -> Result<bool> {
+    use crate::pkcs11::Module;
+    use russh::keys::Algorithm;
+    use zeroize::Zeroizing;
+
+    let module = match Module::load(path) {
+        Ok(m) => m,
+        Err(e) => {
+            st.warnings.push(format!("PKCS#11 {}: {e}", path.display()));
+            return Ok(false);
+        }
+    };
+    for t in module.tokens() {
+        let pin: Option<Zeroizing<String>> = if t.needs_pin {
+            match friki_core::secrets::get(&format!("pkcs11-pin:{}", t.label)) {
+                Ok(Some(p)) => Some(Zeroizing::new(p)),
+                _ => {
+                    if !st.spend() {
+                        return Ok(false);
+                    }
+                    let Some(p) = st.prompter.pin(&t.label).await else {
+                        continue;
+                    };
+                    Some(p)
+                }
+            }
+        } else {
+            None
+        };
+        let mut signer = match module.open(&t, pin.as_ref().map(|p| p.as_str())) {
+            Ok(s) => s,
+            Err(e) => {
+                st.warnings.push(format!("PKCS#11 {}: {e}", t.label));
+                continue;
+            }
+        };
+        for key in signer.public_keys() {
+            if !st.spend_key() {
+                return Ok(false);
+            }
+            let hash = match key.algorithm() {
+                Algorithm::Rsa { .. } => st
+                    .handle
+                    .best_supported_rsa_hash()
+                    .await
+                    .map_err(|e| st.err(e))?
+                    .flatten(),
+                _ => None,
+            };
+            match st
+                .handle
+                .authenticate_publickey_with(st.user, key, hash, &mut signer)
+                .await
+            {
+                Ok(r) => {
+                    if st.record(r) {
+                        return Ok(true);
+                    }
+                }
+                Err(e) => st.warnings.push(format!("PKCS#11 {}: {e}", t.label)),
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Una clave privada legible por grupo u otros no se usa (como OpenSSH).
 #[cfg(unix)]
 fn too_open(path: &std::path::Path) -> Option<u32> {
@@ -285,17 +410,55 @@ async fn load_key(st: &mut State<'_>, path: &std::path::Path) -> Option<russh::k
     None
 }
 
-#[cfg(unix)]
+/// Agente: `SSH_AUTH_SOCK` (socket Unix; en Windows, pipe con nombre), y en Windows
+/// además el pipe del agente de OpenSSH y por último Pageant.
 async fn try_agent(st: &mut State<'_>) -> Result<bool> {
-    use russh::keys::agent::{AgentIdentity, client::AgentClient};
-
     if !st.offers(MethodKind::PublicKey) {
         return Ok(false);
     }
     // Sin agente (sin SSH_AUTH_SOCK, socket muerto): se pasa al siguiente método.
-    let Ok(mut agent) = AgentClient::connect_env().await else {
-        return Ok(false);
-    };
+    #[cfg(unix)]
+    {
+        let Ok(agent) = russh::keys::agent::client::AgentClient::connect_env().await else {
+            return Ok(false);
+        };
+        use_agent(st, agent).await
+    }
+    #[cfg(windows)]
+    {
+        use russh::keys::agent::client::AgentClient;
+        for path in agent_pipes() {
+            if let Ok(agent) = AgentClient::connect_named_pipe(path).await {
+                return use_agent(st, agent).await;
+            }
+        }
+        let Ok(agent) = AgentClient::connect_pageant().await else {
+            return Ok(false);
+        };
+        use_agent(st, agent).await
+    }
+}
+
+/// Pipes de agente candidatos en Windows, por orden.
+#[cfg(windows)]
+pub(crate) fn agent_pipes() -> Vec<std::ffi::OsString> {
+    let mut v = Vec::new();
+    if let Some(s) = std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()) {
+        v.push(s);
+    }
+    v.push(r"\\.\pipe\openssh-ssh-agent".into());
+    v
+}
+
+async fn use_agent<S>(
+    st: &mut State<'_>,
+    mut agent: russh::keys::agent::client::AgentClient<S>,
+) -> Result<bool>
+where
+    S: russh::keys::agent::client::AgentStream + Unpin + Send,
+{
+    use russh::keys::agent::AgentIdentity;
+
     let Ok(ids) = agent.request_identities().await else {
         return Ok(false);
     };
@@ -322,11 +485,5 @@ async fn try_agent(st: &mut State<'_>) -> Result<bool> {
             return Ok(true);
         }
     }
-    Ok(false)
-}
-
-// ponytail: agente solo en Unix (SSH_AUTH_SOCK); Pageant/pipe de Windows cuando se pruebe en Windows.
-#[cfg(not(unix))]
-async fn try_agent(_st: &mut State<'_>) -> Result<bool> {
     Ok(false)
 }

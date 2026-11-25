@@ -3,6 +3,10 @@
 mod auth;
 mod errors;
 mod forward;
+#[cfg(all(feature = "gssapi", unix))]
+mod gssapi;
+#[cfg(feature = "pkcs11")]
+mod pkcs11;
 mod policy;
 mod session;
 mod verifier;
@@ -49,6 +53,10 @@ pub trait HostKeyVerifier: Send + Sync {
 pub trait AuthPrompter: Send + Sync {
     async fn password(&self, user: &str, host: &str) -> Option<Zeroizing<String>>;
     async fn passphrase(&self, key_path: &Path) -> Option<Zeroizing<String>>;
+    /// PIN de un token PKCS#11 (por su etiqueta). Por defecto se pide como passphrase.
+    async fn pin(&self, token_label: &str) -> Option<Zeroizing<String>> {
+        self.passphrase(Path::new(token_label)).await
+    }
     /// `prompts`: (texto, mostrar eco).
     async fn keyboard_interactive(
         &self,
