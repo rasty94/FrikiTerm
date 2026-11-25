@@ -114,8 +114,10 @@ async fn recv_data<S: AsyncRead + AsyncWrite + Unpin + Send>(
     file: &mut tokio::fs::File,
     name: &str,
     limit: Option<u64>,
+    budget: u64,
     progress: &mut (dyn FnMut(Progress) + Send),
-) -> io::Result<()> {
+) -> io::Result<u64> {
+    let mut recvd = 0u64;
     let mut expected = 1u8;
     let mut errors = 0;
     let mut written = 0u64;
@@ -132,10 +134,16 @@ async fn recv_data<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     file.write_all(&h).await?;
                 }
                 file.flush().await?;
-                return c.write(&[ACK]).await;
+                c.write(&[ACK]).await?;
+                return Ok(recvd);
             }
             Blk::Data(seq, d) if seq == expected => {
                 errors = 0;
+                recvd += d.len() as u64;
+                if recvd > budget {
+                    c.cancel().await;
+                    return Err(crate::too_large("se supera el tope total de bytes"));
+                }
                 match limit {
                     Some(lim) => {
                         let take = d
@@ -176,12 +184,22 @@ async fn recv_data<S: AsyncRead + AsyncWrite + Unpin + Send>(
     }
 }
 
+/// Cierra el parcial y lo borra si el error es de tope superado.
+pub(crate) async fn discard(f: tokio::fs::File, path: &Path, e: io::Error) -> io::Error {
+    drop(f);
+    if e.kind() == io::ErrorKind::QuotaExceeded {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    e
+}
+
 pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
     io: &mut S,
     ymodem: bool,
     dest: &Path,
     progress: &mut (dyn FnMut(Progress) + Send),
-) -> io::Result<Vec<PathBuf>> {
+    max_total: u64,
+) -> io::Result<(Vec<PathBuf>, Vec<u8>)> {
     let mut c = Conn::new(io);
     let probes: Vec<(u8, bool)> = if ymodem {
         vec![(b'C', true); 10]
@@ -194,20 +212,25 @@ pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut out = Vec::new();
     if !ymodem {
         let (mut f, path) = create_unique(dest, "xmodem.bin").await?;
-        recv_data(
+        let r = recv_data(
             &mut c,
             crc,
             Some(first),
             &mut f,
             "xmodem.bin",
             None,
+            max_total,
             progress,
         )
-        .await?;
+        .await;
+        if let Err(e) = r {
+            return Err(discard(f, &path, e).await);
+        }
         out.push(path);
-        return Ok(out);
+        return Ok((out, c.rest()));
     }
     let mut first = Some(first);
+    let mut used = 0u64;
     loop {
         if out.len() >= MAX_FILES {
             c.cancel().await;
@@ -230,7 +253,7 @@ pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
         let end = hdr.iter().position(|&b| b == 0).unwrap_or(hdr.len());
         if end == 0 {
             c.write(&[ACK]).await?;
-            return Ok(out);
+            return Ok((out, c.rest()));
         }
         let name = sanitize_name(&hdr[..end]);
         // El tamaño anunciado solo trunca el relleno; nunca reserva memoria.
@@ -245,9 +268,23 @@ pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .ok()
             .and_then(|s| s.parse::<u64>().ok());
         let (mut f, path) = create_unique(dest, &name).await?;
-        out.push(path);
         c.write(&[ACK, b'C']).await?;
-        recv_data(&mut c, crc, None, &mut f, &name, size, progress).await?;
+        match recv_data(
+            &mut c,
+            crc,
+            None,
+            &mut f,
+            &name,
+            size,
+            max_total - used,
+            progress,
+        )
+        .await
+        {
+            Ok(n) => used += n,
+            Err(e) => return Err(discard(f, &path, e).await),
+        }
+        out.push(path);
         c.write(b"C").await?;
     }
 }

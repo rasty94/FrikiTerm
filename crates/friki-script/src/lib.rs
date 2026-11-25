@@ -81,12 +81,15 @@ pub enum ScriptError {
 
 /// Tope de lectura/escritura de ficheros y de cadenas del script.
 const MAX_BYTES: usize = 16 << 20;
+/// Granularidad de las esperas para poder cancelar.
+const CHUNK: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 enum Signal {
     Quit(i64),
     Denied(String),
     Limit(String),
+    Cancelled,
 }
 
 type R<T> = Result<T, Box<EvalAltResult>>;
@@ -109,6 +112,7 @@ struct Ctx {
     limits: Limits,
     start: Instant,
     args: Vec<String>,
+    cancel: CancelToken,
 }
 
 type Cx = Arc<Ctx>;
@@ -150,6 +154,9 @@ fn needles(d: &Dynamic) -> R<Vec<String>> {
 
 impl Ctx {
     fn remaining(&self) -> R<Duration> {
+        if self.cancel.is_cancelled() {
+            return Err(sig(Signal::Cancelled));
+        }
         self.limits
             .max_runtime
             .checked_sub(self.start.elapsed())
@@ -167,19 +174,25 @@ impl Ctx {
         Ok(d.min(rem))
     }
 
+    /// `block_on` en trozos de `CHUNK` comprobando la cancelación entre uno y otro.
+    fn block<F: std::future::Future>(&self, f: F) -> R<F::Output> {
+        let mut f = Box::pin(f);
+        loop {
+            self.remaining()?;
+            if let Ok(v) = self.handle.block_on(tokio::time::timeout(CHUNK, &mut f)) {
+                return Ok(v);
+            }
+        }
+    }
+
     fn wait(&self, n: Vec<String>, t: Option<&Dynamic>) -> R<Option<usize>> {
         let d = self.wait_dur(t)?;
-        self.handle
-            .block_on(self.host.wait_for_strings(&n, d))
-            .map_err(rt)
+        self.block(self.host.wait_for_strings(&n, d))?.map_err(rt)
     }
 
     fn read(&self, n: Vec<String>, t: Option<&Dynamic>) -> R<String> {
         let d = self.wait_dur(t)?;
-        let r = self
-            .handle
-            .block_on(self.host.read_string(&n, d))
-            .map_err(rt)?;
+        let r = self.block(self.host.read_string(&n, d))?.map_err(rt)?;
         Ok(r.unwrap_or_default())
     }
 
@@ -194,7 +207,6 @@ impl Ctx {
     /// Ruta canónica dentro de uno de los directorios permitidos (los symlinks que
     /// escapan quedan fuera porque se resuelven antes de comparar).
     fn resolve(&self, path: &str, write: bool) -> R<PathBuf> {
-        let dirs = if write { &self.write } else { &self.read };
         let p = Path::new(path);
         let resolved = if std::fs::symlink_metadata(p).is_ok() {
             p.canonicalize()
@@ -211,14 +223,82 @@ impl Ctx {
             return Err(rt(format!("no existe: {path}")));
         }
         .map_err(|e| rt(format!("{path}: {e}")))?;
-        if dirs.iter().any(|d| resolved.starts_with(d)) {
+        if self.allowed(&resolved, write) {
             Ok(resolved)
         } else {
-            Err(sig(Signal::Denied(format!(
-                "{} {path}",
-                if write { "escritura en" } else { "lectura de" }
-            ))))
+            Err(self.denied(path, write))
         }
+    }
+
+    fn allowed(&self, p: &Path, write: bool) -> bool {
+        let dirs = if write { &self.write } else { &self.read };
+        dirs.iter().any(|d| p.starts_with(d))
+    }
+
+    fn denied(&self, path: &str, write: bool) -> Box<EvalAltResult> {
+        sig(Signal::Denied(format!(
+            "{} {path}",
+            if write { "escritura en" } else { "lectura de" }
+        )))
+    }
+
+    /// Abre sin seguir symlinks finales ni bloquear en FIFOs, y valida sobre el
+    /// descriptor (fichero regular y ruta real dentro de lo permitido) para cerrar el TOCTOU.
+    /// No trunca: quien escribe lo hace después de validar.
+    fn open_checked(&self, path: &str, write: bool) -> R<std::fs::File> {
+        let p = self.resolve(path, write)?;
+        let mut o = std::fs::OpenOptions::new();
+        if write {
+            o.write(true).create(true);
+        } else {
+            o.read(true);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let f = o.open(&p).map_err(|e| rt(format!("{path}: {e}")))?;
+        let md = f.metadata().map_err(|e| rt(format!("{path}: {e}")))?;
+        if !md.is_file() {
+            return Err(rt(format!("{path}: no es un fichero regular")));
+        }
+        let real = fd_path(&f, &p).map_err(|e| rt(format!("{path}: {e}")))?;
+        if self.allowed(&real, write) {
+            Ok(f)
+        } else {
+            Err(self.denied(path, write))
+        }
+    }
+}
+
+/// Ruta real del descriptor. Sin forma portátil: ruta canónica del padre + nombre.
+#[allow(unreachable_code)]
+fn fd_path(f: &std::fs::File, p: &Path) -> std::io::Result<PathBuf> {
+    let _ = p;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        return std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: `buf` mide PATH_MAX, lo que F_GETPATH exige; el fd es válido mientras viva `f`.
+        let r = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+        if r == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        return Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n])));
+    }
+    // ponytail: sin /proc ni F_GETPATH, padre canónico + nombre (queda una ventana mínima)
+    let _ = f;
+    match (p.parent(), p.file_name()) {
+        (Some(d), Some(n)) => d.canonicalize().map(|d| d.join(n)),
+        _ => Err(std::io::ErrorKind::InvalidInput.into()),
     }
 }
 
@@ -242,10 +322,15 @@ fn register(engine: &mut Engine) {
             c.0.args.iter().map(|a| Dynamic::from(a.clone())).collect()
         })
         .register_fn("Sleep", |c: &mut Crt, ms: i64| -> R<()> {
-            let rem = c.0.remaining()?;
-            let d = Duration::from_millis(u64::try_from(ms).unwrap_or(0));
-            std::thread::sleep(d.min(rem));
-            c.0.remaining().map(|_| ())
+            let end = Instant::now() + Duration::from_millis(u64::try_from(ms).unwrap_or(0));
+            loop {
+                let rem = c.0.remaining()?;
+                let left = end.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(());
+                }
+                std::thread::sleep(left.min(rem).min(CHUNK));
+            }
         })
         .register_fn("Quit", |_: &mut Crt, n: i64| -> R<()> {
             Err(sig(Signal::Quit(n)))
@@ -255,7 +340,7 @@ fn register(engine: &mut Engine) {
     engine
         .register_fn("Send", |s: &mut Screen, t: &str| -> R<()> {
             s.0.remaining()?;
-            s.0.handle.block_on(s.0.host.send(t)).map_err(rt)
+            s.0.block(s.0.host.send(t))?.map_err(rt)
         })
         .register_fn("WaitForString", |s: &mut Screen, n: &str| -> R<bool> {
             Ok(s.0.wait(vec![n.to_string()], None)?.is_some())
@@ -316,11 +401,11 @@ fn register(engine: &mut Engine) {
     engine
         .register_fn("Connect", |s: &mut Session, t: &str| -> R<()> {
             s.0.need_connect()?;
-            s.0.handle.block_on(s.0.host.connect(t)).map_err(rt)
+            s.0.block(s.0.host.connect(t))?.map_err(rt)
         })
         .register_fn("Disconnect", |s: &mut Session| -> R<()> {
             s.0.need_connect()?;
-            s.0.handle.block_on(s.0.host.disconnect()).map_err(rt)
+            s.0.block(s.0.host.disconnect())?.map_err(rt)
         })
         .register_get("Connected", |s: &mut Session| s.0.host.connected());
 
@@ -332,16 +417,26 @@ fn register(engine: &mut Engine) {
     // crt.FileSystem
     engine
         .register_fn("Read", |f: &mut Fs, path: &str| -> R<String> {
-            let p = f.0.resolve(path, false)?;
-            let len = std::fs::metadata(&p).map_err(|e| rt(e.to_string()))?.len();
-            if len > MAX_BYTES as u64 {
+            use std::io::Read;
+            let file = f.0.open_checked(path, false)?;
+            let mut buf = Vec::new();
+            file.take(MAX_BYTES as u64 + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| rt(format!("{path}: {e}")))?;
+            if buf.len() > MAX_BYTES {
                 return Err(rt("fichero demasiado grande"));
             }
-            std::fs::read_to_string(&p).map_err(|e| rt(format!("{path}: {e}")))
+            String::from_utf8(buf).map_err(|_| rt(format!("{path}: no es UTF-8")))
         })
         .register_fn("Write", |f: &mut Fs, path: &str, text: &str| -> R<()> {
-            let p = f.0.resolve(path, true)?;
-            std::fs::write(&p, text).map_err(|e| rt(format!("{path}: {e}")))
+            use std::io::Write;
+            if text.len() > MAX_BYTES {
+                return Err(rt("texto demasiado grande"));
+            }
+            let mut file = f.0.open_checked(path, true)?;
+            file.set_len(0)
+                .and_then(|()| file.write_all(text.as_bytes()))
+                .map_err(|e| rt(format!("{path}: {e}")))
         });
 }
 
@@ -351,6 +446,7 @@ fn map_err(e: EvalAltResult) -> Result<i64, ScriptError> {
             Some(Signal::Quit(n)) => Ok(n),
             Some(Signal::Denied(m)) => Err(ScriptError::Denied(m)),
             Some(Signal::Limit(m)) => Err(ScriptError::Limit(m)),
+            Some(Signal::Cancelled) => Err(ScriptError::Runtime("cancelado".into())),
             None => Err(ScriptError::Limit("script terminado".into())),
         },
         EvalAltResult::ErrorRuntime(d, pos) => Err(ScriptError::Runtime(match pos.line() {
@@ -369,6 +465,7 @@ fn run_blocking(
     perms: &Permissions,
     limits: Limits,
     handle: Handle,
+    cancel: CancelToken,
 ) -> Result<i64, ScriptError> {
     let start = Instant::now();
     let mut engine = Engine::new();
@@ -378,8 +475,11 @@ fn run_blocking(
     engine.set_max_array_size(1_000_000);
     engine.set_max_map_size(100_000);
     let (max_ops, max_rt) = (limits.max_operations, limits.max_runtime);
+    let cancel_p = cancel.clone();
     engine.on_progress(move |ops| {
-        if ops > max_ops {
+        if cancel_p.is_cancelled() {
+            Some(Dynamic::from(Signal::Cancelled))
+        } else if ops > max_ops {
             Some(Dynamic::from(Signal::Limit("operaciones máximas".into())))
         } else if start.elapsed() > max_rt {
             Some(Dynamic::from(Signal::Limit(
@@ -406,6 +506,7 @@ fn run_blocking(
         limits,
         start,
         args,
+        cancel,
     });
     let mut scope = Scope::new();
     scope.push_constant("crt", Crt(ctx));
@@ -441,8 +542,20 @@ pub async fn run_cancellable(
     limits: &Limits,
     cancel: &CancelToken,
 ) -> Result<i64, ScriptError> {
-    let _ = (source, args, host, perms, limits, cancel);
-    todo!("friki-script: run_cancellable")
+    let handle = Handle::current();
+    let (source, args, perms, limits, cancel) = (
+        source.to_string(),
+        args.to_vec(),
+        perms.clone(),
+        limits.clone(),
+        cancel.clone(),
+    );
+    // Rhai es síncrono: el motor corre en un hilo bloqueante y llama al host con `block_on`.
+    tokio::task::spawn_blocking(move || {
+        run_blocking(&source, args, host, &perms, limits, handle, cancel)
+    })
+    .await
+    .map_err(|e| ScriptError::Runtime(format!("tarea del script: {e}")))?
 }
 
 /// Ejecuta el script con `args` (`crt.Arguments`). Devuelve el valor de `crt.Quit(n)` o 0.
@@ -453,15 +566,5 @@ pub async fn run(
     perms: &Permissions,
     limits: &Limits,
 ) -> Result<i64, ScriptError> {
-    let handle = Handle::current();
-    let (source, args, perms, limits) = (
-        source.to_string(),
-        args.to_vec(),
-        perms.clone(),
-        limits.clone(),
-    );
-    // Rhai es síncrono: el motor corre en un hilo bloqueante y llama al host con `block_on`.
-    tokio::task::spawn_blocking(move || run_blocking(&source, args, host, &perms, limits, handle))
-        .await
-        .map_err(|e| ScriptError::Runtime(format!("tarea del script: {e}")))?
+    run_cancellable(source, args, host, perms, limits, &CancelToken::new()).await
 }

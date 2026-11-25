@@ -77,6 +77,14 @@ pub struct Modifiers {
     pub shift: bool,
 }
 
+/// Máximo de caracteres del título de ventana.
+const MAX_TITLE: usize = 256;
+
+/// Controles de dirección bidi (U+202A-202E, U+2066-2069): no deben llegar al terminal anfitrión.
+fn is_bidi(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Recoge el título OSC 0/2 que `vt100` solo expone por callback.
 #[derive(Default)]
 struct TitleCb {
@@ -85,7 +93,10 @@ struct TitleCb {
 
 impl vt100::Callbacks for TitleCb {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        self.title = String::from_utf8_lossy(title).into_owned();
+        self.title = String::from_utf8_lossy(title)
+            .chars()
+            .take(MAX_TITLE)
+            .collect();
     }
 }
 
@@ -477,7 +488,10 @@ impl Terminal {
             for c in 0..cols {
                 cells.push(match s.cell(r, c) {
                     Some(x) if !x.is_wide_continuation() => Cell {
-                        text: pre::unmask(x.contents()).into_owned(),
+                        text: pre::unmask(x.contents())
+                            .chars()
+                            .filter(|&c| !is_bidi(c))
+                            .collect(),
                         fg: conv_color(x.fgcolor()),
                         bg: conv_color(x.bgcolor()),
                         bold: x.bold(),
@@ -504,7 +518,8 @@ impl Terminal {
             cursor: (s.cursor_position().0, s.cursor_position().1.min(cols - 1)),
             cursor_visible: !s.hide_cursor() && s.scrollback() == 0,
             title: (self.parser.callbacks().title.chars())
-                .filter(|c| !c.is_control())
+                .filter(|&c| !c.is_control() && !is_bidi(c))
+                .take(MAX_TITLE)
                 .collect(),
         }
     }
@@ -1745,5 +1760,33 @@ mod tests {
         );
         assert!(r.len() >= 10_000);
         assert!(dt < std::time::Duration::from_millis(50), "{dt:?}");
+    }
+
+    #[test]
+    fn oversized_osc_is_dropped_and_title_truncated() {
+        let mut t = Terminal::new(5, 20, 100);
+        let mut big = b"\x1b]0;".to_vec();
+        big.extend(std::iter::repeat_n(b'x', 1 << 20));
+        big.extend(b"\x07ok");
+        t.process(&big[..500_000]);
+        t.process(&big[500_000..]);
+        let s = t.screen();
+        assert!(s.title.chars().count() <= 256);
+        assert_eq!(cell(&s, 0, 0).text, "o");
+        assert_eq!(cell(&s, 0, 1).text, "k");
+        let long = format!("\x1b]2;{}\x07", "y".repeat(10_000));
+        assert_eq!(term(&long).title.chars().count(), 256);
+        // DCS largo con ST: no rompe el estado.
+        let dcs = format!("\x1bP{}\x1b\\hi", "z".repeat(100_000));
+        let s = term(&dcs);
+        assert_eq!(cell(&s, 0, 0).text, "h");
+    }
+
+    #[test]
+    fn bidi_controls_are_filtered() {
+        let s = term("a\u{202E}b\u{2066}c\x1b]0;t\u{202E}x\x07");
+        let row: String = (0..3).map(|c| cell(&s, 0, c).text.clone()).collect();
+        assert_eq!(row, "abc");
+        assert_eq!(s.title, "tx");
     }
 }

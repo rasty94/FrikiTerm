@@ -309,8 +309,10 @@ pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
     io: &mut S,
     dest: &Path,
     progress: &mut (dyn FnMut(Progress) + Send),
-) -> io::Result<Vec<PathBuf>> {
+    max_total: u64,
+) -> io::Result<(Vec<PathBuf>, Vec<u8>)> {
     let mut c = Conn::new(io);
+    let mut done_total = 0u64; // bytes de los ficheros ya completos
     let mut out: Vec<PathBuf> = Vec::new();
     let zrinit = hex_header(&Hdr::flags(ZRINIT, CANFDX | CANOVIO | CANFC32));
     c.write(&zrinit).await?;
@@ -386,6 +388,24 @@ pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 loop {
                     match read_subpacket(&mut c, h.c32).await? {
                         Sub::Ok(data, term) => {
+                            let after = k.written + data.len() as u64;
+                            let over = if after > u64::from(u32::MAX) {
+                                Some("posición Zmodem > 4 GiB no soportada")
+                            } else if k.total.is_some_and(|t| after > t) {
+                                Some("el fichero supera el tamaño anunciado")
+                            } else if done_total.saturating_add(after) > max_total {
+                                Some("se supera el tope total de bytes")
+                            } else {
+                                None
+                            };
+                            if let Some(m) = over {
+                                c.cancel().await;
+                                if let (Some(k), Some(p)) = (cur.take(), out.last()) {
+                                    drop(k);
+                                    let _ = tokio::fs::remove_file(p).await;
+                                }
+                                return Err(crate::too_large(m));
+                            }
                             k.file.write_all(&data).await?;
                             k.written += data.len() as u64;
                             progress(Progress {
@@ -414,6 +434,7 @@ pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 let Some(k) = cur.as_mut() else { continue };
                 if u64::from(h.position()) == k.written & 0xffff_ffff {
                     k.file.flush().await?;
+                    done_total = done_total.saturating_add(k.written);
                     cur = None;
                     errored = false;
                     last = zrinit.clone();
@@ -426,9 +447,21 @@ pub(crate) async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send>(
             }
             ZFIN => {
                 c.write(&hex_header(&Hdr::pos(ZFIN, 0))).await?;
-                // "OO" de cortesía; si no llega, no importa.
-                let _ = c.byte(Duration::from_millis(500)).await;
-                return Ok(out);
+                // "OO" de cortesía; lo que venga después (p. ej. el prompt) se devuelve.
+                let mut oo = 0;
+                while oo < 2 {
+                    match c.byte(Duration::from_millis(500)).await {
+                        // resto del terminador de la cabecera hex (CR LF|0x8a [XON])
+                        Ok(0x0d | 0x0a | 0x8a | 0x11) if oo == 0 => {}
+                        Ok(b'O') => oo += 1,
+                        Ok(_) => {
+                            c.unread();
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                return Ok((out, c.rest()));
             }
             ZCAN | ZABORT => return Err(aborted()),
             _ => {}
