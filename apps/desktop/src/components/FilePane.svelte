@@ -12,7 +12,7 @@
 
 <script lang="ts">
   import type { EntryDto } from "../lib/types";
-  import { breadcrumb, formatMtime, formatSize, parentPath, sortEntries, type SortKey, type SortState } from "../lib/sftp-logic";
+  import { breadcrumb, formatMtime, formatSize, parentPath, relBreadcrumb, relParent, sortEntries, type SortKey, type SortState } from "../lib/sftp-logic";
 
   interface Props {
     side: "local" | "remote";
@@ -26,6 +26,8 @@
     /** Resaltado mientras se arrastra un fichero del sistema sobre este panel. */
     dropHighlight?: boolean;
     rootEl?: HTMLElement;
+    /** Si se da, `path` es relativa a una raíz con este nombre ("" = la raíz). */
+    rootName?: string;
     headerExtra?: import("svelte").Snippet;
     onnavigate: (path: string) => void;
     onsort: (key: SortKey) => void;
@@ -44,6 +46,7 @@
     selected,
     dropHighlight = false,
     rootEl = $bindable(),
+    rootName,
     headerExtra,
     onnavigate,
     onsort,
@@ -52,7 +55,9 @@
   }: Props = $props();
 
   const sorted = $derived(sortEntries(entries, sort));
-  const crumbs = $derived(breadcrumb(path));
+  const relative = $derived(rootName !== undefined);
+  const crumbs = $derived(relative ? relBreadcrumb(rootName ?? "", path) : breadcrumb(path));
+  const atTop = $derived(relative ? path === "" : path === "/");
 
   function arrow(key: SortKey): string {
     if (sort.key !== key) return "";
@@ -106,7 +111,7 @@
     <div class="extra">{@render headerExtra?.()}</div>
   </header>
   <nav class="crumbs">
-    <button class="icon" title="Subir" onclick={() => onnavigate(parentPath(path))} disabled={path === "/"}>↑</button>
+    <button class="icon" title="Subir" onclick={() => onnavigate(relative ? relParent(path) : parentPath(path))} disabled={atTop}>↑</button>
     {#each crumbs as c, i (c.path)}
       {#if i > 0}<span class="sep">/</span>{/if}
       <button class="crumb" onclick={() => onnavigate(c.path)}>{c.label}</button>

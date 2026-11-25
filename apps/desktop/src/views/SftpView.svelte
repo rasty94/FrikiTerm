@@ -20,7 +20,7 @@
   import { addConn, queueJobs, removeConn, sessions, setConnSftp } from "../lib/sessions.svelte";
   import { app } from "../lib/state.svelte";
   import type { ConnId, EntryDto, FsRef } from "../lib/types";
-  import { joinPath, type SortKey, type SortState } from "../lib/sftp-logic";
+  import { joinPath, rootLabel, type SortKey, type SortState } from "../lib/sftp-logic";
 
   type Side = "local" | "remote";
   interface Pane {
@@ -56,6 +56,8 @@
   let overRemote = $state(false);
 
   const sshHosts = $derived(app.hosts.filter((h) => h.protocol === "ssh"));
+  /** Nombre de la raíz local; su ruta (`local.path`) es relativa a ella ("" = la raíz). */
+  const localName = $derived(local.fs?.kind === "local" ? rootLabel(local.fs.root) : "Local");
   const activeInfo = $derived(sessions.conns.find((c) => c.id === activeConn) ?? null);
 
   function paneOf(side: Side): Pane {
@@ -71,7 +73,9 @@
     p.loading = true;
     p.error = null;
     try {
-      p.entries = await fsList(p.fs, p.path);
+      const list = await fsList(p.fs, p.path);
+      // LocalFs devuelve "./nombre"; el panel local trabaja con rutas relativas a su raíz.
+      p.entries = p.fs.kind === "local" ? list.map((e) => ({ ...e, path: joinPath(p.path, e.name) })) : list;
     } catch (e) {
       p.entries = [];
       p.error = errorMessage(e);
@@ -90,7 +94,7 @@
     try {
       const root = await localRoot();
       local.fs = { kind: "local", root };
-      local.path = root;
+      local.path = "";
       await load(local);
     } catch (e) {
       local.error = errorMessage(e);
@@ -102,7 +106,7 @@
       const root = await localPickRoot();
       if (!root) return;
       local.fs = { kind: "local", root };
-      local.path = root;
+      local.path = "";
       local.selected = null;
       await load(local);
     } catch (e) {
@@ -321,6 +325,7 @@
       side="local"
       title="Local"
       path={local.path}
+      rootName={localName}
       entries={local.entries}
       loading={local.loading}
       error={local.error}

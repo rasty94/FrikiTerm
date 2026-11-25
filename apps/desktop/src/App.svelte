@@ -12,10 +12,26 @@
   import SnippetsView from "./views/SnippetsView.svelte";
   import ForwardsView from "./views/ForwardsView.svelte";
 
+  // promptDone aún no está en AppEvent (types.ts); se valida en tiempo de ejecución.
+  interface PromptDoneEvent {
+    type: "promptDone";
+    id: number;
+  }
+  function asPromptDone(e: unknown): PromptDoneEvent | null {
+    const o = e as { type?: unknown; id?: unknown } | null;
+    return typeof o === "object" && o !== null && o.type === "promptDone" && typeof o.id === "number"
+      ? { type: "promptDone", id: o.id }
+      : null;
+  }
+
   onMount(() => {
     // Fuera de Tauri (vite dev en navegador) no hay IPC: se ignora.
     appSubscribe((e) => {
-      if (e.type === "prompt") app.prompts.push({ id: e.id, prompt: e.prompt });
+      const done = asPromptDone(e);
+      if (done) {
+        // Timeout o conexión cancelada: el backend ya no espera respuesta.
+        app.prompts = app.prompts.filter((p) => p.id !== done.id);
+      } else if (e.type === "prompt") app.prompts.push({ id: e.id, prompt: e.prompt });
       else handleAppEvent(e);
     }).catch(() => {});
   });
