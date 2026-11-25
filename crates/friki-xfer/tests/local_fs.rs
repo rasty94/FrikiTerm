@@ -48,3 +48,26 @@ async fn rechaza_rutas_que_salen_de_la_raiz() {
     assert_eq!(fs.stat("nada").await.unwrap(), None);
     assert_eq!(fs.stat("ok").await.unwrap().unwrap().size, 4);
 }
+
+#[tokio::test]
+async fn no_escribe_a_traves_de_enlace_colgante() {
+    let (a, out) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let objetivo = out.path().join("nuevo");
+    std::os::unix::fs::symlink(&objetivo, a.path().join("colgante")).unwrap();
+    let fs = LocalFs::new(a.path());
+    assert!(fs.open_write("colgante", 0).await.is_err());
+    assert!(!objetivo.exists());
+}
+
+#[tokio::test]
+async fn crea_con_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = tempfile::tempdir().unwrap();
+    let fs = LocalFs::new(a.path());
+    drop(fs.open_write("f", 0).await.unwrap());
+    let m = std::fs::metadata(a.path().join("f"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(m & 0o777, 0o600);
+}

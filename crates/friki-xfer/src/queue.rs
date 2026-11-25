@@ -15,7 +15,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Semaphore, mpsc::UnboundedSender, watch};
 use tokio::time::{Instant, sleep, sleep_until};
 
-use crate::{Entry, Error, Kind, RemoteFs, Result, join, safe_name};
+use crate::{Entry, Error, ErrorKind, Kind, RemoteFs, Result, join, safe_name};
+
+/// Sufijo del fichero temporal en el que se escribe cada copia hasta que termina bien.
+pub const PART_SUFFIX: &str = ".friki-part";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -25,7 +28,8 @@ pub enum Direction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resume {
-    /// Continuar si el destino es más corto y coincide en tamaño parcial.
+    /// Continuar un `<destino>.friki-part` propio más corto que el origen (y omitir el
+    /// destino si ya es idéntico).
     Auto,
     Never,
 }
@@ -89,6 +93,7 @@ pub enum QueueEvent {
     Failed {
         id: JobId,
         error: String,
+        kind: ErrorKind,
     },
     Cancelled {
         id: JobId,
@@ -233,19 +238,26 @@ impl Inner {
         s: &Entry,
     ) -> Result<u64> {
         let (sfs, dfs) = self.ends(job.direction);
+        // Se escribe en `<dst>.friki-part` y se renombra al terminar: un fallo no destruye
+        // el destino anterior.
+        let part = format!("{dst}{PART_SUFFIX}");
         let mut offset = 0;
-        if job.resume == Resume::Auto
-            && let Some(d) = dfs.stat(dst).await?.filter(|d| d.kind == Kind::File)
-        {
-            if d.size == s.size && s.mtime.is_some() && d.mtime == s.mtime {
+        if job.resume == Resume::Auto {
+            if let Some(d) = dfs.stat(dst).await?.filter(|d| d.kind == Kind::File)
+                && d.size == s.size
+                && s.mtime.is_some()
+                && d.mtime == s.mtime
+            {
                 return Ok(0);
             }
-            if d.size < s.size {
-                offset = d.size;
+            if let Some(p) = dfs.stat(&part).await?.filter(|p| p.kind == Kind::File)
+                && p.size < s.size
+            {
+                offset = p.size;
             }
         }
         let mut reader = sfs.open_read(src, offset).await?;
-        let mut writer = dfs.open_write(dst, offset).await?;
+        let mut writer = dfs.open_write(&part, offset).await?;
         self.emit(QueueEvent::Started {
             id: ctx.id,
             file: src.to_string(),
@@ -289,7 +301,16 @@ impl Inner {
             done,
         });
         if let (true, Some(m)) = (job.preserve_mtime, s.mtime) {
-            dfs.set_mtime(dst, m).await?;
+            dfs.set_mtime(&part, m).await?;
+        }
+        if let Some(mode) = s.mode {
+            // Sin escritura para grupo/otros ni setuid/setgid/sticky.
+            dfs.set_mode(&part, mode & 0o755).await?;
+        }
+        if dfs.rename(&part, dst).await.is_err() {
+            // Algunos servidores (SFTP) no sobrescriben en `rename`.
+            dfs.remove_file(dst).await?;
+            dfs.rename(&part, dst).await?;
         }
         Ok(done - offset)
     }
@@ -327,9 +348,21 @@ impl Inner {
                     }
                 }
                 Kind::File => {
-                    bytes += self
+                    match self
                         .retry(ctx, || self.copy_file(ctx, job, &s, &d, &st))
-                        .await?;
+                        .await
+                    {
+                        Ok(n) => bytes += n,
+                        Err(e) => {
+                            // Cancelado o sin reintentos: el parcial no se deja huérfano.
+                            let _ = self
+                                .ends(dir)
+                                .1
+                                .remove_file(&format!("{d}{PART_SUFFIX}"))
+                                .await;
+                            return Err(e);
+                        }
+                    }
                 }
                 _ => {} // enlaces y especiales no se transfieren
             }
@@ -356,6 +389,7 @@ impl Inner {
                 self.emit(QueueEvent::Failed {
                     id: ctx.id,
                     error: e.to_string(),
+                    kind: e.kind(),
                 });
             }
         }
@@ -425,5 +459,18 @@ impl Queue {
         let mut rx = self.inner.pending.subscribe();
         let _ = rx.wait_for(|n| *n == 0).await;
         (self.inner.ok.load(SeqCst), self.inner.failed.load(SeqCst))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_errors_are_retryable() {
+        use russh_sftp::client::error::Error as E;
+        assert!(retryable(&crate::sftp::map_err(E::Timeout)));
+        assert!(retryable(&crate::sftp::map_err(E::IO("roto".into()))));
+        assert!(!retryable(&Error::NotFound("x".into())));
     }
 }

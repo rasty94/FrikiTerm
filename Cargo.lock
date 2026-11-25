@@ -1696,6 +1696,7 @@ dependencies = [
  "friki-core",
  "friki-ssh",
  "globset",
+ "libc",
  "rusqlite",
  "russh-sftp",
  "rustls-native-certs",

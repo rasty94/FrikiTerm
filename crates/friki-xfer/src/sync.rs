@@ -29,6 +29,20 @@ pub struct SyncOptions {
     pub filters: Filters,
     /// Comparar también por tamaño (siempre) y fecha con esta tolerancia en segundos.
     pub mtime_tolerance: i64,
+    /// Máximo de borrados que puede contener el plan; si lo supera, `plan` falla.
+    pub max_deletes: Option<usize>,
+}
+
+impl Default for SyncOptions {
+    fn default() -> Self {
+        Self {
+            mode: SyncMode::Upload,
+            delete: false,
+            filters: Filters::default(),
+            mtime_tolerance: 2,
+            max_deletes: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +147,9 @@ impl Filter {
 type Tree = BTreeMap<String, Entry>;
 
 /// Recorre `root` (solo ficheros y directorios; nombres inseguros y excluidos se ignoran).
-async fn walk(fs: &dyn RemoteFs, root: &str, f: &Filter) -> Result<Tree> {
+/// Una raíz inexistente solo se tolera con `missing_ok` (la de destino): la de origen
+/// inexistente no es un árbol vacío, y con `delete` borraría todo el destino.
+async fn walk(fs: &dyn RemoteFs, root: &str, f: &Filter, missing_ok: bool) -> Result<Tree> {
     let mut out = Tree::new();
     let mut stack = vec![String::new()];
     while let Some(rel) = stack.pop() {
@@ -143,7 +159,7 @@ async fn walk(fs: &dyn RemoteFs, root: &str, f: &Filter) -> Result<Tree> {
             join(root, &rel)
         };
         let list = match fs.list(&dir).await {
-            Err(Error::NotFound(_)) if rel.is_empty() => continue,
+            Err(Error::NotFound(_)) if rel.is_empty() && missing_ok => continue,
             r => r?,
         };
         for mut e in list {
@@ -197,8 +213,9 @@ pub async fn plan(
         inc: compile(&opts.filters.include)?,
         exc: compile(&opts.filters.exclude)?,
     };
-    let l = walk(local, local_root, &f).await?;
-    let r = walk(remote, remote_root, &f).await?;
+    // En `Both` no hay origen único ni borrados: se toleran las dos.
+    let l = walk(local, local_root, &f, opts.mode != SyncMode::Upload).await?;
+    let r = walk(remote, remote_root, &f, opts.mode != SyncMode::Download).await?;
     let tol = opts.mtime_tolerance;
     let mut acts = Vec::new();
     let mut dels: Vec<(bool, Action)> = Vec::new(); // (es directorio, acción)
@@ -274,6 +291,14 @@ pub async fn plan(
                 dels.push((is_dir(d), a));
             }
         }
+    }
+    if let Some(max) = opts.max_deletes
+        && dels.len() > max
+    {
+        return Err(Error::Protocol(format!(
+            "el plan borra {} elementos, por encima del máximo permitido ({max})",
+            dels.len()
+        )));
     }
     // Ficheros primero; directorios después, del más profundo al más superficial.
     acts.extend(dels.iter().filter(|(d, _)| !d).map(|(_, a)| a.clone()));

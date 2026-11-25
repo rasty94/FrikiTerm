@@ -20,6 +20,7 @@ fn opts(mode: SyncMode, delete: bool) -> SyncOptions {
         delete,
         filters: Filters::default(),
         mtime_tolerance: 2,
+        max_deletes: None,
     }
 }
 
@@ -234,4 +235,47 @@ async fn ignora_nombres_remotos_inseguros() {
     .await
     .unwrap();
     assert_eq!(acts, vec![Action::Download { path: s("bueno") }]);
+}
+
+#[tokio::test]
+async fn origen_inexistente_es_error_y_no_borra() {
+    let a = tempfile::tempdir().unwrap();
+    put(a.path(), "x.txt", "x", 100);
+    let gone = a.path().join("no-existe");
+    let (l, r) = (LocalFs::new(a.path()), LocalFs::new(a.path()));
+    // Download con delete: el origen (remoto) no existe -> error, no DeleteLocal de todo.
+    let o = opts(SyncMode::Download, true);
+    assert!(
+        plan(
+            &l,
+            "",
+            &r,
+            gone.file_name().unwrap().to_str().unwrap(),
+            &o,
+            None
+        )
+        .await
+        .is_err()
+    );
+    // Upload: el origen es el local.
+    let o = opts(SyncMode::Upload, true);
+    assert!(plan(&l, "no-existe", &r, "", &o, None).await.is_err());
+    // Un destino inexistente sigue siendo un árbol vacío.
+    let o = opts(SyncMode::Upload, true);
+    let acts = plan(&l, "", &r, "no-existe", &o, None).await.unwrap();
+    assert!(acts.iter().any(|a| matches!(a, Action::Upload { .. })));
+}
+
+#[tokio::test]
+async fn max_deletes_limita_el_plan() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    put(b.path(), "a", "1", 100);
+    put(b.path(), "b", "1", 100);
+    let mut o = opts(SyncMode::Upload, true);
+    o.max_deletes = Some(1);
+    let (l, r) = (LocalFs::new(a.path()), LocalFs::new(b.path()));
+    let e = plan(&l, "", &r, "", &o, None).await.unwrap_err();
+    assert!(e.to_string().contains("máximo"), "{e}");
+    o.max_deletes = Some(2);
+    assert_eq!(plan(&l, "", &r, "", &o, None).await.unwrap().len(), 2);
 }

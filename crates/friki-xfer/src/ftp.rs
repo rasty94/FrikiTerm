@@ -89,7 +89,10 @@ async fn connect(opts: &FtpOptions, password: &str) -> Result<Stream> {
     s.transfer_type(TransferType::Binary)
         .await
         .map_err(map_err)?;
-    if !opts.passive {
+    if opts.passive {
+        // Conectar a la IP del servidor de control, no a la que dicte la respuesta PASV.
+        s.set_passive_nat_workaround(true);
+    } else {
         s = s.active_mode(TIMEOUT);
     }
     Ok(s)
@@ -267,7 +270,11 @@ impl RemoteFs for Ftp {
             .await
             .map_err(map_err)?;
         let t = c.retr_as_stream(path).await.map_err(map_err)?;
-        Ok(Box::new(Rd { _c: c, t }))
+        Ok(Box::new(Rd {
+            _c: c,
+            t: Some(t),
+            fin: None,
+        }))
     }
 
     async fn open_write(&self, path: &str, offset: u64) -> Result<Writer> {
@@ -302,10 +309,15 @@ impl RemoteFs for Ftp {
     }
 }
 
-/// Lector: conserva el cliente (conexión de control) mientras dura la transferencia.
+type Fin = Pin<Box<dyn Future<Output = std::result::Result<(), FtpError>> + Send>>;
+
+/// Lector: conserva el cliente (conexión de control) mientras dura la transferencia. Al
+/// llegar a EOF espera la respuesta final: un 426 (aborto del servidor) es un error, no un
+/// fichero truncado dado por bueno.
 struct Rd {
     _c: Stream,
-    t: Transfer,
+    t: Option<Transfer>,
+    fin: Option<Fin>,
 }
 
 impl AsyncRead for Rd {
@@ -314,11 +326,31 @@ impl AsyncRead for Rd {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.t).poll_read(cx, buf)
+        if self.fin.is_none() {
+            let Some(t) = self.t.as_mut() else {
+                return Poll::Ready(Ok(()));
+            };
+            let before = buf.filled().len();
+            match Pin::new(t).poll_read(cx, buf) {
+                Poll::Ready(Ok(())) if buf.filled().len() == before && buf.remaining() > 0 => {}
+                r => return r,
+            }
+            if let Some(t) = self.t.take() {
+                self.fin = Some(Box::pin(t.finish()));
+            }
+        }
+        match self.fin.as_mut() {
+            Some(f) => match f.as_mut().poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(r) => {
+                    self.fin = None;
+                    Poll::Ready(r.map_err(std::io::Error::other))
+                }
+            },
+            None => Poll::Ready(Ok(())),
+        }
     }
 }
-
-type Fin = Pin<Box<dyn Future<Output = std::result::Result<(), FtpError>> + Send>>;
 
 /// Escritor: `shutdown` cierra la conexión de datos y espera la respuesta final (226).
 struct Wr {
