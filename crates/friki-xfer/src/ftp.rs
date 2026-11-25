@@ -115,6 +115,9 @@ fn map_err(e: FtpError) -> Error {
                     let l = body.to_ascii_lowercase();
                     if l.contains("denied") || l.contains("permission") {
                         Error::PermissionDenied(body)
+                    } else if l.contains("file exists") || l.contains("already exists") {
+                        // Rechazo de `rename` sobre un destino existente (la cola lo reintenta).
+                        Error::Protocol(body)
                     } else {
                         Error::NotFound(body)
                     }

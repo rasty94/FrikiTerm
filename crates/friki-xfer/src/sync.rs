@@ -260,6 +260,14 @@ pub async fn plan(
                 .collect(),
             None => Tree::new(),
         };
+        // ponytail: como unison, se aborta antes que propagar borrados de un árbol vacío (raíz
+        // desmontada o inexistente); sin caché no hay borrados que temer.
+        if !last.is_empty() && (l.is_empty() || r.is_empty()) {
+            let lado = if l.is_empty() { "local" } else { "remota" };
+            return Err(Error::UnsafeSync(format!(
+                "la raíz {lado} no existe o está vacía y la última sincronización no lo estaba"
+            )));
+        }
         let paths: BTreeSet<&String> = l.keys().chain(r.keys()).collect();
         for p in paths {
             let path = p.clone();

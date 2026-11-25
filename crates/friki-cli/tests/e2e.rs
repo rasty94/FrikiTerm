@@ -173,11 +173,12 @@ fn sync_both_propaga_borrados_con_cache() {
     let dir = work.path().join("src");
     write(&dir.join("a.txt"), "uno");
     write(&dir.join("b.txt"), "dos");
+    write(&dir.join("k.txt"), "tres");
     let (d, r) = (s(&dir), format!("{}:{}", e.host, e.tag));
 
     e.ok(&["sync", &d, &r, "--both"]);
     let ls = e.exec(&format!("ls {}", e.tag));
-    assert_eq!(String::from_utf8_lossy(&ls.stdout), "a.txt\nb.txt\n");
+    assert_eq!(String::from_utf8_lossy(&ls.stdout), "a.txt\nb.txt\nk.txt\n");
 
     // Borrado en el remoto: se borra en local (sin la caché se volvería a subir).
     e.exec(&format!("rm {}/b.txt", e.tag));
@@ -185,11 +186,12 @@ fn sync_both_propaga_borrados_con_cache() {
     assert!(!dir.join("b.txt").exists());
     assert!(dir.join("a.txt").exists());
 
-    // Borrado en local: se borra en el remoto.
+    // Borrado en local: se borra en el remoto. `k.txt` evita vaciar la raíz entera, que
+    // `sync --both` rechaza (igual que una raíz desmontada).
     std::fs::remove_file(dir.join("a.txt")).expect("borrar");
     e.ok(&["sync", &d, &r, "--both", "--delete", "--yes"]);
     let ls = e.exec(&format!("ls {}", e.tag));
-    assert_eq!(String::from_utf8_lossy(&ls.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&ls.stdout), "k.txt\n");
 
     // Un fichero nuevo en el remoto se baja, no se toma por borrado.
     e.exec(&format!("echo hola > {}/n.txt", e.tag));

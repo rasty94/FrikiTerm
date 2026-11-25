@@ -299,3 +299,121 @@ async fn failed_lleva_el_tipo_de_error() {
         }
     )));
 }
+
+/// Fallo simulado de `rename` en el lado remoto.
+#[derive(Clone, Copy)]
+enum Fallo {
+    /// Corte de red o E/S: no es un rechazo del servidor.
+    Red,
+    /// Como SFTP: rechaza el `rename` si el destino ya existe.
+    RechazaSiExiste,
+}
+
+/// Remoto local con `rename` a medida y `atomic_writes` configurable.
+struct Remoto {
+    inner: LocalFs,
+    direct: bool,
+    fallo: Fallo,
+    renames: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl RemoteFs for Remoto {
+    async fn list(&self, p: &str) -> Result<Vec<Entry>> {
+        self.inner.list(p).await
+    }
+    async fn stat(&self, p: &str) -> Result<Option<Entry>> {
+        self.inner.stat(p).await
+    }
+    async fn mkdir(&self, p: &str) -> Result<()> {
+        self.inner.mkdir(p).await
+    }
+    async fn remove_file(&self, p: &str) -> Result<()> {
+        self.inner.remove_file(p).await
+    }
+    async fn remove_dir(&self, p: &str) -> Result<()> {
+        self.inner.remove_dir(p).await
+    }
+    async fn rename(&self, a: &str, b: &str) -> Result<()> {
+        self.renames.fetch_add(1, SeqCst);
+        match self.fallo {
+            Fallo::Red => Err(Error::Io(std::io::Error::other("corte"))),
+            Fallo::RechazaSiExiste if self.inner.stat(b).await?.is_some() => {
+                Err(Error::Protocol("ya existe".into()))
+            }
+            _ => self.inner.rename(a, b).await,
+        }
+    }
+    async fn open_read(&self, p: &str, o: u64) -> Result<Reader> {
+        self.inner.open_read(p, o).await
+    }
+    async fn open_write(&self, p: &str, o: u64) -> Result<Writer> {
+        self.inner.open_write(p, o).await
+    }
+    async fn set_mtime(&self, p: &str, m: i64) -> Result<()> {
+        self.inner.set_mtime(p, m).await
+    }
+    fn atomic_writes(&self) -> bool {
+        self.direct
+    }
+    fn label(&self) -> String {
+        "remoto".into()
+    }
+}
+
+fn remoto(p: &Path, direct: bool, fallo: Fallo) -> Arc<Remoto> {
+    Arc::new(Remoto {
+        inner: LocalFs::new(p),
+        direct,
+        fallo,
+        renames: AtomicU32::new(0),
+    })
+}
+
+fn sin_reintentos() -> QueueOptions {
+    QueueOptions {
+        retries: 0,
+        ..QueueOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn destino_atomico_escribe_directo_sin_friki_part_ni_rename() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("f"), data(1000)).unwrap();
+    std::fs::write(b.path().join("f"), b"viejo").unwrap();
+    let r = remoto(b.path(), true, Fallo::Red);
+    let (q, _rx) = queue(fs(a.path()), r.clone(), sin_reintentos());
+    q.push(job("f", "f", false));
+    assert_eq!(q.wait().await, (1, 0));
+    assert_eq!(std::fs::read(b.path().join("f")).unwrap(), data(1000));
+    assert!(!b.path().join("f.friki-part").exists());
+    assert_eq!(r.renames.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn fallo_de_red_en_rename_no_borra_el_destino() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("f"), data(1000)).unwrap();
+    std::fs::write(b.path().join("f"), b"viejo").unwrap();
+    let r = remoto(b.path(), false, Fallo::Red);
+    let (q, _rx) = queue(fs(a.path()), r.clone(), sin_reintentos());
+    q.push(job("f", "f", false));
+    assert_eq!(q.wait().await, (0, 1));
+    assert_eq!(std::fs::read(b.path().join("f")).unwrap(), b"viejo");
+    assert_eq!(r.renames.load(SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rechazo_del_servidor_con_destino_existente_lo_reemplaza() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(a.path().join("f"), data(1000)).unwrap();
+    std::fs::write(b.path().join("f"), b"viejo").unwrap();
+    let r = remoto(b.path(), false, Fallo::RechazaSiExiste);
+    let (q, _rx) = queue(fs(a.path()), r.clone(), sin_reintentos());
+    q.push(job("f", "f", false));
+    assert_eq!(q.wait().await, (1, 0));
+    assert_eq!(std::fs::read(b.path().join("f")).unwrap(), data(1000));
+    assert!(!b.path().join("f.friki-part").exists());
+    assert_eq!(r.renames.load(SeqCst), 2);
+}

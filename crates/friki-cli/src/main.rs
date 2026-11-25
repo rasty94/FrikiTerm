@@ -131,6 +131,8 @@ fn xfer_code(e: &friki_xfer::Error) -> i32 {
         friki_xfer::Error::Ssh(e) => ssh_code(e),
         friki_xfer::Error::Io(e) if matches!(e.kind(), NotFound | PermissionDenied) => EXIT_OTHER,
         friki_xfer::Error::Io(_) => EXIT_NETWORK,
+        // Refusal de seguridad de `sync --both` (como el de `--yes`): uso incorrecto.
+        friki_xfer::Error::UnsafeSync(_) => EXIT_USAGE,
         _ => EXIT_OTHER,
     }
 }

@@ -337,3 +337,35 @@ async fn both_con_cache_propaga_borrados() {
             .all(|a| !matches!(a, Action::DeleteLocal { .. } | Action::DeleteRemote { .. }))
     );
 }
+
+#[tokio::test]
+async fn both_con_cache_aborta_si_una_raiz_falta_o_se_vacia() {
+    let (a, b, d) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    put(a.path(), "x.txt", "x", 100);
+    put(b.path(), "x.txt", "x", 100);
+    let (lfs, rfs) = (LocalFs::new(a.path()), LocalFs::new(b.path()));
+    let cache = DirCache::open(&d.path().join("c.db")).unwrap();
+    let last = friki_xfer::sync::snapshot(&lfs, "").await.unwrap();
+    cache.store(&cache_key(&lfs, "", &rfs, ""), &last).unwrap();
+    let o = opts(SyncMode::Both, true);
+    assert!(plan(&lfs, "", &rfs, "", &o, Some(&cache)).await.is_ok());
+
+    // Raíz local desaparecida (disco desmontado): no debe planificar borrados remotos.
+    std::fs::remove_dir_all(a.path()).unwrap();
+    let e = plan(&lfs, "", &rfs, "", &o, Some(&cache))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, friki_xfer::Error::UnsafeSync(_)), "{e}");
+
+    // Raíz remota vaciada: lo mismo, por el otro lado.
+    put(a.path(), "x.txt", "x", 100);
+    std::fs::remove_file(b.path().join("x.txt")).unwrap();
+    let e = plan(&lfs, "", &rfs, "", &o, Some(&cache))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, friki_xfer::Error::UnsafeSync(_)), "{e}");
+}
