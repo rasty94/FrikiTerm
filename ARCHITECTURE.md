@@ -69,4 +69,4 @@ todos ─► friki-core (config, transport)
 - `friki_core::transport`: `StreamWriter`/`StreamReader`/`Stream`, flujo común de SSH, Telnet, RAW, serie y PTY. La TUI trabaja solo con esto.
 - `SessionConfig` gana `protocol`, `serial`, `local_command`, `forwards`, `forward_agent`, `require_strict_kex` (todos con valor por defecto: los TOML antiguos siguen cargando).
 - `friki-ssh`: `open_shell_stream`, `open_subsystem`, `open_exec_stream` (`ChannelStream`), `start_forward`/`stop_forward`; ProxyJump dentro de `connect`.
-- Crates nuevos: `friki-xfer` (trait `RemoteFs`, SFTP, SCP, FTP/FTPS, `LocalFs`, cola, sincronización, caché SQLite), `friki-telnet`, `friki-serial`, `friki-pty`, `friki-zmodem`, `friki-script` (Rhai con `ScriptHost`).
+- Crates nuevos: `friki-xfer` (trait `RemoteFs`, SFTP, SCP, FTP/FTPS, `LocalFs`, cola, sincronización, caché SQLite), `friki-telnet`, `friki-serial`, `friki-pty`, `friki-zmodem`, `friki-script` (Rhai con `ScriptHost`), `friki-tn3270` (emulador 3270 sin E/S de interfaz; panel en `friki-tui` tras la feature `tn3270`).

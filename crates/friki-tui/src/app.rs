@@ -240,7 +240,10 @@ async fn open_stream(
     let (cols, rows) = size;
     let stream = match session.protocol {
         Protocol::Ssh => return open_ssh(ui, session, known_hosts, size, &term).await,
-        Protocol::Telnet | Protocol::TelnetTls | Protocol::Raw => {
+        Protocol::Tn3270 if !cfg!(feature = "tn3270") => {
+            return Err(anyhow::anyhow!("TN3270 no incluido en esta compilación"));
+        }
+        Protocol::Telnet | Protocol::TelnetTls | Protocol::Raw | Protocol::Tn3270 => {
             let opts = telnet_options(session, &term);
             friki_telnet::connect(&session.host, session.port, &opts, cols, rows).await
         }
@@ -415,6 +418,9 @@ struct Pane {
     zm_tail: Vec<u8>,
     /// Un `connect` de script a la espera de que el panel abra.
     pending_connect: Option<oneshot::Sender<Result<(), String>>>,
+    /// Sesión TN3270 (solo protocolo `tn3270`); pinta en `emu`.
+    #[cfg(feature = "tn3270")]
+    tn: Option<crate::tn3270::TnPane>,
 }
 
 impl Pane {
@@ -443,6 +449,8 @@ impl Pane {
             zm_quiet: None,
             zm_tail: vec![],
             pending_connect: None,
+            #[cfg(feature = "tn3270")]
+            tn: None,
         }
     }
 
@@ -820,6 +828,18 @@ impl<'a> App<'a> {
             }
             Msg::Opened(id, o) => self.opened(id, *o).await,
             Msg::Failed(id, e) => self.fail(id, e),
+            #[cfg(feature = "tn3270")]
+            Msg::Stream(id, StreamEvent::Data(d))
+                if self.panes.get(&id).is_some_and(|p| p.tn.is_some()) =>
+            {
+                let reply = self
+                    .panes
+                    .get_mut(&id)
+                    .and_then(|p| p.tn.as_mut().map(|tn| tn.feed(&d, p.emu.as_mut())));
+                if let Some(r) = reply.filter(|r| !r.is_empty()) {
+                    self.send(id, &r).await;
+                }
+            }
             Msg::Stream(id, ev) => self.stream_event(id, ev),
             Msg::ReaderEnd(id) => self.reader_end(id, None),
             Msg::Xfer(id, m) => self.xfer_msg(id, m),
@@ -857,6 +877,10 @@ impl<'a> App<'a> {
             out.resize(cols, rows).await;
         }
         p.emu = Some(emu);
+        #[cfg(feature = "tn3270")]
+        if p.session.protocol == Protocol::Tn3270 {
+            p.tn = Some(crate::tn3270::TnPane::new());
+        }
         p.theme = theme;
         p.forwards = o.forwards;
         p.cipher = o
@@ -1227,6 +1251,17 @@ impl<'a> App<'a> {
                 }
             }
             State::Live => {
+                #[cfg(feature = "tn3270")]
+                if let Some(tn) = p.tn.as_mut() {
+                    let raw = p
+                        .emu
+                        .as_ref()
+                        .map(|e| e.encode_key(key, mods))
+                        .unwrap_or_default();
+                    let bytes = tn.key(&raw, p.emu.as_mut());
+                    self.send(id, &bytes).await;
+                    return;
+                }
                 let bytes = p
                     .emu
                     .as_mut()

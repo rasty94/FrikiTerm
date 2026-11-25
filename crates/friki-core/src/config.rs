@@ -85,6 +85,8 @@ pub enum Protocol {
     TelnetTls,
     /// TCP sin negociación.
     Raw,
+    /// TN3270 (IBM 3270) sobre TCP: negociación y flujo los hace `friki-tn3270`.
+    Tn3270,
     Serial,
     LocalShell,
 }
