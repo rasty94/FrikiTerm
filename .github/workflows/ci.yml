@@ -38,7 +38,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       - name: Pruebas de integración (sshd y telnetd de pruebas)
         if: matrix.os == 'ubuntu-latest'

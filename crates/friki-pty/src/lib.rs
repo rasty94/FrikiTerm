@@ -174,13 +174,19 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Lee hasta el evento final; devuelve (texto, código).
-    async fn collect(r: &mut dyn StreamReader) -> (String, Option<i32>) {
+    /// Lee hasta el evento final; devuelve (texto, código). Contesta a la petición de
+    /// posición del cursor como haría el emulador: ConPTY no arranca el hijo sin respuesta.
+    async fn collect(w: &dyn StreamWriter, r: &mut dyn StreamReader) -> (String, Option<i32>) {
         let mut out = Vec::new();
         let fin = tokio::time::timeout(Duration::from_secs(15), async {
             while let Some(ev) = r.next_event().await {
                 match ev {
-                    StreamEvent::Data(d) => out.extend(d),
+                    StreamEvent::Data(d) => {
+                        if d.windows(4).any(|x| x == b"\x1b[6n") {
+                            let _ = w.write(b"\x1b[1;1R").await;
+                        }
+                        out.extend(d);
+                    }
                     StreamEvent::Exit(c) => return Some(c),
                     _ => return None,
                 }
@@ -194,16 +200,16 @@ mod tests {
 
     #[tokio::test]
     async fn echo_then_exit_0() {
-        let (_w, mut r) = spawn(Some("echo hola"), "xterm", 80, 24).await.unwrap();
-        let (text, code) = collect(&mut *r).await;
+        let (w, mut r) = spawn(Some("echo hola"), "xterm", 80, 24).await.unwrap();
+        let (text, code) = collect(&*w, &mut *r).await;
         assert!(text.contains("hola"), "{text:?}");
         assert_eq!(code, Some(0));
     }
 
     #[tokio::test]
     async fn exit_code_is_reported() {
-        let (_w, mut r) = spawn(Some("exit 3"), "xterm", 80, 24).await.unwrap();
-        assert_eq!(collect(&mut *r).await.1, Some(3));
+        let (w, mut r) = spawn(Some("exit 3"), "xterm", 80, 24).await.unwrap();
+        assert_eq!(collect(&*w, &mut *r).await.1, Some(3));
     }
 
     #[cfg(unix)]
@@ -219,7 +225,7 @@ mod tests {
         .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         w.resize(120, 40).await.unwrap();
-        let (text, code) = collect(&mut *r).await;
+        let (text, code) = collect(&*w, &mut *r).await;
         assert!(text.contains("vt100"), "{text:?}");
         assert!(text.contains("30 100"), "{text:?}");
         assert!(text.contains("40 120"), "{text:?}");
@@ -249,7 +255,7 @@ mod tests {
             .await
             .unwrap();
         w.write(b"abc\n").await.unwrap();
-        let (text, code) = collect(&mut *r).await;
+        let (text, code) = collect(&*w, &mut *r).await;
         assert!(text.contains("got:abc"), "{text:?}");
         assert_eq!(code, Some(0));
     }
