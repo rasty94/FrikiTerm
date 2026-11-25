@@ -1,7 +1,8 @@
 //! Telnet (RFC 854 y opciones NAWS 1073, TTYPE 1091, SGA 858, ECHO 857, LFLOW 1372),
 //! Telnet sobre TLS y TCP en crudo (TODO.md §4 y §9).
 
-mod proto;
+#[doc(hidden)]
+pub mod proto; // pub solo para los objetivos de fuzzing
 
 use std::io;
 use std::sync::Arc;
