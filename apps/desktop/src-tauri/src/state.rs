@@ -56,9 +56,11 @@ pub struct SftpHandle {
 }
 
 /// Cola de transferencias de un (sftp, raíz local). `seq` va en los `JobId`.
+/// `pending` cuenta trabajos sin evento final: al llegar a 0 la cola se libera.
 pub struct QueueHandle {
     pub seq: u64,
     pub queue: Queue,
+    pub pending: usize,
 }
 
 /// Mapa id -> recurso con ids secuenciales.
@@ -91,6 +93,18 @@ impl<T> Registry<T> {
     /// Usa el recurso sin sacarlo del mapa.
     pub fn with<R>(&self, id: u64, f: impl FnOnce(&T) -> R) -> Option<R> {
         lock(&self.map).get(&id).map(f)
+    }
+    pub fn any(&self, f: impl Fn(&T) -> bool) -> bool {
+        lock(&self.map).values().any(f)
+    }
+    /// Quita los recursos que cumplen `f` y devuelve sus ids.
+    pub fn remove_where(&self, f: impl Fn(&T) -> bool) -> Vec<u64> {
+        let mut map = lock(&self.map);
+        let ids: Vec<u64> = map.iter().filter(|(_, v)| f(v)).map(|(k, _)| *k).collect();
+        for id in &ids {
+            map.remove(id);
+        }
+        ids
     }
 }
 
@@ -131,16 +145,46 @@ impl Prompts {
             .map_err(|_| CmdError::invalid("el prompt ya no espera respuesta"))
     }
 
-    /// Espera la respuesta; `None` = plazo vencido o cancelado (rechazo). Libera el id.
+    /// Espera la respuesta; `None` = plazo vencido o cancelado (rechazo). Libera el id aunque
+    /// la espera se cancele (la future se suelta).
     pub async fn wait(
         &self,
         id: PromptId,
         rx: oneshot::Receiver<PromptAnswer>,
         dur: Duration,
     ) -> Option<PromptAnswer> {
-        let r = tokio::time::timeout(dur, rx).await;
-        lock(&self.pending).remove(&id);
-        r.ok().and_then(Result::ok)
+        let _release = Release { prompts: self, id };
+        tokio::time::timeout(dur, rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+    }
+}
+
+struct Release<'a> {
+    prompts: &'a Prompts,
+    id: PromptId,
+}
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        lock(&self.prompts.pending).remove(&self.id);
+    }
+}
+
+/// Vigila un prompt mientras se espera: si termina sin respuesta, avisa a la UI para cerrar el modal.
+struct PromptSlot<'a> {
+    state: &'a AppState,
+    id: PromptId,
+    answered: bool,
+}
+
+impl Drop for PromptSlot<'_> {
+    fn drop(&mut self) {
+        lock(&self.state.prompts.pending).remove(&self.id);
+        if !self.answered {
+            self.state.emit(AppEvent::PromptDone { id: self.id });
+        }
     }
 }
 
@@ -155,6 +199,8 @@ pub struct AppState {
     /// Redirecciones activas por conexión: `(estado, handle de friki-ssh)`.
     pub fwds: Arc<Mutex<ForwardMap>>,
     pub prompts: Arc<Prompts>,
+    /// Secuencia de colas (`QueueHandle::seq`): monótona aunque se liberen colas.
+    pub queue_seq: Arc<AtomicU64>,
     events: Arc<Mutex<Option<Channel<AppEvent>>>>,
 }
 
@@ -180,11 +226,17 @@ impl AppState {
     /// Registra, avisa a la UI y espera la respuesta (`None` = rechazo).
     pub async fn ask(&self, prompt: Prompt, dur: Duration) -> Option<PromptAnswer> {
         let (id, rx) = self.prompts.register(prompt.kind());
+        let mut slot = PromptSlot {
+            state: self,
+            id,
+            answered: false,
+        };
         if !self.emit(AppEvent::Prompt { id, prompt }) {
-            lock(&self.prompts.pending).remove(&id);
             return None;
         }
-        self.prompts.wait(id, rx, dur).await
+        let answer = self.prompts.wait(id, rx, dur).await;
+        slot.answered = answer.is_some();
+        answer
     }
 }
 
@@ -248,6 +300,34 @@ mod tests {
             p.answer(id, hostkey()).unwrap_err().kind,
             ErrorKind::Invalid
         );
+    }
+
+    #[tokio::test]
+    async fn ask_cancelado_libera_id_y_avisa_a_la_ui() {
+        let state = AppState::default();
+        let (tx, mut ui) = mpsc::unbounded_channel::<String>();
+        state.subscribe(Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(j) = body {
+                let _ = tx.send(j);
+            }
+            Ok(())
+        }));
+        let p = Prompt::Passphrase {
+            key_path: "/k".into(),
+        };
+        // La future se suelta por el plazo externo, como si term_close la cancelara.
+        let fut = state.ask(p, Duration::from_secs(60));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), fut)
+                .await
+                .is_err()
+        );
+        assert!(lock(&state.prompts.pending).is_empty());
+        let shown: serde_json::Value = serde_json::from_str(&ui.recv().await.unwrap()).unwrap();
+        let done: serde_json::Value = serde_json::from_str(&ui.recv().await.unwrap()).unwrap();
+        assert_eq!(shown["type"], "prompt");
+        assert_eq!(done["type"], "promptDone");
+        assert_eq!(done["id"], shown["id"]);
     }
 
     #[test]

@@ -53,7 +53,8 @@ async fn prompter_maps_password_and_passphrase() {
         vec![
             Prompt::Password {
                 user: "u".into(),
-                host: "h".into()
+                host: "h".into(),
+                port: 0
             },
             Prompt::Passphrase {
                 key_path: "/k/id".into()

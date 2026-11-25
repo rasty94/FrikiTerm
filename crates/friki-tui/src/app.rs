@@ -139,7 +139,7 @@ impl Asker for UiChannel {
                 fingerprint,
                 previous_fingerprint,
             } => Dialog::changed_host(&host, port, &algorithm, &fingerprint, &previous_fingerprint),
-            Prompt::Password { user, host } => Dialog::password(&user, &host),
+            Prompt::Password { user, host, .. } => Dialog::password(&user, &host),
             Prompt::Passphrase { key_path } => Dialog::passphrase(&key_path),
             Prompt::KbdInteractive {
                 host,

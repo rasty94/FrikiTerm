@@ -28,6 +28,7 @@ struct State<'a> {
     handle: &'a mut Handle<Handler>,
     user: &'a str,
     host: &'a str,
+    port: u16,
     prompter: &'a dyn AuthPrompter,
     rejected: &'a AtomicBool,
     warnings: &'a mut Vec<String>,
@@ -94,6 +95,7 @@ pub(crate) async fn authenticate(
         handle,
         user,
         host: &cfg.host,
+        port: cfg.port,
         prompter,
         rejected,
         warnings,
@@ -147,7 +149,7 @@ pub(crate) async fn authenticate(
 /// La contraseña se repite mientras quede presupuesto y el usuario la dé.
 async fn try_password(st: &mut State<'_>) -> Result<bool> {
     while st.offers(MethodKind::Password) && st.spend() {
-        let Some(pw) = st.prompter.password(st.user, st.host).await else {
+        let Some(pw) = st.prompter.password_on(st.user, st.host, st.port).await else {
             return Ok(false);
         };
         // `pw` (Zeroizing) se borra al salir; russh recibe una copia suya.

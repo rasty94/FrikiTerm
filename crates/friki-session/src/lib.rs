@@ -36,6 +36,8 @@ pub enum Prompt {
     Password {
         user: String,
         host: String,
+        /// Puerto del servidor que pide la contraseña (puede ser un salto de ProxyJump).
+        port: u16,
     },
     Passphrase {
         key_path: String,
@@ -94,9 +96,15 @@ impl<A: Asker> Prompter<A> {
 #[async_trait::async_trait]
 impl<A: Asker> AuthPrompter for Prompter<A> {
     async fn password(&self, user: &str, host: &str) -> Option<Zeroizing<String>> {
+        // ponytail: friki-ssh siempre llama a `password_on`; sin puerto solo llega 0.
+        self.password_on(user, host, 0).await
+    }
+
+    async fn password_on(&self, user: &str, host: &str, port: u16) -> Option<Zeroizing<String>> {
         self.secret(Prompt::Password {
             user: user.into(),
             host: host.into(),
+            port,
         })
         .await
     }

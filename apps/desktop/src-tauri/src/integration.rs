@@ -143,6 +143,60 @@ async fn terminal_ssh_rapida() {
     assert!(j.contains(r#""type":"closed""#), "{j}");
 }
 
+/// Cerrar una terminal cierra su conexión, salvo que SFTP la siga usando (entonces vive hasta `conn_close`).
+#[tokio::test]
+async fn terminal_cierra_su_conexion_salvo_sftp() {
+    let Some(e) = env() else { return };
+    let state = AppState::default();
+    let _ui = fake_ui(&state);
+    let (otx, _orx) = mpsc::unbounded_channel::<InvokeResponseBody>();
+    let output = Channel::<InvokeResponseBody>::new(move |b| {
+        let _ = otx.send(b);
+        Ok(())
+    });
+    let (etx, mut erx) = mpsc::unbounded_channel::<InvokeResponseBody>();
+    let events = Channel::<TermEvent>::new(move |b| {
+        let _ = etx.send(b);
+        Ok(())
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let id = term::open_term(
+        &state,
+        dir.path(),
+        TermTarget::Quick {
+            spec: Box::new(cfg(&e)),
+        },
+        (80, 24),
+        output,
+        events,
+    )
+    .unwrap();
+    let Some(InvokeResponseBody::Json(j)) = erx.recv().await else {
+        panic!("sin evento opened")
+    };
+    let conn_id: u64 = serde_json::from_str::<Value>(&j).unwrap()["conn"]
+        .as_u64()
+        .expect("la terminal SSH debe devolver su conexión");
+    assert!(state.conns.contains(conn_id));
+
+    // SFTP sobre la misma conexión: al cerrar la terminal la conexión sigue viva.
+    let sftp = crate::cmd::sftp::sftp_open_op(&state, conn_id)
+        .await
+        .unwrap();
+    term::close_term(&state, id);
+    let Some(InvokeResponseBody::Json(j)) = erx.recv().await else {
+        panic!("sin evento final")
+    };
+    assert!(j.contains(r#""type":"closed""#), "{j}");
+    assert!(state.conns.contains(conn_id));
+    assert!(state.sftps.contains(sftp));
+
+    // Cerrar la conexión se lleva también su SFTP.
+    term::close_conn(&state, conn_id, None).await;
+    assert!(!state.conns.contains(conn_id));
+    assert!(!state.sftps.contains(sftp));
+}
+
 fn state_resize(state: &AppState, id: u64) {
     // `term_resize` valida y envía `TermCmd::Resize`; aquí basta el canal directo.
     state

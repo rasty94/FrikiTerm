@@ -105,7 +105,7 @@ export type Prompt =
       fingerprint: string;
       previousFingerprint: string;
     }
-  | { kind: "password"; user: string; host: string }
+  | { kind: "password"; user: string; host: string; port: number }
   | { kind: "passphrase"; keyPath: string }
   | { kind: "kbdInteractive"; host: string; name: string; instructions: string; prompts: KbdPrompt[] };
 
@@ -136,7 +136,8 @@ export type AppEvent =
   | { type: "prompt"; id: PromptId; prompt: Prompt }
   | { type: "transfer"; sftp: SftpId; ev: TransferEvent }
   | { type: "forward"; conn: ConnId; status: ForwardStatus }
-  | { type: "connClosed"; conn: ConnId; reason: string | null };
+  | { type: "connClosed"; conn: ConnId; reason: string | null }
+  | { type: "promptDone"; id: PromptId };
 
 // ---- Terminal ----
 
