@@ -288,7 +288,7 @@ pub struct AppConfig {
     pub prefix: KeyChord,
     /// Acción → tecla tras el prefijo. Acciones: `quit`, `help`, `new-tab`, `close-pane`,
     /// `next-tab`, `prev-tab`, `split-horizontal`, `split-vertical`, `focus-next`,
-    /// `focus-prev`, `scroll-up`, `scroll-down`, `search`, `copy-mode`, `sessions`, `rename-tab`.
+    /// `focus-prev`, `scroll-up`, `scroll-down`, `search`, `copy-mode`, `sessions`, `rename-tab`, `zmodem-send`, `run-script`.
     pub bindings: std::collections::BTreeMap<String, KeyChord>,
     /// Perfil de los destinos ad hoc (`user@host`), que no tienen fichero de sesión.
     pub default_terminal: TerminalProfile,
@@ -316,6 +316,8 @@ impl Default for AppConfig {
                 b("copy-mode", "["),
                 b("sessions", "s"),
                 b("rename-tab", ","),
+                b("zmodem-send", "z"),
+                b("run-script", "r"),
             ]
             .into_iter()
             .collect(),
@@ -970,10 +972,10 @@ Host late
     fn app_config_partial_keeps_default_bindings() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("config.toml");
-        std::fs::write(&p, "[bindings]\nquit = \"z\"\n").unwrap();
+        std::fs::write(&p, "[bindings]\nquit = \"w\"\n").unwrap();
         let got = load_app_config(&p).unwrap();
         let def = AppConfig::default();
-        assert_eq!(got.bindings.get("quit").map(String::as_str), Some("z"));
+        assert_eq!(got.bindings.get("quit").map(String::as_str), Some("w"));
         assert_eq!(got.bindings.len(), def.bindings.len());
         assert_eq!(got.bindings.get("help"), def.bindings.get("help"));
         assert_eq!(got.prefix, def.prefix);

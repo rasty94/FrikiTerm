@@ -61,6 +61,8 @@ pub struct StatusInfo<'a> {
     pub legacy: bool,
     /// Problema con el registro de sesión (no se abre o dejó de escribir).
     pub log_warn: Option<&'a str>,
+    /// Hay un script en ejecución en el panel.
+    pub script: bool,
 }
 
 pub fn status_line(info: &StatusInfo, right: &str, width: u16) -> Line<'static> {
@@ -81,6 +83,15 @@ pub fn status_line(info: &StatusInfo, right: &str, width: u16) -> Line<'static> 
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if info.script {
+        spans.push(Span::styled(
+            " SCRIPT ",
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -233,6 +244,7 @@ mod tests {
             forwards: "L 127.0.0.1:1>x:2",
             legacy: true,
             log_warn: Some("sin registro"),
+            script: true,
         };
         let line: String = status_line(&info, " ctrl+] q salir ", 120)
             .spans
@@ -243,6 +255,7 @@ mod tests {
         assert!(line.contains("ctrl+] q salir"));
         assert!(line.contains("chacha20-poly1305") && line.contains("LEGACY"));
         assert!(line.contains("sin registro") && line.contains("L 127.0.0.1:1>x:2"));
+        assert!(line.contains("SCRIPT"));
     }
 
     #[test]

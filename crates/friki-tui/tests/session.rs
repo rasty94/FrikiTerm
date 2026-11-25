@@ -250,6 +250,8 @@ where
         known_hosts,
         logs_dir: dir.join("logs"),
         sessions_dir,
+        downloads_dir: dir.join("downloads"),
+        scripts_dir: dir.join("scripts"),
     };
     let shared = Shared::new();
     let mut tui = Terminal::new(shared.clone()).expect("terminal");
@@ -491,4 +493,93 @@ async fn panel_local_shell_termina_con_su_codigo() {
     assert_eq!(res.expect("sesión"), 4);
     let text = screen.text();
     assert!(text.contains("hola"), "{text}");
+}
+
+/// Directorio de pruebas de `drive` (sin sesiones extra): ver `run_tui`.
+fn test_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("friki-tui-test-{}-0-0", std::process::id()))
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn busqueda_en_un_panel_encuentra_la_salida() {
+    let Some(e) = env() else { return };
+    let (res, _) = drive(&e, &[], true, |keys, sc| async move {
+        wait_for("conectado", || sc.text().contains("conectado")).await;
+        // La orden escrita no contiene "hola": solo la salida coincide.
+        keys.typed("printf 'ho%sa\\n' l\n");
+        wait_for("salida", || sc.text().lines().any(|l| l.trim() == "hola")).await;
+        keys.prefixed('/');
+        keys.typed("hola");
+        wait_for("una coincidencia", || sc.text().contains("/hola  1/1")).await;
+        keys.send(key(KeyCode::Esc));
+        wait_for("búsqueda cerrada", || !sc.text().contains("/hola  1/1")).await;
+        keys.prefixed('q');
+    })
+    .await;
+    assert_eq!(res.expect("sesión"), 0);
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn un_script_envia_y_espera_la_respuesta() {
+    let Some(e) = env() else { return };
+    let (res, _) = drive(&e, &[], true, |keys, sc| async move {
+        wait_for("conectado", || sc.text().contains("conectado")).await;
+        let scripts = test_dir().join("scripts");
+        std::fs::create_dir_all(&scripts).expect("dir de scripts");
+        std::fs::write(
+            scripts.join("ok.rhai"),
+            "crt.Screen.Send(\"echo friki-$((40+2))\\n\");\n\
+             if !crt.Screen.WaitForString(\"friki-42\", 10) { crt.Quit(2); }\n\
+             crt.Dialog.MessageBox(\"script-listo\");\n",
+        )
+        .expect("script");
+        keys.prefixed('r');
+        wait_for("selector de scripts", || {
+            sc.text().contains("Ejecutar script")
+        })
+        .await;
+        keys.send(key(KeyCode::Enter)); // un solo script: el campo ya trae su nombre
+        wait_for("fin del script", || sc.text().contains("script-listo")).await;
+        assert!(sc.text().contains("friki-42"));
+        keys.prefixed('q');
+    })
+    .await;
+    assert_eq!(res.expect("sesión"), 0);
+}
+
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas con lrzsz"]
+async fn recibe_un_fichero_por_zmodem_de_extremo_a_extremo() {
+    let Some(e) = env() else { return };
+    let expected: String = (1..=20000).map(|i| format!("{i}\n")).collect();
+    let downloads = test_dir().join("downloads");
+    let _ = std::fs::remove_dir_all(&downloads);
+    let (res, _) = drive(&e, &[], true, |keys, sc| async move {
+        wait_for("conectado", || sc.text().contains("conectado")).await;
+        keys.typed("seq 1 20000 > /tmp/zf.txt\n");
+        keys.typed("command -v sz >/dev/null && sz /tmp/zf.txt || echo SZ-FALTA\n");
+        wait_for("petición Zmodem o falta de sz", || {
+            let t = sc.text();
+            t.contains("Recibir ficheros por Zmodem") || t.lines().any(|l| l.trim() == "SZ-FALTA")
+        })
+        .await;
+        if sc.text().contains("Recibir ficheros por Zmodem") {
+            keys.typed("s");
+            wait_for("transferencia terminada", || {
+                sc.text().contains("Recibidos 1 fichero")
+            })
+            .await;
+            keys.send(key(KeyCode::Enter));
+        } else {
+            eprintln!("SALTADA (no ejecutada): sz no está en el contenedor");
+        }
+        keys.prefixed('q');
+    })
+    .await;
+    assert_eq!(res.expect("sesión"), 0);
+    if let Ok(got) = std::fs::read_to_string(downloads.join("zf.txt")) {
+        assert_eq!(got, expected);
+    }
 }

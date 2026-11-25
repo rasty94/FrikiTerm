@@ -19,9 +19,11 @@ mod keys;
 mod layout;
 mod picker;
 mod render;
+mod script_host;
 mod search;
 mod target;
 mod theme;
+mod xfer;
 
 use std::io::{Stdout, stdout};
 use std::path::{Path, PathBuf};
@@ -54,6 +56,10 @@ pub struct Paths {
     pub logs_dir: PathBuf,
     /// Sesiones guardadas que ofrece el selector (`*.toml`).
     pub sessions_dir: PathBuf,
+    /// Destino de las recepciones Zmodem.
+    pub downloads_dir: PathBuf,
+    /// Scripts `.rhai`: el selector los ofrece y es el único sitio que pueden leer/escribir.
+    pub scripts_dir: PathBuf,
 }
 
 impl Paths {
@@ -63,6 +69,10 @@ impl Paths {
             known_hosts: friki_core::paths::known_hosts_file(),
             logs_dir: friki_core::paths::logs_dir(),
             sessions_dir: friki_core::paths::sessions_dir(),
+            downloads_dir: directories::UserDirs::new()
+                .and_then(|d| d.download_dir().map(Path::to_path_buf))
+                .unwrap_or_else(|| friki_core::paths::config_dir().join("downloads")),
+            scripts_dir: friki_core::paths::config_dir().join("scripts"),
         }
     }
 }
@@ -126,12 +136,13 @@ async fn run_term(
 ) -> anyhow::Result<i32> {
     let _guard = TermGuard::enter()?;
     let mut tui: Tui = Terminal::new(CrosstermBackend::new(stdout()))?;
-    run_with(
+    run_with_host(
         &mut tui,
         EventStream::new(),
         initial,
         &paths,
         exit_with_last,
+        Box::new(stdout()),
     )
     .await
 }
@@ -150,7 +161,33 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
-    app::run_loop(tui, events, initial, paths, exit_with_last).await
+    run_with_host(
+        tui,
+        events,
+        initial,
+        paths,
+        exit_with_last,
+        Box::new(std::io::sink()),
+    )
+    .await
+}
+
+/// Como `run_with`, con la salida de la terminal anfitriona (`host`): ahí se escriben las
+/// secuencias OSC 52 del modo copia. `run` usa la salida estándar.
+pub async fn run_with_host<B, S>(
+    tui: &mut Terminal<B>,
+    events: S,
+    initial: Option<SessionConfig>,
+    paths: &Paths,
+    exit_with_last: bool,
+    host: Box<dyn std::io::Write + Send>,
+) -> anyhow::Result<i32>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    app::run_loop(tui, events, initial, paths, exit_with_last, host).await
 }
 
 /// Registro de sesión: si no se puede abrir o escribir, queda constancia en `warn`

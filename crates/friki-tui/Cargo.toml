@@ -13,10 +13,13 @@ friki-term = { path = "../friki-term" }
 friki-telnet = { path = "../friki-telnet" }
 friki-serial = { path = "../friki-serial" }
 friki-pty = { path = "../friki-pty" }
+friki-zmodem = { path = "../friki-zmodem" }
+friki-script = { path = "../friki-script" }
+directories = "6.0.0"
 anyhow = "1"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util"] }
 futures-util = "0.3"
 async-trait = "0.1"
 unicode-width = "0.2"
