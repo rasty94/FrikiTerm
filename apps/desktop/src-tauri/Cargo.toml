@@ -13,7 +13,7 @@ publish = false
 friki-core = { path = "../../../crates/friki-core" }
 friki-ssh = { path = "../../../crates/friki-ssh" }
 friki-xfer = { path = "../../../crates/friki-xfer" }
-# friki-pty, friki-telnet y friki-serial llegan con friki-session.
+friki-session = { path = "../../../crates/friki-session" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
