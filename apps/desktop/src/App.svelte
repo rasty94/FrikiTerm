@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { appSubscribe } from "./lib/api";
   import { app } from "./lib/state.svelte";
+  import { handleAppEvent } from "./lib/sessions.svelte";
   import NavRail from "./components/NavRail.svelte";
   import PromptModal from "./components/PromptModal.svelte";
   import HostsView from "./views/HostsView.svelte";
@@ -15,6 +16,7 @@
     // Fuera de Tauri (vite dev en navegador) no hay IPC: se ignora.
     appSubscribe((e) => {
       if (e.type === "prompt") app.prompts.push({ id: e.id, prompt: e.prompt });
+      else handleAppEvent(e);
     }).catch(() => {});
   });
 </script>

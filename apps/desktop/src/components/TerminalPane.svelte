@@ -8,6 +8,7 @@
   import type { TermEvent, TermId } from "../lib/types";
   import { app, setActiveLeaf, tabById, toast, type Leaf } from "../lib/state.svelte";
   import { errMsg } from "../lib/session";
+  import { addConn, addTerm, removeTerm } from "../lib/sessions.svelte";
 
   let { leaf, tabId }: { leaf: Leaf; tabId: number } = $props();
 
@@ -39,6 +40,8 @@
     switch (ev.type) {
       case "opened":
         leaf.status = { state: "open", negotiated: ev.negotiated, warnings: ev.warnings };
+        // Las vistas de SFTP, llavero y redirecciones reutilizan esta conexión.
+        if (ev.conn !== null) addConn(ev.conn, leaf.title);
         break;
       case "failed":
         leaf.status = { state: "failed", text: ev.error.message };
@@ -110,6 +113,7 @@
       .then((tid) => {
         if (closed) return void termClose(tid).catch(() => {});
         id = tid;
+        addTerm({ id: tid, label: leaf.title });
         // Por si el panel cambió de tamaño mientras conectaba.
         termResize(tid, t.cols, t.rows).catch(() => {});
       })
@@ -125,7 +129,10 @@
       rs.dispose();
       t.dispose();
       term = undefined;
-      if (id !== null) termClose(id).catch(() => {});
+      if (id !== null) {
+        removeTerm(id);
+        termClose(id).catch(() => {});
+      }
     };
   });
 </script>
