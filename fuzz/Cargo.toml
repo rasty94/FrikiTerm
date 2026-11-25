@@ -19,6 +19,8 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt", "io-util", "time"] }
 friki-core = { path = "../crates/friki-core" }
 friki-term = { path = "../crates/friki-term" }
+friki-tftp = { path = "../crates/friki-tftp" }
+friki-tn3270 = { path = "../crates/friki-tn3270" }
 friki-telnet = { path = "../crates/friki-telnet" }
 friki-xfer = { path = "../crates/friki-xfer" }
 friki-zmodem = { path = "../crates/friki-zmodem" }
@@ -50,5 +52,29 @@ doc = false
 [[bin]]
 name = "xfer"
 path = "fuzz_targets/xfer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "kermit"
+path = "fuzz_targets/kermit.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tn3270"
+path = "fuzz_targets/tn3270.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wyse"
+path = "fuzz_targets/wyse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tftp"
+path = "fuzz_targets/tftp.rs"
 test = false
 doc = false
