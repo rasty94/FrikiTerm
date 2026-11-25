@@ -181,7 +181,7 @@ async fn try_kbd(st: &mut State<'_>) -> Result<bool> {
                         prompts.into_iter().map(|p| (p.prompt, p.echo)).collect();
                     match st
                         .prompter
-                        .keyboard_interactive(&name, &instructions, &ps)
+                        .keyboard_interactive_for(st.host, &name, &instructions, &ps)
                         .await
                     {
                         Some(a) if a.len() == ps.len() => {

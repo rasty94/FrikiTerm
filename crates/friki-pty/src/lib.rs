@@ -20,23 +20,25 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+/// Las escrituras solo se encolan; un hilo propio las vuelca al PTY, así un hijo que
+/// no lee no puede congelar a quien llama.
 struct Writer {
     master: Mutex<Box<dyn MasterPty + Send>>,
-    input: Arc<Mutex<Box<dyn Write + Send>>>,
+    queue: std::sync::mpsc::SyncSender<Vec<u8>>,
 }
 
 #[async_trait::async_trait]
 impl StreamWriter for Writer {
     async fn write(&self, data: &[u8]) -> io::Result<()> {
-        let input = self.input.clone();
-        let data = data.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let mut w = input.lock().map_err(|_| err("PTY envenenado"))?;
-            w.write_all(&data)?;
-            w.flush()
+        use std::sync::mpsc::TrySendError;
+        self.queue.try_send(data.to_vec()).map_err(|e| match e {
+            TrySendError::Full(_) => {
+                io::Error::new(io::ErrorKind::WouldBlock, "cola de escritura llena")
+            }
+            TrySendError::Disconnected(_) => {
+                io::Error::new(io::ErrorKind::BrokenPipe, "PTY cerrado")
+            }
         })
-        .await
-        .map_err(err)?
     }
 
     async fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
@@ -100,7 +102,15 @@ pub async fn spawn(
     // El extremo esclavo debe cerrarse aquí para que el lector vea EOF al terminar el hijo.
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().map_err(err)?;
-    let input = pair.master.take_writer().map_err(err)?;
+    let mut input = pair.master.take_writer().map_err(err)?;
+    let (wq, wrx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+    std::thread::spawn(move || {
+        while let Ok(d) = wrx.recv() {
+            if input.write_all(&d).and_then(|_| input.flush()).is_err() {
+                return;
+            }
+        }
+    });
     let killer = child.clone_killer();
 
     let (tx, rx) = mpsc::channel(64);
@@ -115,6 +125,9 @@ pub async fn spawn(
                         .blocking_send(StreamEvent::Data(buf[..n].to_vec()))
                         .is_err()
                     {
+                        // Nadie escucha: matar y recoger al hijo (sin zombi).
+                        let _ = child.kill();
+                        let _ = child.wait();
                         return;
                     }
                 }
@@ -130,7 +143,7 @@ pub async fn spawn(
     Ok((
         Arc::new(Writer {
             master: Mutex::new(pair.master),
-            input: Arc::new(Mutex::new(input)),
+            queue: wq,
         }),
         Box::new(Reader { rx, killer }),
     ))
@@ -191,6 +204,22 @@ mod tests {
         assert!(text.contains("30 100"), "{text:?}");
         assert!(text.contains("40 120"), "{text:?}");
         assert_eq!(code, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_never_blocks_when_child_does_not_read() {
+        let (w, _r) = spawn(Some("stty raw; sleep 4"), "xterm", 80, 24)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let t = std::time::Instant::now();
+        let _ = w.write(&vec![b'x'; 200_000]).await;
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            t.elapsed()
+        );
     }
 
     #[cfg(unix)]

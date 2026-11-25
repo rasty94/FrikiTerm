@@ -162,6 +162,39 @@ async fn raw_mode_passes_bytes_untouched() {
     assert_eq!(x, [255, b'\r']);
 }
 
+#[tokio::test]
+async fn dropping_writer_and_reader_closes_socket() {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (w, r) = connect("127.0.0.1", port, &opts(false, true), 80, 24)
+        .await
+        .unwrap();
+    let (mut srv, _) = l.accept().await.unwrap();
+    drop((w, r));
+    let mut b = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(1), srv.read(&mut b))
+        .await
+        .expect("el servidor debe ver EOF en <1 s")
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn write_to_stuck_peer_never_blocks() {
+    let (client, _server) = duplex(64); // el otro lado no lee
+    let (w, _r) = start(client, &opts(false, true), 80, 24);
+    let t = std::time::Instant::now();
+    let mut full = false;
+    for _ in 0..1000 {
+        if let Err(e) = w.write(&[b'x'; 1024]).await {
+            assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+            full = true;
+            break;
+        }
+    }
+    assert!(full && t.elapsed() < Duration::from_millis(200));
+}
+
 // ---- TLS con servidor local de prueba ----
 
 struct TestCert {

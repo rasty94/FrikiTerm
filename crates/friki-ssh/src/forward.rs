@@ -16,7 +16,8 @@ use crate::{Error, Result};
 
 /// Plazo para que un cliente SOCKS5 envíe su petición.
 const SOCKS_TIMEOUT: Duration = Duration::from_secs(10);
-
+/// Conexiones simultáneas por redirección local/dinámica.
+const MAX_CONNS: usize = 256;
 pub(crate) enum Active {
     /// Escucha local (`-L`, `-D`): se detiene abortando la tarea.
     Task(JoinHandle<()>),
@@ -39,8 +40,11 @@ fn local_bind(bind: &str) -> (String, bool) {
         "*" => ("0.0.0.0".into(), true),
         b => (
             b.to_string(),
-            matches!(b, "0.0.0.0" | "::" | "[::]")
-                || b.parse::<IpAddr>().is_ok_and(|i| i.is_unspecified()),
+            // Expuesto todo lo que no sea loopback (incluye IPs de LAN y nombres de host).
+            match b.trim_matches(['[', ']']).parse::<IpAddr>() {
+                Ok(ip) => !ip.is_loopback(),
+                Err(_) => !b.eq_ignore_ascii_case("localhost"),
+            },
         ),
     }
 }
@@ -65,7 +69,7 @@ pub(crate) async fn start(
         } => {
             let (listener, listen, warn) = listen("local", bind, *port).await?;
             let (h, dest) = (handle.clone(), (host.clone(), *host_port));
-            let task = tokio::spawn(accept_loop(listener, move |s, peer| {
+            let task = tokio::spawn(accept_loop(info.clone(), listener, move |s, peer| {
                 let (h, dest) = (h.clone(), dest.clone());
                 async move { pipe(&h, s, peer, &dest.0, dest.1).await }
             }));
@@ -74,7 +78,7 @@ pub(crate) async fn start(
         Forward::Dynamic { bind, port } => {
             let (listener, listen, warn) = listen("dinámica", bind, *port).await?;
             let h = handle.clone();
-            let task = tokio::spawn(accept_loop(listener, move |mut s, peer| {
+            let task = tokio::spawn(accept_loop(info.clone(), listener, move |mut s, peer| {
                 let h = h.clone();
                 async move {
                     let dest = match tokio::time::timeout(SOCKS_TIMEOUT, socks5(&mut s)).await {
@@ -104,7 +108,7 @@ pub(crate) async fn start(
                     .unwrap_or_else(PoisonError::into_inner)
             };
             if *port != 0 {
-                lock().insert(u32::from(*port), dest.clone());
+                lock().insert((addr.clone(), u32::from(*port)), dest.clone());
             }
             let real = match handle.tcpip_forward(addr.clone(), u32::from(*port)).await {
                 Ok(p) => {
@@ -115,14 +119,14 @@ pub(crate) async fn start(
                     }
                 }
                 Err(e) => {
-                    lock().remove(&u32::from(*port));
+                    lock().remove(&(addr.clone(), u32::from(*port)));
                     return Err(Error::Other(format!(
                         "el servidor rechazó la redirección remota: {e}"
                     )));
                 }
             };
             if *port == 0 {
-                lock().insert(real, dest);
+                lock().insert((addr.clone(), real), dest);
             }
             let ip = addr.parse().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
             let listen = SocketAddr::new(ip, u16::try_from(real).unwrap_or(0));
@@ -148,13 +152,30 @@ async fn listen(
     Ok((l, listen, warn))
 }
 
-async fn accept_loop<F, Fut>(listener: TcpListener, on_conn: F)
+async fn accept_loop<F, Fut>(info: Arc<Info>, listener: TcpListener, on_conn: F)
 where
     F: Fn(TcpStream, SocketAddr) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    while let Ok((s, peer)) = listener.accept().await {
-        tokio::spawn(on_conn(s, peer));
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNS));
+    loop {
+        match listener.accept().await {
+            Ok((s, peer)) => {
+                // Sin hueco libre se cierra la conexión entrante.
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let fut = on_conn(s, peer);
+                tokio::spawn(async move {
+                    fut.await;
+                    drop(permit);
+                });
+            }
+            Err(e) => {
+                info.runtime_warning(format!("redirección: error en accept: {e}"));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 
@@ -264,6 +285,23 @@ pub(crate) async fn socks5<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exposure_is_anything_but_loopback() {
+        for (b, exposed) in [
+            ("", false),
+            ("127.0.0.1", false),
+            ("::1", false),
+            ("localhost", false),
+            ("*", true),
+            ("0.0.0.0", true),
+            ("[::]", true),
+            ("192.168.1.5", true),
+            ("miequipo.lan", true),
+        ] {
+            assert_eq!(local_bind(b).1, exposed, "{b}");
+        }
+    }
 
     async fn run(bytes: &[u8]) -> (io::Result<(String, u16)>, Vec<u8>) {
         let (mut client, mut server) = tokio::io::duplex(1024);

@@ -1,12 +1,12 @@
 //! Sesiones por puerto serie (TODO.md §4).
 
 use std::io::{self, Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use friki_core::config::{FlowControl, Parity, SerialConfig};
 use friki_core::transport::{Stream, StreamEvent, StreamReader, StreamWriter};
-use serialport::{DataBits, SerialPort, StopBits};
+use serialport::{DataBits, StopBits};
 use tokio::sync::mpsc;
 
 fn err(e: serialport::Error) -> io::Error {
@@ -62,22 +62,33 @@ fn map_config(cfg: &SerialConfig) -> io::Result<Mapped> {
     Ok((bits, parity, stop, flow))
 }
 
-struct Writer(Arc<Mutex<Box<dyn SerialPort>>>);
+/// Las escrituras solo se encolan; un hilo propio las vuelca al puerto (cola llena = `WouldBlock`).
+struct Writer(std::sync::mpsc::SyncSender<Vec<u8>>);
+
+fn spawn_writer(mut w: impl Write + Send + 'static) -> Writer {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+    std::thread::spawn(move || {
+        while let Ok(d) = rx.recv() {
+            if w.write_all(&d).and_then(|_| w.flush()).is_err() {
+                return;
+            }
+        }
+    });
+    Writer(tx)
+}
 
 #[async_trait::async_trait]
 impl StreamWriter for Writer {
     async fn write(&self, data: &[u8]) -> io::Result<()> {
-        let port = self.0.clone();
-        let data = data.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let mut p = port
-                .lock()
-                .map_err(|_| io::Error::other("puerto envenenado"))?;
-            p.write_all(&data)?;
-            p.flush()
+        use std::sync::mpsc::TrySendError;
+        self.0.try_send(data.to_vec()).map_err(|e| match e {
+            TrySendError::Full(_) => {
+                io::Error::new(io::ErrorKind::WouldBlock, "cola de escritura llena")
+            }
+            TrySendError::Disconnected(_) => {
+                io::Error::new(io::ErrorKind::BrokenPipe, "puerto cerrado")
+            }
         })
-        .await
-        .map_err(io::Error::other)?
     }
 
     async fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {
@@ -141,15 +152,37 @@ pub async fn open(cfg: &SerialConfig) -> io::Result<Stream> {
             }
         }
     });
-    Ok((
-        Arc::new(Writer(Arc::new(Mutex::new(writer)))),
-        Box::new(Reader(rx)),
-    ))
+    Ok((Arc::new(spawn_writer(writer)), Box::new(Reader(rx))))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn write_never_blocks_on_stuck_port() {
+        struct Stuck;
+        impl Write for Stuck {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                std::thread::sleep(Duration::from_secs(5));
+                Ok(0)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let w = spawn_writer(Stuck);
+        let t = std::time::Instant::now();
+        let mut full = false;
+        for _ in 0..400 {
+            if let Err(e) = w.write(b"x").await {
+                assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+                full = true;
+                break;
+            }
+        }
+        assert!(full && t.elapsed() < Duration::from_millis(100));
+    }
 
     #[test]
     fn maps_config() {
