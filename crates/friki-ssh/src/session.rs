@@ -21,6 +21,12 @@ use crate::{
 
 /// Cola de órdenes de escritura (datos y redimensionados) por shell.
 const WRITE_QUEUE: usize = 256;
+/// Plazo para conectar con el destino de una redirección remota (`-R`).
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Conexiones `-R` simultáneas por conexión SSH.
+const MAX_REMOTE_CONNS: usize = 256;
+/// Canales de agente simultáneos.
+const MAX_AGENT_CHANNELS: usize = 8;
 /// Salida del servidor pendiente de leer por la TUI antes de dar el canal por perdido.
 /// La tarea lectora debe drenar siempre a russh (si no, la conexión entera se detiene).
 pub(crate) const MAX_QUEUED_BYTES: usize = 32 * 1024 * 1024;
@@ -36,8 +42,18 @@ pub(crate) struct Info {
     /// `forward_agent`: pedir y atender el reenvío del agente.
     pub(crate) agent: AtomicBool,
     /// Redirecciones remotas: puerto escuchado en el servidor -> destino local.
-    // ponytail: clave solo por puerto; dos binds distintos con el mismo puerto compartirían destino.
-    pub(crate) remote_forwards: Mutex<HashMap<u32, (String, u16)>>,
+    /// Clave: (dirección pedida al servidor, puerto).
+    pub(crate) remote_forwards: Mutex<HashMap<(String, u32), (String, u16)>>,
+    /// El servidor aceptó `auth-agent-req` en un shell interactivo de esta conexión.
+    pub(crate) agent_granted: AtomicBool,
+    /// Canales de agente abiertos ahora mismo.
+    agent_open: AtomicUsize,
+    /// Conexiones `-R` en curso (tope por conexión SSH).
+    remote_open: AtomicUsize,
+    /// Avisos surgidos tras conectar (errores de `accept` de las redirecciones).
+    runtime_warnings: Mutex<Vec<String>>,
+    /// Avisos descubiertos durante el KEX.
+    pub(crate) kex_warnings: Mutex<Vec<String>>,
 }
 
 impl Info {
@@ -57,6 +73,43 @@ impl Info {
 
     pub(crate) fn strict_failed(&self) -> bool {
         self.strict_failed.load(Ordering::SeqCst)
+    }
+
+    /// Avisos del primer KEX: strict KEX ausente y modos expuestos a Terrapin.
+    fn note_kex(&self, names: &russh::Names) {
+        if names.strict_kex() {
+            return;
+        }
+        let cipher = names.cipher.as_ref().to_string();
+        let mac = names.client_mac.as_ref().to_string();
+        let mut w =
+            vec!["servidor sin strict KEX: expuesto a Terrapin con chacha20/etm".to_string()];
+        if cipher.contains("chacha20-poly1305") || mac.ends_with("-etm@openssh.com") {
+            w.push(format!(
+                "el cifrado negociado ({cipher}, MAC {mac}) es explotable por Terrapin sin strict KEX"
+            ));
+        }
+        self.kex_warnings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(w);
+    }
+
+    pub(crate) fn runtime_warning(&self, w: String) {
+        let mut g = self
+            .runtime_warnings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if g.len() < 20 && g.last() != Some(&w) {
+            g.push(w);
+        }
+    }
+
+    pub(crate) fn runtime_warnings(&self) -> Vec<String> {
+        self.runtime_warnings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn set_lost(&self, why: String) {
@@ -123,6 +176,9 @@ impl client::Handler for Handler {
             self.info.strict_failed.store(true, Ordering::SeqCst);
             return Err(russh::Error::Kex);
         }
+        if first {
+            self.info.note_kex(names);
+        }
         *self
             .info
             .negotiated
@@ -139,20 +195,28 @@ impl client::Handler for Handler {
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
         channel: russh::Channel<client::Msg>,
-        _connected_address: &str,
+        connected_address: &str,
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
         reply: client::ChannelOpenHandle,
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
-        let dest = self
-            .info
-            .remote_forwards
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&connected_port)
-            .cloned();
+        let dest = {
+            let map = self
+                .info
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Coincidencia exacta (dirección, puerto); un bind comodín acepta cualquier dirección.
+            map.get(&(connected_address.to_string(), connected_port))
+                .or_else(|| {
+                    ["", "0.0.0.0", "::", "*"]
+                        .iter()
+                        .find_map(|w| map.get(&((*w).to_string(), connected_port)))
+                })
+                .cloned()
+        };
         // Solo se atienden los puertos que pedimos nosotros.
         let Some((host, port)) = dest else {
             reply
@@ -160,16 +224,31 @@ impl client::Handler for Handler {
                 .await;
             return Ok(());
         };
-        match tokio::net::TcpStream::connect((host.as_str(), port)).await {
-            Ok(mut local) => {
-                reply.accept().await;
-                tokio::spawn(async move {
+        if self.info.remote_open.fetch_add(1, Ordering::SeqCst) >= MAX_REMOTE_CONNS {
+            self.info.remote_open.fetch_sub(1, Ordering::SeqCst);
+            reply
+                .reject(russh::ChannelOpenFailure::ResourceShortage)
+                .await;
+            return Ok(());
+        }
+        // Fuera del handler: un destino que no responde no puede congelar la conexión SSH.
+        let info = self.info.clone();
+        tokio::spawn(async move {
+            let conn = tokio::time::timeout(
+                REMOTE_CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect((host.as_str(), port)),
+            )
+            .await;
+            match conn {
+                Ok(Ok(mut local)) => {
+                    reply.accept().await;
                     let mut chan = channel.into_stream();
                     let _ = tokio::io::copy_bidirectional(&mut local, &mut chan).await;
-                });
+                }
+                _ => reply.reject(russh::ChannelOpenFailure::ConnectFailed).await,
             }
-            Err(_) => reply.reject(russh::ChannelOpenFailure::ConnectFailed).await,
-        }
+            info.remote_open.fetch_sub(1, Ordering::SeqCst);
+        });
         Ok(())
     }
 
@@ -179,17 +258,39 @@ impl client::Handler for Handler {
         reply: client::ChannelOpenHandle,
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
+        // Solo tras un `auth-agent-req` aceptado en un shell interactivo, y con tope.
         #[cfg(unix)]
         if self.info.agent.load(Ordering::SeqCst)
-            && let Some(sock) = std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty())
-            && let Ok(mut agent) = tokio::net::UnixStream::connect(sock).await
+            && self.info.agent_granted.load(Ordering::SeqCst)
+            && self.info.agent_open.fetch_add(1, Ordering::SeqCst) < MAX_AGENT_CHANNELS
         {
-            reply.accept().await;
-            tokio::spawn(async move {
-                let mut chan = channel.into_stream();
-                let _ = tokio::io::copy_bidirectional(&mut agent, &mut chan).await;
-            });
-            return Ok(());
+            let info = self.info.clone();
+            let done = move || {
+                info.agent_open.fetch_sub(1, Ordering::SeqCst);
+            };
+            if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty())
+                && let Ok(Ok(mut agent)) = tokio::time::timeout(
+                    REMOTE_CONNECT_TIMEOUT,
+                    tokio::net::UnixStream::connect(sock),
+                )
+                .await
+            {
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut chan = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut agent, &mut chan).await;
+                    done();
+                });
+                return Ok(());
+            }
+            done();
+        } else {
+            // El incremento solo cuenta si se concedió; deshacerlo si pasó el flag pero no el tope.
+            if self.info.agent.load(Ordering::SeqCst)
+                && self.info.agent_granted.load(Ordering::SeqCst)
+            {
+                self.info.agent_open.fetch_sub(1, Ordering::SeqCst);
+            }
         }
         let _ = channel;
         reply
@@ -479,6 +580,15 @@ where
         return Err(strict_err());
     }
 
+    for w in info
+        .kex_warnings
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .drain(..)
+    {
+        warnings.push(format!("{}:{}: {w}", cfg.host, cfg.port));
+    }
+
     crate::auth::authenticate(
         &mut handle,
         cfg,
@@ -519,9 +629,23 @@ pub(crate) async fn open_shell(
     cols: u16,
     rows: u16,
 ) -> Result<(ShellWriter, ShellReader)> {
-    let channel = handle.channel_open_session().await.map_err(net)?;
+    let mut channel = handle.channel_open_session().await.map_err(net)?;
     if info.agent.load(Ordering::SeqCst) {
         channel.agent_forward(true).await.map_err(net)?;
+        // La respuesta llega antes que cualquier otro mensaje del canal: así el flag
+        // queda fijado antes de que el servidor pueda abrir canales de agente.
+        let granted = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Success) => return true,
+                    Some(ChannelMsg::Failure) | None => return false,
+                    Some(_) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        info.agent_granted.store(granted, Ordering::SeqCst);
     }
     channel
         .request_pty(true, term, cols.into(), rows.into(), 0, 0, &[])

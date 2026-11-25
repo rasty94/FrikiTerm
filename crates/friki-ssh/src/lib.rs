@@ -330,6 +330,7 @@ impl Connection {
             w.extend(n.weak());
         }
         w.extend(self.fwd().warnings.clone());
+        w.extend(self.info.runtime_warnings());
         w.extend(self.verifier.warnings());
         w
     }
@@ -436,7 +437,7 @@ impl Connection {
                 .remote_forwards
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(port);
+                .remove(&(addr.clone(), *port));
             self.handle
                 .cancel_tcpip_forward(addr.clone(), *port)
                 .await

@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use friki_core::transport::{Stream, StreamEvent, StreamReader, StreamWriter};
 use proto::{Parser, Session};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto::ring};
@@ -88,32 +88,50 @@ async fn connect_with(
     }
 }
 
-struct Inner<W> {
-    w: WriteHalf<W>,
-    /// `None` en modo RAW.
-    session: Option<Session>,
+/// `None` en modo RAW. Mutex síncrono: nunca se mantiene a través de un `await`.
+type Shared = Arc<std::sync::Mutex<Option<Session>>>;
+
+/// Las escrituras solo se encolan; una tarea propia las vuelca al socket (cola llena = `WouldBlock`).
+struct Writer {
+    session: Shared,
+    queue: mpsc::Sender<Vec<u8>>,
 }
 
-struct Writer<S>(Arc<Mutex<Inner<S>>>);
+fn poisoned() -> io::Error {
+    io::Error::other("sesión Telnet envenenada")
+}
+
+impl Writer {
+    fn push(&self, d: Vec<u8>) -> io::Result<()> {
+        self.queue.try_send(d).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                io::Error::new(io::ErrorKind::WouldBlock, "cola de escritura llena")
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                io::Error::new(io::ErrorKind::BrokenPipe, "conexión cerrada")
+            }
+        })
+    }
+}
 
 #[async_trait::async_trait]
-impl<S: AsyncRead + AsyncWrite + Send + 'static> StreamWriter for Writer<S> {
+impl StreamWriter for Writer {
     async fn write(&self, data: &[u8]) -> io::Result<()> {
-        let mut g = self.0.lock().await;
-        let g = &mut *g;
-        match &g.session {
-            Some(s) => g.w.write_all(&s.encode(data)).await,
-            None => g.w.write_all(data).await,
-        }
+        let out = match self.session.lock().map_err(|_| poisoned())?.as_ref() {
+            Some(s) => s.encode(data),
+            None => data.to_vec(),
+        };
+        self.push(out)
     }
 
     async fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        let mut g = self.0.lock().await;
-        let g = &mut *g;
-        match g.session.as_mut().and_then(|s| s.resize(cols, rows)) {
-            Some(sb) => g.w.write_all(&sb).await,
-            None => Ok(()),
-        }
+        let sb = self
+            .session
+            .lock()
+            .map_err(|_| poisoned())?
+            .as_mut()
+            .and_then(|s| s.resize(cols, rows));
+        sb.map_or(Ok(()), |sb| self.push(sb))
     }
 }
 
@@ -130,49 +148,66 @@ fn start<S>(sock: S, opts: &TelnetOptions, cols: u16, rows: u16) -> Stream
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    let (mut r, w) = tokio::io::split(sock);
-    let session = (!opts.raw).then(|| Session::new(&opts.term, cols, rows));
-    let inner = Arc::new(Mutex::new(Inner { w, session }));
+    let (mut r, mut w) = tokio::io::split(sock);
+    let session: Shared = Arc::new(std::sync::Mutex::new(
+        (!opts.raw).then(|| Session::new(&opts.term, cols, rows)),
+    ));
+    let (wq, mut wrx) = mpsc::channel::<Vec<u8>>(256);
+    // La lectora solo guarda un sender débil: al soltar el `Writer` la cola se cierra y
+    // esta tarea termina, soltando la mitad de escritura.
+    let replies = wq.downgrade();
+    tokio::spawn(async move {
+        while let Some(d) = wrx.recv().await {
+            if w.write_all(&d).await.is_err() {
+                return;
+            }
+        }
+        let _ = w.shutdown().await;
+    });
     let (tx, rx) = mpsc::channel(64);
-    let shared = inner.clone();
+    let shared = session.clone();
     tokio::spawn(async move {
         let mut parser = Parser::default();
         let mut buf = vec![0u8; 8192];
         loop {
-            let n = match r.read(&mut buf).await {
-                Ok(0) => {
-                    let _ = tx.send(StreamEvent::Closed).await;
-                    return;
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    let _ = tx.send(StreamEvent::Lost(e.to_string())).await;
-                    return;
-                }
-            };
-            let data = {
-                let mut g = shared.lock().await;
-                let g = &mut *g;
-                match g.session.as_mut() {
-                    None => buf[..n].to_vec(),
-                    Some(s) => {
-                        let (data, reply) = s.process(parser.feed(&buf[..n]));
-                        if !reply.is_empty()
-                            && let Err(e) = g.w.write_all(&reply).await
-                        {
-                            let _ = tx.send(StreamEvent::Lost(e.to_string())).await;
-                            return;
-                        }
-                        data
+            let n = tokio::select! {
+                // Se soltó el lector: cerrar la mitad de lectura sin esperar datos.
+                _ = tx.closed() => return,
+                n = r.read(&mut buf) => match n {
+                    Ok(0) => {
+                        let _ = tx.send(StreamEvent::Closed).await;
+                        return;
                     }
-                }
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = tx.send(StreamEvent::Lost(e.to_string())).await;
+                        return;
+                    }
+                },
             };
+            let (data, reply) = match shared.lock() {
+                Ok(mut g) => match g.as_mut() {
+                    None => (buf[..n].to_vec(), Vec::new()),
+                    Some(s) => s.process(parser.feed(&buf[..n])),
+                },
+                Err(_) => return,
+            };
+            if !reply.is_empty()
+                && let Some(q) = replies.upgrade()
+                && q.send(reply).await.is_err()
+            {
+                let _ = tx.send(StreamEvent::Lost("conexión cerrada".into())).await;
+                return;
+            }
             if !data.is_empty() && tx.send(StreamEvent::Data(data)).await.is_err() {
                 return;
             }
         }
     });
-    (Arc::new(Writer(inner)), Box::new(Reader(rx)))
+    (
+        Arc::new(Writer { session, queue: wq }),
+        Box::new(Reader(rx)),
+    )
 }
 
 #[cfg(test)]
