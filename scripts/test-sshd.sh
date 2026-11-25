@@ -11,6 +11,9 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 IMAGE=friki/sshd-test:local
 NAME=friki-sshd-test
+# OpenSSH 9.5p1 sin strict KEX (Dockerfile.nostrict), puerto 2225: caso negativo de require_strict_kex.
+IMAGE_NOSTRICT=friki/sshd-test-nostrict:local
+NAME_NOSTRICT=friki-sshd-test-nostrict
 TMP_BASE=${TMPDIR:-/tmp}
 TMP_BASE=${TMP_BASE%/}
 CACHE="$HOME/.cache/frikiterm-test"
@@ -47,7 +50,7 @@ prepare_cache() {
 }
 
 down() {
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    docker rm -f "$NAME" "$NAME_NOSTRICT" >/dev/null 2>&1 || true
     if [ -f "$POINTER" ] && [ ! -L "$POINTER" ]; then
         dir=$(cat "$POINTER")
         if owned_dir "$dir"; then
@@ -66,23 +69,30 @@ up() {
     dir=$(mktemp -d "$(secrets_base)/friki-sshd-test.XXXXXX")
     printf '%s\n' "$dir" > "$POINTER"
 
-    log "construyendo imagen $IMAGE"
+    log "construyendo imágenes $IMAGE e $IMAGE_NOSTRICT"
     docker build -q -t "$IMAGE" "$ROOT/docker/sshd-test" >/dev/null
+    docker build -q -f "$ROOT/docker/sshd-test/Dockerfile.nostrict" -t "$IMAGE_NOSTRICT" \
+        "$ROOT/docker/sshd-test" >/dev/null
 
     ssh-keygen -q -t ed25519 -N '' -C friki-test -f "$dir/id_ed25519"
     pass=$(openssl rand -hex 16)
 
-    log "arrancando $NAME"
+    log "arrancando $NAME y $NAME_NOSTRICT"
     docker run -d --init --name "$NAME" \
         -p 127.0.0.1:2222:2222 -p 127.0.0.1:2223:2223 \
         "$IMAGE" >/dev/null
+    docker run -d --init --name "$NAME_NOSTRICT" \
+        -p 127.0.0.1:2225:2225 \
+        "$IMAGE_NOSTRICT" >/dev/null
 
-    docker exec -i "$NAME" sh -c \
-        'cat > /home/friki/.ssh/authorized_keys && chown friki:friki /home/friki/.ssh/authorized_keys && chmod 600 /home/friki/.ssh/authorized_keys' \
-        < "$dir/id_ed25519.pub"
-    printf 'friki:%s\n' "$pass" | docker exec -i "$NAME" chpasswd
+    for c in "$NAME" "$NAME_NOSTRICT"; do
+        docker exec -i "$c" sh -c \
+            'cat > /home/friki/.ssh/authorized_keys && chown friki:friki /home/friki/.ssh/authorized_keys && chmod 600 /home/friki/.ssh/authorized_keys' \
+            < "$dir/id_ed25519.pub"
+        printf 'friki:%s\n' "$pass" | docker exec -i "$c" chpasswd
+    done
 
-    log "esperando a sshd en 2222 y 2223"
+    log "esperando a sshd en 2222, 2223 y 2225"
     i=0
     until ssh-keyscan -T 2 -t ed25519 -p 2222 127.0.0.1 > "$dir/known_hosts.tmp" 2>/dev/null \
         && [ -s "$dir/known_hosts.tmp" ]; do
@@ -96,12 +106,23 @@ up() {
         [ "$i" -lt 60 ] || { docker logs "$NAME" >&2; die "sshd no responde en 2223"; }
         sleep 1
     done
+    i=0
+    until ssh-keyscan -T 2 -t ed25519 -p 2225 127.0.0.1 > "$dir/nostrict.tmp" 2>/dev/null \
+        && [ -s "$dir/nostrict.tmp" ]; do
+        i=$((i + 1))
+        [ "$i" -lt 60 ] || { docker logs "$NAME_NOSTRICT" >&2; die "sshd no responde en 2225"; }
+        sleep 1
+    done
+    # Las claves de los dos puertos van al mismo known_hosts (entradas [host]:puerto distintas).
     mv "$dir/known_hosts.tmp" "$dir/known_hosts"
+    cat "$dir/nostrict.tmp" >> "$dir/known_hosts"
+    rm -f "$dir/nostrict.tmp"
 
     printf 'export FRIKI_TEST_HOST=127.0.0.1\n'
     printf 'export FRIKI_TEST_PORT=2222\n'
     printf 'export FRIKI_TEST_LEGACY_PORT=2223\n'
-printf 'export FRIKI_TEST_JUMP_TARGET=127.0.0.1:2224\n'
+    printf 'export FRIKI_TEST_NOSTRICT_PORT=2225\n'
+    printf 'export FRIKI_TEST_JUMP_TARGET=127.0.0.1:2224\n'
     printf 'export FRIKI_TEST_USER=friki\n'
     printf 'export FRIKI_TEST_PASSWORD=%s\n' "$pass"
     printf "export FRIKI_TEST_KEY='%s'\n" "$dir/id_ed25519"

@@ -35,6 +35,7 @@ Contra un OpenSSH en Docker (`docker/sshd-test/`, `scripts/test-sshd.sh`). Varia
 |---|---|
 | `FRIKI_TEST_HOST` / `FRIKI_TEST_PORT` | `127.0.0.1` / `2222` (moderno) |
 | `FRIKI_TEST_LEGACY_PORT` | `2223` (solo algoritmos heredados) |
+| `FRIKI_TEST_NOSTRICT_PORT` | `2225` (OpenSSH 9.5p1 sin strict KEX; contenedor aparte, `Dockerfile.nostrict`) |
 | `FRIKI_TEST_USER` / `FRIKI_TEST_PASSWORD` | `friki` / generada en cada arranque |
 | `FRIKI_TEST_KEY` | ruta a una Ed25519 generada en cada arranque, autorizada en el servidor |
 | `FRIKI_TEST_KNOWN_HOSTS` | `known_hosts` con la clave del servidor moderno |
