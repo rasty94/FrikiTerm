@@ -25,12 +25,14 @@ pub enum Action {
     RenameTab,
     Search,
     CopyMode,
+    ZmodemSend,
+    RunScript,
     Help,
     Quit,
 }
 
 /// (nombre en `AppConfig.bindings`, acción, descripción para la ayuda).
-const ACTIONS: [(&str, Action, &str); 16] = [
+const ACTIONS: [(&str, Action, &str); 18] = [
     ("new-tab", Action::NewTab, "pestaña nueva"),
     ("close-pane", Action::ClosePane, "cerrar el panel"),
     ("next-tab", Action::NextTab, "pestaña siguiente"),
@@ -51,8 +53,18 @@ const ACTIONS: [(&str, Action, &str); 16] = [
     ("scroll-down", Action::ScrollDown, "scrollback abajo"),
     ("sessions", Action::Sessions, "abrir sesión (pestaña nueva)"),
     ("rename-tab", Action::RenameTab, "renombrar la pestaña"),
-    ("search", Action::Search, "buscar (pendiente)"),
-    ("copy-mode", Action::CopyMode, "modo copia (pendiente)"),
+    ("search", Action::Search, "buscar en el scrollback"),
+    ("copy-mode", Action::CopyMode, "modo copia"),
+    (
+        "zmodem-send",
+        Action::ZmodemSend,
+        "enviar ficheros (Zmodem)",
+    ),
+    (
+        "run-script",
+        Action::RunScript,
+        "ejecutar un script (.rhai)",
+    ),
     ("help", Action::Help, "esta ayuda"),
     ("quit", Action::Quit, "salir"),
 ];
@@ -348,7 +360,7 @@ mod tests {
         assert_eq!(km.feed(&pre()), KeyOut::Literal(Key::Char(']'), ctrl()));
         assert!(!km.is_armed());
         km.feed(&pre());
-        assert_eq!(km.feed(&plain('z')), KeyOut::Cancel);
+        assert_eq!(km.feed(&plain('k')), KeyOut::Cancel);
         assert_eq!(
             km.feed(&plain('q')),
             KeyOut::Forward(Key::Char('q'), Modifiers::default())

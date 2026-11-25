@@ -7,19 +7,24 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyEvent, MouseEventKind};
-use friki_core::config::{AppConfig, Protocol, SessionConfig, load_app_config, load_sessions};
+use friki_core::config::{
+    AppConfig, Protocol, SessionConfig, load_app_config, load_sessions, resolve_target,
+};
 use friki_core::known_hosts::{HostKey, HostKeyStatus};
 use friki_core::transport::{StreamEvent, StreamReader, StreamWriter};
+use friki_script::{Limits, Permissions, ScriptError};
 use friki_ssh::{
     AuthPrompter, Connection, Error, HostKeyDecision, KnownHostsVerifier, Negotiated, Zeroizing,
 };
 use friki_term::{Key, Modifiers, Terminal as Emulator};
+use friki_zmodem::{FileProtocol, Progress, ZmodemStart};
 use futures_util::{Stream, StreamExt};
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -31,14 +36,18 @@ use ratatui::widgets::Paragraph;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::copy_mode::{Clipboard, CopyMode, CopyOutcome, copy_to_clipboard};
 use crate::dialog::{Answer, Dialog, clean};
 use crate::input::pressed;
 use crate::keys::{Action, KeyOut, Keymap};
 use crate::layout::{Dir, Node, PaneId, cycle};
 use crate::picker::{Picker, PickerOut};
 use crate::render::{StatusInfo, draw_dialog, popup, screen_to_buffer, status_line};
+use crate::script_host::{HostReq, PaneHost, Shared};
+use crate::search::{Search, SearchOutcome};
 use crate::target::{forward_label, label, telnet_options, term_for};
 use crate::theme::Theme;
+use crate::xfer::{CANCEL, PaneIo, bar};
 use crate::{Log, Out, Paths, WHEEL_LINES, compact, exit_code, finish, is_legacy};
 
 type Ask = Pin<Box<dyn Future<Output = HostKeyDecision> + Send>>;
@@ -51,6 +60,15 @@ enum Msg {
     Failed(PaneId, anyhow::Error),
     Stream(PaneId, StreamEvent),
     ReaderEnd(PaneId),
+    Xfer(PaneId, XferMsg),
+    Script(PaneId, HostReq),
+    ScriptDone(PaneId, Result<i64, ScriptError>),
+}
+
+/// Lo que la tarea de una transferencia Zmodem cuenta al bucle.
+enum XferMsg {
+    Progress(Progress),
+    Done(std::io::Result<Vec<PathBuf>>),
 }
 
 struct Opened {
@@ -262,11 +280,73 @@ fn spawn_connect(
     })
 }
 
-/// Diálogo modal de un panel; con `paste`, el texto a enviar si se confirma.
+/// Qué hacer con la respuesta de un diálogo modal del panel.
+enum Then {
+    Nothing,
+    /// Texto a pegar si se confirma.
+    Paste(String),
+    ZmodemRecv,
+    /// Rutas locales (separadas por `;`) a enviar por Zmodem.
+    ZmodemSend,
+    /// Script a ejecutar (nombre dentro del directorio de scripts o ruta).
+    Script,
+}
+
+/// Diálogo modal de un panel.
 struct Modal {
     dialog: Dialog,
-    paste: Option<String>,
+    then: Then,
 }
+
+impl Modal {
+    fn notice(title: &str, lines: &[String], alert: bool) -> Self {
+        Self {
+            dialog: Dialog::notice(title, lines, alert),
+            then: Then::Nothing,
+        }
+    }
+}
+
+/// Transferencia Zmodem en curso: el flujo del panel se desvía a `tx`.
+struct Xfer {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    task: JoinHandle<()>,
+    receiving: bool,
+    progress: Option<Progress>,
+}
+
+impl Xfer {
+    fn line(&self, width: u16) -> String {
+        let what = if self.receiving {
+            "recibiendo"
+        } else {
+            "enviando"
+        };
+        let tail = " (Esc cancela)";
+        let text = match &self.progress {
+            Some(p) => format!(
+                "Zmodem {what} {} {}{tail}",
+                clean(&p.file),
+                bar(p.done, p.total, 20)
+            ),
+            None => format!("Zmodem {what}...{tail}"),
+        };
+        text.chars().take(usize::from(width)).collect()
+    }
+}
+
+/// Script en ejecución sobre un panel.
+struct ScriptRun {
+    shared: Arc<Shared>,
+    task: JoinHandle<()>,
+    cancelled: bool,
+}
+
+/// Tras un rechazo del diálogo Zmodem, durante este tiempo no se vuelve a preguntar
+/// (el remoto repite su petición).
+const ZMODEM_QUIET: Duration = Duration::from_secs(10);
+/// Tope de lo retenido mientras el diálogo Zmodem espera respuesta.
+const ZMODEM_HOLD: usize = 64 * 1024;
 
 enum State {
     Connecting,
@@ -294,9 +374,60 @@ struct Pane {
     task: Option<JoinHandle<()>>,
     exit: Option<i32>,
     outcome: Option<anyhow::Result<i32>>,
+    search: Option<Search>,
+    copy: Option<CopyMode>,
+    xfer: Option<Xfer>,
+    script: Option<ScriptRun>,
+    /// Bytes de la petición Zmodem retenidos mientras se espera la respuesta del usuario
+    /// (no llegan al emulador; se reenvían a la transferencia o, si se rechaza, al emulador).
+    zm_hold: Option<Vec<u8>>,
+    zm_quiet: Option<Instant>,
+    /// Últimos bytes del flujo, por si la señal Zmodem llega partida entre dos lecturas.
+    zm_tail: Vec<u8>,
+    /// Un `connect` de script a la espera de que el panel abra.
+    pending_connect: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 impl Pane {
+    fn new(session: SessionConfig) -> Self {
+        Self {
+            host: label(&session),
+            session,
+            state: State::Connecting,
+            emu: None,
+            out: None,
+            size: (80, 24),
+            cipher: String::new(),
+            legacy: false,
+            forwards: vec![],
+            theme: Theme::default(),
+            modal: None,
+            conn: None,
+            task: None,
+            exit: None,
+            outcome: None,
+            search: None,
+            copy: None,
+            xfer: None,
+            script: None,
+            zm_hold: None,
+            zm_quiet: None,
+            zm_tail: vec![],
+            pending_connect: None,
+        }
+    }
+
+    /// Cancela lo que dependa del flujo (transferencia y script) al cerrarse el panel.
+    fn stop_jobs(&mut self) {
+        if let Some(x) = self.xfer.take() {
+            x.task.abort();
+        }
+        if let Some(s) = self.script.take() {
+            s.shared.cancel();
+            s.task.abort();
+        }
+    }
+
     fn over(&self) -> bool {
         matches!(self.state, State::Ended(_) | State::Failed(_))
     }
@@ -340,6 +471,10 @@ struct App<'a> {
     disconnects: Vec<JoinHandle<()>>,
     /// Avisos de la configuración global; se muestran una vez (selector o primer panel).
     config_warnings: Vec<String>,
+    /// Salida de la terminal anfitriona (OSC 52).
+    host_out: Box<dyn Write + Send>,
+    /// Portapapeles del sistema (inyectable en las pruebas).
+    clip: fn(&str) -> Result<Clipboard, String>,
 }
 
 fn inner(r: Rect, multi: bool) -> Rect {
@@ -384,7 +519,12 @@ impl<'a> App<'a> {
     /// Carga `config.toml` junto a las sesiones (`app_config_file()` con las rutas por
     /// defecto). Un error de lectura o de contenido es un aviso y se usan los valores por
     /// defecto; atajos inválidos o repetidos, otro aviso y se ignoran.
-    fn new(tx: mpsc::UnboundedSender<Msg>, paths: &'a Paths, exit_with_last: bool) -> Self {
+    fn new(
+        tx: mpsc::UnboundedSender<Msg>,
+        paths: &'a Paths,
+        exit_with_last: bool,
+        host_out: Box<dyn Write + Send>,
+    ) -> Self {
         let cfg_path = paths
             .sessions_dir
             .parent()
@@ -416,6 +556,8 @@ impl<'a> App<'a> {
             notice: None,
             disconnects: vec![],
             config_warnings,
+            host_out,
+            clip: copy_to_clipboard,
         }
     }
 
@@ -448,23 +590,7 @@ impl<'a> App<'a> {
         self.next_id += 1;
         self.opened_total += 1;
         let name = clean(&session.name);
-        let pane = Pane {
-            host: label(&session),
-            session: session.clone(),
-            state: State::Connecting,
-            emu: None,
-            out: None,
-            size: (80, 24),
-            cipher: String::new(),
-            legacy: false,
-            forwards: vec![],
-            theme: Theme::default(),
-            modal: None,
-            conn: None,
-            task: None,
-            exit: None,
-            outcome: None,
-        };
+        let pane = Pane::new(session.clone());
         self.panes.insert(id, pane);
         let mut split = false;
         if let (Mode::Split(dir), Some(tab)) = (mode, self.tabs.get_mut(self.cur))
@@ -539,6 +665,13 @@ impl<'a> App<'a> {
         p.state = State::Ended(ended_label(&outcome));
         p.outcome = Some(outcome);
         p.out = None;
+        if let Some(x) = p.xfer.take() {
+            x.task.abort();
+        }
+        p.zm_hold = None;
+        if let Some(s) = &p.script {
+            s.shared.set_writer(None);
+        }
         let (task, conn) = (p.task.take(), p.conn.take());
         if let Some(t) = task {
             t.abort();
@@ -554,7 +687,11 @@ impl<'a> App<'a> {
         let Some(p) = self.panes.get_mut(&id) else {
             return;
         };
-        p.state = State::Failed(clean(&e.to_string()));
+        let msg = clean(&e.to_string());
+        if let Some(r) = p.pending_connect.take() {
+            let _ = r.send(Err(msg.clone()));
+        }
+        p.state = State::Failed(msg);
         p.outcome = Some(Err(e));
         p.task = None;
         self.asks.retain(|(pid, ..)| *pid != id);
@@ -587,6 +724,7 @@ impl<'a> App<'a> {
         if let Some(o) = p.outcome.take() {
             self.last_outcome = Some(o);
         }
+        p.stop_jobs();
         let (task, conn) = (p.task.take(), p.conn.take());
         if let Some(t) = task {
             t.abort();
@@ -647,6 +785,9 @@ impl<'a> App<'a> {
             Msg::Failed(id, e) => self.fail(id, e),
             Msg::Stream(id, ev) => self.stream_event(id, ev),
             Msg::ReaderEnd(id) => self.reader_end(id, None),
+            Msg::Xfer(id, m) => self.xfer_msg(id, m),
+            Msg::Script(id, r) => self.script_req(id, r).await,
+            Msg::ScriptDone(id, r) => self.script_done(id, r),
         }
     }
 
@@ -689,11 +830,21 @@ impl<'a> App<'a> {
         p.legacy = p.session.legacy_algorithms || o.negotiated.as_ref().is_some_and(is_legacy);
         p.modal = (!warnings.is_empty()).then(|| Modal {
             dialog: Dialog::notice("Avisos de la conexión", &warnings, true),
-            paste: None,
+            then: Then::Nothing,
         });
         p.conn = o.conn;
         p.out = Some(out);
         p.state = State::Live;
+        if let Some(r) = p.pending_connect.take() {
+            let _ = r.send(Ok(()));
+        }
+        if let Some(sc) = &p.script {
+            sc.shared
+                .set_writer(p.out.as_ref().map(|o| o.writer.clone()));
+            if let Some(e) = &p.emu {
+                sc.shared.set_screen(&e.screen());
+            }
+        }
     }
 
     fn stream_event(&mut self, id: PaneId, ev: StreamEvent) {
@@ -702,11 +853,55 @@ impl<'a> App<'a> {
         };
         match ev {
             StreamEvent::Data(d) => {
+                if let Some(x) = &p.xfer {
+                    let _ = x.tx.send(d); // transferencia: el flujo va a Zmodem, no al emulador
+                    return;
+                }
+                if let Some(h) = p.zm_hold.as_mut() {
+                    if h.len() < ZMODEM_HOLD {
+                        h.extend_from_slice(&d);
+                    }
+                    return;
+                }
+                let quiet = p.zm_quiet.is_some_and(|t| t > Instant::now());
+                if matches!(p.state, State::Live)
+                    && p.modal.is_none()
+                    && !quiet
+                    && let Some(start) = zmodem_start(&p.zm_tail, &d)
+                {
+                    let mut hold = std::mem::take(&mut p.zm_tail);
+                    hold.extend_from_slice(&d);
+                    p.zm_hold = Some(hold);
+                    p.modal = Some(match start {
+                        ZmodemStart::RemoteSends => Modal {
+                            dialog: Dialog::confirm(
+                                "Zmodem",
+                                &format!(
+                                    "Recibir ficheros por Zmodem en {}? s/n",
+                                    clean(&self.paths.downloads_dir.display().to_string())
+                                ),
+                            ),
+                            then: Then::ZmodemRecv,
+                        },
+                        ZmodemStart::RemoteReceives => Modal {
+                            dialog: send_dialog("El remoto espera ficheros (rz)."),
+                            then: Then::ZmodemSend,
+                        },
+                    });
+                    return;
+                }
+                keep_tail(&mut p.zm_tail, &d);
                 if let Some(o) = p.out.as_mut() {
                     o.log.output(&d);
                 }
                 if let Some(e) = p.emu.as_mut() {
                     e.process(&d);
+                    if let Some(sc) = &p.script {
+                        sc.shared.set_screen(&e.screen());
+                    }
+                }
+                if let Some(sc) = &p.script {
+                    sc.shared.push(&d);
                 }
             }
             ev => match exit_code(&ev) {
@@ -767,11 +962,9 @@ impl<'a> App<'a> {
             && let Some(m) = p.modal.as_mut()
         {
             if let Some(ans) = m.dialog.handle_key(&k) {
-                let text = m.paste.take();
+                let then = std::mem::replace(&mut m.then, Then::Nothing);
                 p.modal = None;
-                if let (Answer::Confirm(true), Some(t)) = (ans, text) {
-                    self.paste_to(id, &t).await;
-                }
+                self.modal_answer(id, then, ans).await;
             }
             return;
         }
@@ -779,12 +972,84 @@ impl<'a> App<'a> {
             self.overlay_key(k).await;
             return;
         }
+        if self.mode_key(&k) {
+            return;
+        }
+        let armed = self.keymap.is_armed();
         match self.keymap.feed(&k) {
             KeyOut::Forward(key, mods) | KeyOut::Literal(key, mods) => {
                 self.forward(key, mods).await;
             }
             KeyOut::Do(a) => self.action(a).await,
+            // Prefijo + Ctrl+C: cancela el script del panel con foco.
+            KeyOut::Cancel if armed && is_ctrl_c(&k) => self.cancel_script(),
             KeyOut::Armed | KeyOut::Cancel | KeyOut::Ignore => {}
+        }
+    }
+
+    /// Búsqueda y modo copia: mientras están activos, el teclado es suyo (no va al remoto).
+    fn mode_key(&mut self, k: &KeyEvent) -> bool {
+        let Some(p) = self.focus_id().and_then(|id| self.panes.get_mut(&id)) else {
+            return false;
+        };
+        let Some(emu) = p.emu.as_mut() else {
+            return false;
+        };
+        if let Some(sr) = p.search.as_mut() {
+            if sr.handle_key(k, emu) == SearchOutcome::Exit {
+                p.search = None;
+            }
+            return true;
+        }
+        if let Some(cm) = p.copy.as_mut() {
+            match cm.handle_key(k, emu) {
+                CopyOutcome::Continue => {}
+                CopyOutcome::Cancel => {
+                    p.copy = None;
+                    emu.scroll_view(0);
+                }
+                CopyOutcome::Copy(text) => {
+                    p.copy = None;
+                    emu.scroll_view(0);
+                    self.copy_text(&text);
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Copia: portapapeles del sistema o, si falla, OSC 52 a la terminal anfitriona.
+    fn copy_text(&mut self, text: &str) {
+        self.notice = Some(match (self.clip)(text) {
+            Ok(Clipboard::System) => "copiado al portapapeles".into(),
+            Ok(Clipboard::Osc52(seq)) => {
+                let w = &mut self.host_out;
+                match w.write_all(seq.as_bytes()).and_then(|()| w.flush()) {
+                    Ok(()) => "copiado (OSC 52)".into(),
+                    Err(e) => format!("no se pudo copiar: {e}"),
+                }
+            }
+            Err(m) => clean(&m),
+        });
+    }
+
+    fn enter_mode(&mut self, a: Action) {
+        let Some(p) = self.focus_id().and_then(|id| self.panes.get_mut(&id)) else {
+            return;
+        };
+        let busy = p.xfer.is_some() || p.search.is_some() || p.copy.is_some();
+        let Some(emu) = p
+            .emu
+            .as_ref()
+            .filter(|_| matches!(p.state, State::Live) && !busy)
+        else {
+            return;
+        };
+        if a == Action::Search {
+            p.search = Some(Search::new(emu));
+        } else {
+            p.copy = Some(CopyMode::new(emu));
         }
     }
 
@@ -839,11 +1104,14 @@ impl<'a> App<'a> {
                 let Some(emu) = p.emu.as_ref().filter(|_| matches!(p.state, State::Live)) else {
                     return;
                 };
+                if p.search.is_some() || p.copy.is_some() || p.xfer.is_some() {
+                    return;
+                }
                 if emu.paste_needs_confirmation(&text) {
                     let n = text.trim_end_matches(['\n', '\r']).lines().count();
                     p.modal = Some(Modal {
                         dialog: Dialog::paste_confirm(n),
-                        paste: Some(text),
+                        then: Then::Paste(text),
                     });
                 } else {
                     self.paste_to(id, &text).await;
@@ -867,6 +1135,11 @@ impl<'a> App<'a> {
             return;
         };
         match p.state {
+            State::Live if p.xfer.is_some() => {
+                if key == Key::Esc {
+                    self.cancel_xfer(id).await;
+                }
+            }
             State::Live => {
                 let bytes = p
                     .emu
@@ -934,9 +1207,292 @@ impl<'a> App<'a> {
                     )));
                 }
             }
-            Action::Search => self.notice = Some("búsqueda: pendiente".into()),
-            Action::CopyMode => self.notice = Some("modo copia: pendiente".into()),
+            Action::Search | Action::CopyMode => self.enter_mode(a),
+            Action::ZmodemSend => self.open_modal(|_| {
+                (
+                    send_dialog("Ejecute antes `rz` en el remoto."),
+                    Then::ZmodemSend,
+                )
+            }),
+            Action::RunScript => {
+                let dir = self.paths.scripts_dir.clone();
+                self.open_modal(|_| (script_dialog(&dir), Then::Script));
+            }
             _ => {}
+        }
+    }
+
+    // ---- Zmodem y scripts ----
+
+    /// Abre un diálogo modal en el panel con foco si está vivo y sin otro diálogo.
+    fn open_modal(&mut self, make: impl FnOnce(&Pane) -> (Dialog, Then)) {
+        let Some(p) = self.focus_id().and_then(|id| self.panes.get_mut(&id)) else {
+            return;
+        };
+        if matches!(p.state, State::Live) && p.modal.is_none() && p.xfer.is_none() {
+            let (dialog, then) = make(p);
+            p.modal = Some(Modal { dialog, then });
+        }
+    }
+
+    async fn modal_answer(&mut self, id: PaneId, then: Then, ans: Answer) {
+        match (then, ans) {
+            (Then::Paste(t), Answer::Confirm(true)) => self.paste_to(id, &t).await,
+            (Then::ZmodemRecv, Answer::Confirm(true)) => {
+                let dir = self.paths.downloads_dir.clone();
+                self.start_zmodem(id, ZKind::Recv(dir));
+            }
+            (Then::ZmodemSend, Answer::Secret(Some(v))) => {
+                let files: Vec<PathBuf> = v
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                if files.is_empty() {
+                    self.zmodem_decline(id).await;
+                } else {
+                    self.start_zmodem(id, ZKind::Send(files));
+                }
+            }
+            (Then::ZmodemRecv | Then::ZmodemSend, _) => self.zmodem_decline(id).await,
+            (Then::Script, Answer::Secret(Some(v))) => self.run_script(id, v.trim()).await,
+            _ => {}
+        }
+    }
+
+    /// Rechazo de una petición Zmodem del remoto: lo retenido vuelve al emulador, se avisa
+    /// al remoto con la cancelación y no se vuelve a preguntar durante un rato.
+    async fn zmodem_decline(&mut self, id: PaneId) {
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        let Some(hold) = p.zm_hold.take() else {
+            return; // envío manual cancelado: el remoto no había pedido nada
+        };
+        p.zm_quiet = Some(Instant::now() + ZMODEM_QUIET);
+        if let Some(e) = p.emu.as_mut() {
+            e.process(&hold);
+        }
+        self.send(id, &CANCEL).await;
+    }
+
+    fn start_zmodem(&mut self, id: PaneId, kind: ZKind) {
+        let ui = self.tx.clone();
+        let Some(p) = self.panes.get_mut(&id).filter(|p| p.xfer.is_none()) else {
+            return;
+        };
+        let Some(writer) = p.out.as_ref().map(|o| o.writer.clone()) else {
+            return;
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Some(hold) = p.zm_hold.take() {
+            let _ = tx.send(hold); // la petición del remoto que motivó la transferencia
+        }
+        let receiving = matches!(kind, ZKind::Recv(_));
+        let mut io = PaneIo::new(rx, writer);
+        let task = tokio::spawn(async move {
+            let mut prog = |x: Progress| {
+                let _ = ui.send(Msg::Xfer(id, XferMsg::Progress(x)));
+            };
+            let r = match kind {
+                ZKind::Recv(dir) => {
+                    friki_zmodem::receive(&mut io, FileProtocol::Zmodem, &dir, &mut prog).await
+                }
+                ZKind::Send(files) => {
+                    friki_zmodem::send(&mut io, FileProtocol::Zmodem, &files, &mut prog)
+                        .await
+                        .map(|()| files)
+                }
+            };
+            let _ = ui.send(Msg::Xfer(id, XferMsg::Done(r)));
+        });
+        p.xfer = Some(Xfer {
+            tx,
+            task,
+            receiving,
+            progress: None,
+        });
+    }
+
+    async fn cancel_xfer(&mut self, id: PaneId) {
+        let Some(x) = self.panes.get_mut(&id).and_then(|p| p.xfer.take()) else {
+            return;
+        };
+        x.task.abort();
+        self.send(id, &CANCEL).await;
+        self.notice = Some("transferencia Zmodem cancelada".into());
+    }
+
+    fn xfer_msg(&mut self, id: PaneId, m: XferMsg) {
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        match m {
+            XferMsg::Progress(pr) => {
+                if let Some(x) = p.xfer.as_mut() {
+                    x.progress = Some(pr);
+                }
+            }
+            XferMsg::Done(r) => {
+                let Some(x) = p.xfer.take() else {
+                    return; // cancelada antes de llegar
+                };
+                p.modal = Some(match r {
+                    Ok(files) => {
+                        let mut l = vec![format!(
+                            "{} {} fichero(s):",
+                            if x.receiving { "Recibidos" } else { "Enviados" },
+                            files.len()
+                        )];
+                        l.extend(files.iter().map(|f| f.display().to_string()));
+                        Modal::notice("Zmodem", &l, false)
+                    }
+                    Err(e) => {
+                        Modal::notice("Zmodem: transferencia fallida", &[e.to_string()], true)
+                    }
+                });
+            }
+        }
+    }
+
+    /// Nombre dentro del directorio de scripts (con `.rhai` si falta) o ruta explícita.
+    fn script_path(&self, text: &str) -> PathBuf {
+        let p = Path::new(text);
+        if p.is_absolute() || text.contains(std::path::MAIN_SEPARATOR) || text.starts_with('.') {
+            return p.to_path_buf();
+        }
+        let c = self.paths.scripts_dir.join(text);
+        if c.extension().is_none() {
+            c.with_extension("rhai")
+        } else {
+            c
+        }
+    }
+
+    fn alert(&mut self, id: PaneId, title: &str, line: &str) {
+        if let Some(p) = self.panes.get_mut(&id) {
+            p.modal = Some(Modal::notice(title, &[line.to_string()], true));
+        }
+    }
+
+    async fn run_script(&mut self, id: PaneId, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let path = self.script_path(text);
+        let src = match tokio::fs::read_to_string(&path).await {
+            Ok(s) => s,
+            Err(e) => {
+                let m = format!("{}: {e}", path.display());
+                self.alert(id, "Script", &m);
+                return;
+            }
+        };
+        let dir = self.paths.scripts_dir.clone();
+        // Solo un script del directorio de scripts puede abrir o cerrar conexiones.
+        let trusted = match (std::fs::canonicalize(&path), std::fs::canonicalize(&dir)) {
+            (Ok(p), Ok(d)) => p.starts_with(d),
+            _ => false,
+        };
+        let perms = Permissions {
+            read: vec![dir.clone()],
+            write: vec![dir],
+            connect: trusted,
+        };
+        let ui = self.tx.clone();
+        let Some(p) = self.panes.get_mut(&id).filter(|p| p.script.is_none()) else {
+            return;
+        };
+        let shared = Arc::new(Shared::default());
+        shared.set_writer(p.out.as_ref().map(|o| o.writer.clone()));
+        if let Some(e) = &p.emu {
+            shared.set_screen(&e.screen());
+        }
+        let req_tx = ui.clone();
+        let host = Arc::new(PaneHost::new(
+            shared.clone(),
+            Arc::new(move |r| req_tx.send(Msg::Script(id, r)).is_ok()),
+        ));
+        let task = tokio::spawn(async move {
+            let r = friki_script::run(&src, &[], host, &perms, &Limits::default()).await;
+            let _ = ui.send(Msg::ScriptDone(id, r));
+        });
+        p.script = Some(ScriptRun {
+            shared,
+            task,
+            cancelled: false,
+        });
+    }
+
+    fn cancel_script(&mut self) {
+        if let Some(s) = self
+            .focus_id()
+            .and_then(|id| self.panes.get_mut(&id))
+            .and_then(|p| p.script.as_mut())
+        {
+            s.cancelled = true;
+            s.shared.cancel();
+        }
+    }
+
+    fn script_done(&mut self, id: PaneId, r: Result<i64, ScriptError>) {
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        let Some(run) = p.script.take() else {
+            return;
+        };
+        match r {
+            // Un mensaje del propio script (`MessageBox`) tiene prioridad.
+            Ok(0) => {
+                self.notice.get_or_insert_with(|| "script terminado".into());
+            }
+            Ok(c) => self.notice = Some(format!("script terminado con código {c}")),
+            Err(_) if run.cancelled => self.notice = Some("script cancelado".into()),
+            Err(e) => {
+                p.modal = Some(Modal::notice("Error del script", &[e.to_string()], true));
+            }
+        }
+    }
+
+    async fn script_req(&mut self, id: PaneId, r: HostReq) {
+        match r {
+            HostReq::Message(t) => self.notice = Some(clean(&t)),
+            HostReq::Disconnect => self.close_pane(id).await,
+            HostReq::Connect(target, reply) => {
+                let sessions = load_sessions(&self.paths.sessions_dir).unwrap_or_default();
+                let Some(p) = self.panes.get_mut(&id) else {
+                    let _ = reply.send(Err("el panel ya no existe".into()));
+                    return;
+                };
+                if !p.over() {
+                    let _ = reply.send(Err("el panel ya está conectado".into()));
+                    return;
+                }
+                let Some(s) = resolve_target(&sessions, target.trim()) else {
+                    let _ = reply.send(Err("destino no válido".into()));
+                    return;
+                };
+                p.host = label(&s);
+                p.session = s.clone();
+                p.state = State::Connecting;
+                p.emu = None;
+                p.out = None;
+                p.exit = None;
+                p.outcome = None;
+                p.modal = None;
+                p.search = None;
+                p.copy = None;
+                p.pending_connect = Some(reply);
+                p.task = Some(spawn_connect(
+                    self.tx.clone(),
+                    id,
+                    s,
+                    self.paths.known_hosts.clone(),
+                    p.size,
+                ));
+            }
         }
     }
 
@@ -964,6 +1520,15 @@ impl<'a> App<'a> {
                     "ENTRADA DESCARTADA (cola llena)".into()
                 } else if self.keymap.is_armed() {
                     "prefijo ...".into()
+                } else if p.xfer.is_some() {
+                    "ZMODEM".into()
+                } else if p.search.is_some() {
+                    "búsqueda".into()
+                } else if let Some(c) = &p.copy {
+                    match c.selecting() {
+                        Some(_) => "copia (selección)".into(),
+                        None => "copia".into(),
+                    }
                 } else if emu.as_ref().is_some_and(|e| e.alternate_screen()) {
                     "pantalla alternativa".into()
                 } else if let Some(e) = emu.as_ref().filter(|e| e.scroll_offset() > 0) {
@@ -1049,6 +1614,7 @@ impl<'a> App<'a> {
                     forwards: &forwards,
                     legacy: p.legacy,
                     log_warn: p.out.as_ref().and_then(|o| o.log.warn.as_deref()),
+                    script: p.script.is_some(),
                 };
                 status_line(&info, &hint, bar.width)
             }
@@ -1142,6 +1708,17 @@ impl<'a> App<'a> {
             }
             (state, Some(s)) => {
                 screen_to_buffer(s, f.buffer_mut(), area, &p.theme);
+                if let Some(e) = &p.emu {
+                    if let Some(sr) = &p.search {
+                        sr.render(f, area, e);
+                    }
+                    if let Some(cm) = &p.copy {
+                        cm.render(f, area, e);
+                    }
+                }
+                if let Some(x) = &p.xfer {
+                    note(f, x.line(area.width), rev, area.height.saturating_sub(1));
+                }
                 if let State::Ended(label) = state {
                     let row = area.height.saturating_sub(1);
                     note(
@@ -1163,6 +1740,7 @@ impl<'a> App<'a> {
     async fn shutdown(&mut self) {
         let mut handles = std::mem::take(&mut self.disconnects);
         for p in self.panes.values_mut() {
+            p.stop_jobs();
             if let Some(t) = p.task.take() {
                 t.abort();
             }
@@ -1180,6 +1758,69 @@ impl<'a> App<'a> {
     }
 }
 
+fn is_ctrl_c(k: &KeyEvent) -> bool {
+    k.modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+        && k.code == crossterm::event::KeyCode::Char('c')
+}
+
+/// Señal Zmodem en `d`, o partida entre el final de `tail` y el principio de `d`.
+fn zmodem_start(tail: &[u8], d: &[u8]) -> Option<ZmodemStart> {
+    friki_zmodem::detect(d).or_else(|| {
+        if tail.is_empty() {
+            return None;
+        }
+        let mut joined = tail.to_vec();
+        joined.extend_from_slice(&d[..d.len().min(8)]);
+        friki_zmodem::detect(&joined)
+    })
+}
+
+/// Guarda los últimos bytes del flujo (la señal Zmodem ocupa 6).
+fn keep_tail(tail: &mut Vec<u8>, d: &[u8]) {
+    const N: usize = 8;
+    tail.extend_from_slice(d);
+    if tail.len() > N {
+        tail.drain(..tail.len() - N);
+    }
+}
+
+fn send_dialog(first_line: &str) -> Dialog {
+    let mut d = Dialog::text("Zmodem: enviar ficheros", "Rutas (separadas por ;): ", "");
+    d.body = vec![first_line.into()];
+    d
+}
+
+/// Selector de script: lista los `.rhai` de `dir` y pide un nombre o una ruta.
+fn script_dialog(dir: &Path) -> Dialog {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".rhai"))
+        .collect();
+    names.sort();
+    let initial = if names.len() == 1 {
+        names[0].as_str()
+    } else {
+        ""
+    };
+    let mut d = Dialog::text("Ejecutar script", "Script (nombre o ruta): ", initial);
+    d.body = vec![format!("Scripts en {}:", clean(&dir.display().to_string()))];
+    if names.is_empty() {
+        d.body.push("  (ninguno)".into());
+    }
+    d.body
+        .extend(names.iter().take(12).map(|n| format!("  {}", clean(n))));
+    d
+}
+
+enum ZKind {
+    Recv(PathBuf),
+    Send(Vec<PathBuf>),
+}
+
 fn lines(v: Vec<String>) -> Vec<Line<'static>> {
     v.into_iter().map(Line::from).collect()
 }
@@ -1190,6 +1831,7 @@ pub(crate) async fn run_loop<B, S>(
     initial: Option<SessionConfig>,
     paths: &Paths,
     exit_with_last: bool,
+    host_out: Box<dyn Write + Send>,
 ) -> anyhow::Result<i32>
 where
     B: Backend,
@@ -1197,7 +1839,7 @@ where
     S: Stream<Item = std::io::Result<Event>> + Unpin,
 {
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
-    let mut app = App::new(tx, paths, exit_with_last);
+    let mut app = App::new(tx, paths, exit_with_last, host_out);
     let size = tui.size()?;
     app.size = (size.width, size.height);
     match initial {
@@ -1245,6 +1887,8 @@ mod tests {
     use futures_util::stream;
     use ratatui::backend::TestBackend;
 
+    use crate::Log;
+
     fn key(c: KeyCode) -> Event {
         Event::Key(KeyEvent::new(c, KeyModifiers::NONE))
     }
@@ -1278,6 +1922,8 @@ mod tests {
             known_hosts: d.join("known_hosts"),
             logs_dir: d.join("logs"),
             sessions_dir: d.join("sessions"),
+            downloads_dir: d.join("downloads"),
+            scripts_dir: d.join("scripts"),
         }
     }
 
@@ -1358,5 +2004,267 @@ mod tests {
         let mut k = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         k.kind = KeyEventKind::Release;
         assert!(!pressed(&k));
+    }
+
+    // ---- panel sintético: búsqueda, copia, Zmodem y scripts ----
+
+    struct Rec(std::sync::Mutex<Vec<u8>>);
+
+    impl Rec {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().expect("rec").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamWriter for Rec {
+        async fn write(&self, data: &[u8]) -> std::io::Result<()> {
+            self.0.lock().expect("rec").extend_from_slice(data);
+            Ok(())
+        }
+        async fn resize(&self, _: u16, _: u16) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct HostBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for HostBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("host").extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Fixture {
+        app: App<'static>,
+        rx: mpsc::UnboundedReceiver<Msg>,
+        rec: Arc<Rec>,
+        host: HostBuf,
+    }
+
+    fn fixture(tag: &str) -> Fixture {
+        let d = std::env::temp_dir().join(format!("friki-tui-app-{}-{tag}", std::process::id()));
+        let paths: &'static Paths = Box::leak(Box::new(Paths {
+            known_hosts: d.join("known_hosts"),
+            logs_dir: d.join("logs"),
+            sessions_dir: d.join("sessions"),
+            downloads_dir: d.join("downloads"),
+            scripts_dir: d.join("scripts"),
+        }));
+        std::fs::create_dir_all(&paths.scripts_dir).expect("scripts");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = HostBuf::default();
+        let mut app = App::new(tx, paths, false, Box::new(host.clone()));
+        app.clip = |t| Ok(Clipboard::Osc52(format!("OSC:{t}")));
+        let rec = Arc::new(Rec(std::sync::Mutex::new(vec![])));
+        let mut pane = Pane::new(SessionConfig {
+            name: "t".into(),
+            host: "h".into(),
+            ..Default::default()
+        });
+        pane.state = State::Live;
+        pane.emu = Some(Emulator::new(5, 40, 100));
+        pane.out = Some(Out {
+            writer: rec.clone(),
+            log: Log {
+                logger: None,
+                input: false,
+                warn: None,
+            },
+            dropped: false,
+        });
+        app.panes.insert(1, pane);
+        app.tabs.push(Tab {
+            name: "t".into(),
+            root: Node::Leaf(1),
+            focus: 1,
+        });
+        app.next_id = 2;
+        Fixture { app, rx, rec, host }
+    }
+
+    impl Fixture {
+        async fn press(&mut self, c: KeyCode) {
+            self.app.on_key(KeyEvent::new(c, KeyModifiers::NONE)).await;
+        }
+
+        async fn type_str(&mut self, s: &str) {
+            for c in s.chars() {
+                self.press(KeyCode::Char(c)).await;
+            }
+        }
+
+        /// Prefijo (`Ctrl+]`) y la tecla de la acción.
+        async fn prefixed(&mut self, c: KeyCode, m: KeyModifiers) {
+            let pre = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL);
+            self.app.on_key(pre).await;
+            self.app.on_key(KeyEvent::new(c, m)).await;
+        }
+
+        fn data(&mut self, d: &[u8]) {
+            self.app.stream_event(1, StreamEvent::Data(d.to_vec()));
+        }
+
+        fn pane(&self) -> &Pane {
+            self.app.panes.get(&1).expect("panel")
+        }
+
+        fn screen(&self) -> String {
+            let s = self.pane().emu.as_ref().expect("emu").screen();
+            s.cells.iter().map(|c| c.text.as_str()).collect()
+        }
+
+        /// Procesa mensajes del panel hasta que el script termina.
+        async fn until_script_done(&mut self) {
+            while self.pane().script.is_some() {
+                let m = tokio::time::timeout(Duration::from_secs(10), self.rx.recv())
+                    .await
+                    .expect("el script no terminó")
+                    .expect("canal");
+                self.app.on_msg(m).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn search_and_copy_take_the_keyboard_but_output_keeps_flowing() {
+        let mut f = fixture("modes");
+        f.data(b"hola mundo\r\nadios\r\nmas\r\n");
+        f.prefixed(KeyCode::Char('/'), KeyModifiers::NONE).await;
+        assert!(f.pane().search.is_some());
+        f.type_str("adi").await;
+        assert!(f.rec.bytes().is_empty(), "la búsqueda no envía al remoto");
+        f.data(b"nuevo\r\n");
+        assert!(f.screen().contains("nuevo"));
+        f.press(KeyCode::Esc).await;
+        assert!(f.pane().search.is_none());
+        // Fuera de la búsqueda, la tecla vuelve al remoto.
+        f.type_str("a").await;
+        assert_eq!(f.rec.bytes(), b"a");
+
+        f.prefixed(KeyCode::Char('['), KeyModifiers::NONE).await;
+        assert!(f.pane().copy.is_some());
+        for c in "kkkkk0v$".chars() {
+            f.press(KeyCode::Char(c)).await;
+        }
+        f.press(KeyCode::Char('y')).await;
+        assert!(f.pane().copy.is_none());
+        assert_eq!(f.rec.bytes(), b"a", "la copia no envía al remoto");
+        let sent = f.host.0.lock().expect("host").clone();
+        assert!(sent.starts_with(b"OSC:hola mundo"), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn zmodem_request_asks_and_decline_cancels() {
+        let mut f = fixture("zdecline");
+        f.data(b"\r\n**\x18B00000000000000\r\x11");
+        let m = f.pane().modal.as_ref().expect("diálogo");
+        assert!(m.dialog.body[0].contains("Recibir ficheros por Zmodem en"));
+        assert!(m.dialog.body[0].contains("downloads"));
+        f.press(KeyCode::Char('n')).await;
+        assert!(f.pane().modal.is_none() && f.pane().xfer.is_none());
+        assert_eq!(f.rec.bytes(), [0x18; 5]);
+        // El remoto repite la petición: no se vuelve a preguntar.
+        f.data(b"**\x18B00000000000000\r\x11");
+        assert!(f.pane().modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn zmodem_accept_enters_transfer_mode_and_esc_cancels() {
+        let mut f = fixture("zaccept");
+        // La señal llega partida entre dos lecturas.
+        f.data(b"x**\x18B0");
+        f.data(b"0000000000000\r\x11");
+        assert!(f.pane().modal.is_some());
+        f.press(KeyCode::Char('s')).await;
+        assert!(f.pane().xfer.is_some());
+        f.data(b"basura");
+        assert!(!f.screen().contains("basura"), "el flujo va a Zmodem");
+        f.press(KeyCode::Char('a')).await; // otras teclas no van al remoto
+        f.press(KeyCode::Esc).await;
+        assert!(f.pane().xfer.is_none());
+        let sent = f.rec.bytes();
+        assert!(sent.ends_with(&[0x18; 5]), "{sent:?}");
+        assert!(!sent.contains(&b'a'));
+    }
+
+    #[tokio::test]
+    async fn remote_waiting_for_files_and_manual_send_ask_for_paths() {
+        let mut f = fixture("zsend");
+        f.data(b"**\x18B01000000023be50\r\x11");
+        let m = f.pane().modal.as_ref().expect("diálogo");
+        assert!(m.dialog.body[0].contains("rz"));
+        f.press(KeyCode::Esc).await;
+        assert_eq!(f.rec.bytes(), [0x18; 5]);
+        // Envío manual: sin petición previa del remoto, cancelar no envía nada.
+        f.prefixed(KeyCode::Char('z'), KeyModifiers::NONE).await;
+        assert!(f.pane().modal.is_some());
+        f.press(KeyCode::Esc).await;
+        assert_eq!(f.rec.bytes(), [0x18; 5]);
+    }
+
+    fn write_script(f: &Fixture, name: &str, src: &str) {
+        std::fs::write(f.app.paths.scripts_dir.join(name), src).expect("script");
+    }
+
+    #[tokio::test]
+    async fn script_sends_waits_and_reports() {
+        let mut f = fixture("script-ok");
+        write_script(
+            &f,
+            "t.rhai",
+            "crt.Screen.Send(\"echo friki-ok\\n\");\n\
+             if !crt.Screen.WaitForString(\"friki-ok\", 5) { crt.Quit(3); }\n\
+             crt.Dialog.MessageBox(\"hecho\");",
+        );
+        f.prefixed(KeyCode::Char('r'), KeyModifiers::NONE).await;
+        assert!(f.pane().modal.is_some(), "diálogo de scripts");
+        // Un único script: el campo ya viene con su nombre.
+        f.press(KeyCode::Enter).await;
+        assert!(f.pane().script.is_some());
+        f.data(b"echo friki-ok\r\nfriki-ok\r\n");
+        f.until_script_done().await;
+        assert_eq!(f.rec.bytes(), b"echo friki-ok\n");
+        assert!(f.pane().modal.is_none());
+        assert_eq!(f.app.notice.as_deref(), Some("hecho"));
+    }
+
+    #[tokio::test]
+    async fn script_errors_show_a_notice_and_ctrl_c_cancels() {
+        let mut f = fixture("script-err");
+        write_script(&f, "mal.rhai", "esto no compila (((");
+        f.app.run_script(1, "mal").await;
+        f.until_script_done().await;
+        assert!(f.pane().modal.is_some(), "aviso del error");
+        f.press(KeyCode::Enter).await;
+
+        write_script(
+            &f,
+            "espera.rhai",
+            "crt.Screen.WaitForString(\"nunca\", 60);",
+        );
+        f.app.run_script(1, "espera.rhai").await;
+        assert!(f.pane().script.is_some());
+        f.prefixed(KeyCode::Char('c'), KeyModifiers::CONTROL).await;
+        f.until_script_done().await;
+        assert!(f.pane().modal.is_none());
+        assert_eq!(f.app.notice.as_deref(), Some("script cancelado"));
+    }
+
+    #[tokio::test]
+    async fn script_outside_the_scripts_dir_cannot_disconnect() {
+        let mut f = fixture("script-conn");
+        // Sin permiso (script fuera del directorio de scripts): error de permiso.
+        let outside = std::env::temp_dir().join(format!("friki-out-{}.rhai", std::process::id()));
+        std::fs::write(&outside, "crt.Session.Disconnect();").expect("script");
+        f.app.run_script(1, &outside.display().to_string()).await;
+        f.until_script_done().await;
+        assert!(f.pane().modal.is_some());
+        let _ = std::fs::remove_file(outside);
     }
 }

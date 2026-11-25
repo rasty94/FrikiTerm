@@ -17,8 +17,6 @@
 //!
 //! Las coincidencias se calculan al escribir; si llega salida nueva mientras se
 //! busca no se recalculan (cierre y reabra la búsqueda).
-// Aún no está conectado desde `app`/`lib`: el integrador lo enlaza después.
-#![allow(dead_code)]
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use friki_term::{Match, Terminal};
@@ -58,18 +56,22 @@ impl Search {
         }
     }
 
+    #[cfg(test)]
     pub fn text(&self) -> &str {
         &self.text
     }
 
+    #[cfg(test)]
     pub fn matches(&self) -> &[Match] {
         &self.matches
     }
 
+    #[cfg(test)]
     pub fn current(&self) -> Option<usize> {
         self.current
     }
 
+    #[cfg(test)]
     pub fn case_sensitive(&self) -> bool {
         self.case_sensitive
     }

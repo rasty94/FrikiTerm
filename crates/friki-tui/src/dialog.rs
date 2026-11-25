@@ -191,6 +191,11 @@ impl Dialog {
         )
     }
 
+    /// Pregunta s/n (Esc cancela).
+    pub fn confirm(title: &str, question: &str) -> Self {
+        Self::new(Kind::Confirm, title.into(), vec![question.into()], vec![])
+    }
+
     /// Entrada de una línea con eco y valor inicial (renombrar pestaña). Contesta con
     /// `Answer::Secret(Some(texto))`.
     pub fn text(title: &str, label: &str, initial: &str) -> Self {

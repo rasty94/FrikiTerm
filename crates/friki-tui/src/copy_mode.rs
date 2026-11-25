@@ -16,8 +16,6 @@
 //! Teclas: h/j/k/l y flechas, w/b, 0/$, g/G, PgUp/PgDn; `v` selección normal,
 //! Ctrl+v rectangular (repetir la tecla la cancela); `y`/Enter copia (sin selección
 //! copia la línea del cursor) y sale; Esc/`q` sale sin copiar.
-// Aún no está conectado desde `app`/`lib`: el integrador lo enlaza después.
-#![allow(dead_code)]
 
 use base64::Engine;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -118,6 +116,7 @@ impl CopyMode {
         m
     }
 
+    #[cfg(test)]
     pub fn cursor(&self) -> Pos {
         self.cursor
     }

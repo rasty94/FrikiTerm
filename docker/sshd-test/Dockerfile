@@ -6,7 +6,7 @@
 FROM debian:bookworm-20260202-slim@sha256:98f4b71de414932439ac6ac690d7060df1f27161073c5036a7553723881bffbe
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-server \
+ && apt-get install -y --no-install-recommends openssh-server lrzsz \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --shell /bin/sh friki \
  && install -d -m 700 -o friki -g friki /home/friki/.ssh \
