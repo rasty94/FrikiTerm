@@ -1,4 +1,4 @@
-//! Transferencia de ficheros por la sesión de terminal: Xmodem, Ymodem y Zmodem (TODO.md §4).
+//! Transferencia de ficheros por la sesión de terminal: Xmodem, Ymodem, Zmodem y Kermit (TODO.md §4).
 //! Funciona sobre cualquier flujo de bytes; la TUI lo conecta al panel.
 //!
 //! Implementación propia y acotada. Limitaciones conocidas: Zmodem usa posiciones de 32 bits
@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+mod kermit;
 mod xy;
 mod z;
 
@@ -27,6 +28,7 @@ pub enum FileProtocol {
     Xmodem,
     Ymodem,
     Zmodem,
+    Kermit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,9 @@ pub async fn receive_ex<T: AsyncRead + AsyncWrite + Unpin + Send>(
         FileProtocol::Xmodem => xy::receive(io, false, dest_dir, progress, max_total_bytes).await?,
         FileProtocol::Ymodem => xy::receive(io, true, dest_dir, progress, max_total_bytes).await?,
         FileProtocol::Zmodem => z::receive(io, dest_dir, progress, max_total_bytes).await?,
+        FileProtocol::Kermit => {
+            kermit::receive(io, dest_dir, progress, max_total_bytes, Default::default()).await?
+        }
     };
     Ok(Received { files, leftover })
 }
@@ -123,6 +128,7 @@ pub async fn send<T: AsyncRead + AsyncWrite + Unpin + Send>(
         FileProtocol::Xmodem => xy::send(io, false, files, progress).await,
         FileProtocol::Ymodem => xy::send(io, true, files, progress).await,
         FileProtocol::Zmodem => z::send(io, files, progress).await,
+        FileProtocol::Kermit => kermit::send(io, files, progress, Default::default()).await,
     }
 }
 

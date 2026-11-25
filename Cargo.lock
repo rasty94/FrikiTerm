@@ -1721,6 +1721,7 @@ dependencies = [
 name = "friki-zmodem"
 version = "0.1.0"
 dependencies = [
+ "portable-pty",
  "tokio",
 ]
 
