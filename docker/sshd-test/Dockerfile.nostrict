@@ -1,0 +1,20 @@
+# OpenSSH 9.5p1 compilado de fuente: SIN strict KEX (llegó en 9.6). Las distros ya lo retrotraen
+# en sus paquetes (Debian, Ubuntu, Alpine), así que no sirve ningún paquete. Solo para pruebas.
+# Puerto 2225: destino del caso negativo de require_strict_kex (Terrapin).
+FROM alpine:3.17@sha256:8fc3dacfb6d69da8d44e42390de777e48577085db99aa4e4af35f483eb08b989
+ARG SSH_VER=9.5p1
+ARG SSH_SHA256=f026e7b79ba7fb540f75182af96dc8a8f1db395f922bbc9f6ca603672686086b
+RUN apk add --no-cache build-base openssl-dev zlib-dev linux-headers curl \
+ && curl -fsSL -o /tmp/ssh.tgz "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_VER}.tar.gz" \
+ && echo "${SSH_SHA256}  /tmp/ssh.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/ssh.tgz -C /tmp && cd /tmp/openssh-${SSH_VER} \
+ && ./configure --prefix=/usr/local --sysconfdir=/etc/ssh --with-privsep-path=/var/empty \
+ && make -j4 && make install-nokeys \
+ && cd / && rm -rf /tmp/ssh.tgz /tmp/openssh-${SSH_VER} \
+ && apk del build-base linux-headers curl \
+ && adduser -D -s /bin/sh friki && passwd -u friki >/dev/null \
+ && install -d -m 755 /var/empty \
+ && install -d -m 700 -o friki -g friki /home/friki/.ssh
+COPY sshd_config.nostrict /etc/ssh/nostrict.conf
+EXPOSE 2225
+ENTRYPOINT ["/bin/sh", "-c", "ssh-keygen -q -t ed25519 -N \"\" -f /etc/ssh/host_ed25519 && exec /usr/local/sbin/sshd -D -e -f /etc/ssh/nostrict.conf"]

@@ -23,6 +23,7 @@ struct Env {
     host: String,
     port: u16,
     legacy_port: Option<u16>,
+    nostrict_port: Option<u16>,
     user: String,
     password: String,
     key: PathBuf,
@@ -50,6 +51,7 @@ fn env() -> Option<Env> {
             host: v("FRIKI_TEST_HOST")?,
             port: v("FRIKI_TEST_PORT")?.parse().ok()?,
             legacy_port: v("FRIKI_TEST_LEGACY_PORT").and_then(|p| p.parse().ok()),
+            nostrict_port: v("FRIKI_TEST_NOSTRICT_PORT").and_then(|p| p.parse().ok()),
             user: v("FRIKI_TEST_USER")?,
             password: v("FRIKI_TEST_PASSWORD")?,
             key: v("FRIKI_TEST_KEY")?.into(),
@@ -834,5 +836,54 @@ async fn require_strict_kex_conecta_con_openssh() {
     let conn = Connection::connect(&c, Arc::new(AcceptAll), prompter(""))
         .await
         .expect("OpenSSH anuncia strict KEX");
+    conn.exec("true").await.expect("exec");
+}
+
+/// Caso negativo: OpenSSH 9.5p1 no anuncia strict KEX. Con `require_strict_kex` se
+/// aborta en el KEX, antes de autenticar, aunque la contraseña sea buena.
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn require_strict_kex_aborta_sin_anuncio_del_servidor() {
+    let Some(e) = env() else { return };
+    let Some(port) = e.nostrict_port else {
+        skip("FRIKI_TEST_NOSTRICT_PORT");
+        return;
+    };
+    let mut c = cfg(&e, vec![AuthMethod::Password]);
+    c.port = port;
+    c.require_strict_kex = true;
+    let pidio = Arc::new(AtomicUsize::new(0));
+    let p = Arc::new(Prompter(e.password.clone(), pidio.clone()));
+    let msg = match Connection::connect(&c, Arc::new(AcceptAll), p).await {
+        Err(Error::Negotiation(m)) => m,
+        otra => panic!("esperaba Negotiation: {:?}", otra.err()),
+    };
+    assert!(msg.contains("kex-strict-s-v00@openssh.com"), "{msg}");
+    assert_eq!(
+        pidio.load(Ordering::SeqCst),
+        0,
+        "no debe llegar a autenticar"
+    );
+}
+
+/// Sin `require_strict_kex` la conexión sigue adelante y avisa de Terrapin.
+#[tokio::test]
+#[ignore = "requiere OpenSSH de pruebas"]
+async fn sin_require_strict_kex_conecta_y_avisa() {
+    let Some(e) = env() else { return };
+    let Some(port) = e.nostrict_port else {
+        skip("FRIKI_TEST_NOSTRICT_PORT");
+        return;
+    };
+    let mut c = cfg(&e, vec![AuthMethod::Password]);
+    c.port = port;
+    let conn = Connection::connect(&c, Arc::new(AcceptAll), prompter(&e.password))
+        .await
+        .expect("por defecto no es error sin strict KEX");
+    assert!(
+        conn.warnings().iter().any(|w| w.contains("strict KEX")),
+        "{:?}",
+        conn.warnings()
+    );
     conn.exec("true").await.expect("exec");
 }

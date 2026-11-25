@@ -291,6 +291,34 @@ fn script_devuelve_su_codigo() {
     );
 }
 
+/// Caso negativo de strict KEX: el servidor sin strict KEX se rechaza con 254 (`Negotiation`).
+#[test]
+#[ignore = "necesita el sshd de pruebas"]
+fn require_strict_kex_sale_con_254() {
+    let e = env("strict");
+    let o = Command::new(env!("CARGO_BIN_EXE_friki"))
+        .env("FRIKI_HOME", e.home.path())
+        .env_remove("SSH_AUTH_SOCK")
+        .args([
+            "exec",
+            "-p",
+            &var("FRIKI_TEST_NOSTRICT_PORT"),
+            "-l",
+            &e.user,
+            "-i",
+            &e.key,
+            "--require-strict-kex",
+            &e.host,
+            "true",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("ejecutar friki");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(254), "{err}");
+    assert!(err.contains("strict KEX"), "{err}");
+}
+
 #[test]
 #[ignore = "necesita el sshd de pruebas"]
 fn script_quit_fuera_de_rango_es_254() {

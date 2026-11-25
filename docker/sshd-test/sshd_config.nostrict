@@ -1,0 +1,25 @@
+# Puerto 2225: como el moderno pero OpenSSH 9.5p1, sin strict KEX (ver Dockerfile.nostrict).
+Port 2225
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/host_ed25519
+PidFile /run/sshd-nostrict.pid
+LogLevel VERBOSE
+
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+HostKeyAlgorithms ssh-ed25519
+PubkeyAcceptedAlgorithms ssh-ed25519
+
+PermitRootLogin no
+AllowUsers friki
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+PermitEmptyPasswords no
+
+
+# Las pruebas abren muchas conexiones a la vez; con el valor por defecto
+# (10:30:100) sshd descarta al azar el 30% y las pruebas fallan de forma intermitente.
+MaxStartups 100
