@@ -40,18 +40,21 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
-      - name: Pruebas de integración SSH (sshd de pruebas)
+      - name: Pruebas de integración (sshd y telnetd de pruebas)
         if: matrix.os == 'ubuntu-latest'
         env:
           # Sin servidor, las pruebas de integración fallan en vez de saltarse.
           FRIKI_TEST_REQUIRED: "1"
         run: |
           eval "$(scripts/test-sshd.sh up)"
-          cargo test --workspace -- --include-ignored
+          eval "$(scripts/test-telnetd.sh up)"
+          cargo test --workspace --no-fail-fast -- --include-ignored
 
-      - name: Bajar sshd de pruebas
+      - name: Bajar servidores de pruebas
         if: always() && matrix.os == 'ubuntu-latest'
-        run: scripts/test-sshd.sh down
+        run: |
+          scripts/test-telnetd.sh down || true
+          scripts/test-sshd.sh down
 
       - name: Instalar cargo-deny y cargo-audit
         if: matrix.os == 'ubuntu-latest'
