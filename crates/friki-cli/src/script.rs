@@ -237,7 +237,24 @@ pub async fn run(args: ScriptArgs) -> anyhow::Result<i32> {
         }
         None => (Arc::new(NoSession), None),
     };
-    let res = friki_script::run(&source, &args.args, host, &perms, &Limits::default()).await;
+    // Ctrl+C cancela el script (cooperativo: Sleep, esperas y contador de operaciones).
+    let cancel = friki_script::CancelToken::new();
+    let on_ctrl_c = cancel.clone();
+    let watcher = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            on_ctrl_c.cancel();
+        }
+    });
+    let res = friki_script::run_cancellable(
+        &source,
+        &args.args,
+        host,
+        &perms,
+        &Limits::default(),
+        &cancel,
+    )
+    .await;
+    watcher.abort();
     if let Some(c) = conn {
         let _ = c.disconnect().await;
     }

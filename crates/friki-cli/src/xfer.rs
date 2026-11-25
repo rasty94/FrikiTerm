@@ -17,6 +17,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::net::split_host_port;
 use crate::{CodedError, EXIT_OTHER, UsageError, connect_target, failure_code, sanitize_remote};
+use friki_xfer::ErrorKind;
 
 type Fs = Arc<dyn RemoteFs>;
 
@@ -120,7 +121,10 @@ fn bar(file: &str, done: u64, total: Option<u64>) -> String {
 
 /// Pinta los eventos de la cola (barra en stderr si es un TTY, JSON si se pide).
 /// Devuelve el primer fallo.
-async fn progress(mut rx: UnboundedReceiver<QueueEvent>, json: bool) -> Option<String> {
+async fn progress(
+    mut rx: UnboundedReceiver<QueueEvent>,
+    json: bool,
+) -> Option<(String, ErrorKind)> {
     let tty = !json && std::io::stderr().is_terminal();
     let mut totals: HashMap<u64, Option<u64>> = HashMap::new();
     let mut first = None;
@@ -161,14 +165,14 @@ async fn progress(mut rx: UnboundedReceiver<QueueEvent>, json: bool) -> Option<S
                     eprintln!("\r\x1b[K{bytes} bytes transferidos");
                 }
             }
-            QueueEvent::Failed { id, error } => {
+            QueueEvent::Failed { id, error, kind } => {
                 totals.remove(&id);
                 if json {
                     println!("{}", json!({"event":"failed","error":error}));
                 } else {
                     eprintln!("\r\x1b[Kfriki: error: {}", sanitize_remote(&error));
                 }
-                first.get_or_insert(error);
+                first.get_or_insert((error, kind));
             }
             QueueEvent::Cancelled { .. } => {}
         }
@@ -190,9 +194,10 @@ async fn run_jobs(local: Fs, remote: Fs, jobs: Vec<Job>, json: bool) -> anyhow::
         println!("{}", json!({"event":"done","ok":ok,"failed":failed}));
     }
     if failed > 0 {
-        let msg = first.unwrap_or_else(|| "transferencia fallida".into());
+        let (msg, kind) =
+            first.unwrap_or_else(|| ("transferencia fallida".into(), ErrorKind::Other));
         return Err(CodedError(
-            failure_code(&msg),
+            failure_code(kind),
             format!(
                 "{failed} transferencia(s) fallida(s): {}",
                 sanitize_remote(&msg)
@@ -524,6 +529,7 @@ async fn sync_run(args: SyncArgs, remote: Fs, rroot: &str) -> anyhow::Result<()>
             exclude: args.exclude,
         },
         mtime_tolerance: 1,
+        ..Default::default()
     };
     // ponytail: sin caché de directorios; en `--both` decide la fecha más reciente.
     let actions = plan(&*local, "", &*remote, rroot, &opts, None).await?;
@@ -773,8 +779,8 @@ mod tests {
 
     #[test]
     fn xfer_errores_dan_codigos() {
-        assert_eq!(failure_code("E/S: x"), crate::EXIT_NETWORK);
-        assert_eq!(failure_code("permiso denegado: x"), EXIT_OTHER);
-        assert_eq!(failure_code("no existe: x"), EXIT_OTHER);
+        assert_eq!(failure_code(ErrorKind::Network), crate::EXIT_NETWORK);
+        assert_eq!(failure_code(ErrorKind::PermissionDenied), EXIT_OTHER);
+        assert_eq!(failure_code(ErrorKind::NotFound), EXIT_OTHER);
     }
 }

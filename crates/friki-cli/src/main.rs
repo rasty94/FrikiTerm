@@ -128,15 +128,10 @@ fn xfer_code(e: &friki_xfer::Error) -> i32 {
 /// Único punto que traduce un fallo de la cola a código de salida (251/254, o 252/253).
 /// Hoy se deduce del texto; con `QueueEvent::Failed { kind }` se mapea `kind` aquí
 /// (Network → 251, el resto → 254) y el texto desaparece.
-fn failure_code(msg: &str) -> i32 {
-    if msg.starts_with("E/S:") || msg.starts_with("red:") {
-        EXIT_NETWORK
-    } else if msg.starts_with("autenticación:") {
-        EXIT_AUTH
-    } else if msg.starts_with("clave de host") {
-        EXIT_HOST_KEY
-    } else {
-        EXIT_OTHER
+fn failure_code(kind: friki_xfer::ErrorKind) -> i32 {
+    match kind {
+        friki_xfer::ErrorKind::Network => EXIT_NETWORK,
+        _ => EXIT_OTHER,
     }
 }
 
@@ -918,8 +913,11 @@ mod tests {
         assert_eq!(exit_code(&pd), EXIT_OTHER);
         assert_eq!(exit_code(&io), EXIT_NETWORK);
         assert_eq!(exit_code(&red), EXIT_NETWORK);
-        assert_eq!(failure_code("E/S: roto"), EXIT_NETWORK);
-        assert_eq!(failure_code("permiso denegado: x"), EXIT_OTHER);
+        assert_eq!(failure_code(friki_xfer::ErrorKind::Network), EXIT_NETWORK);
+        assert_eq!(
+            failure_code(friki_xfer::ErrorKind::PermissionDenied),
+            EXIT_OTHER
+        );
     }
 
     #[test]
