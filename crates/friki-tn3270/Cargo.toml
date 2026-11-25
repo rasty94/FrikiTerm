@@ -1,0 +1,13 @@
+[package]
+name = "friki-tn3270"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tokio = { version = "1.54.1", features = ["rt", "macros", "time", "net", "io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt", "macros", "io-util"] }

@@ -1665,6 +1665,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "friki-tn3270"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "friki-tui"
 version = "0.1.0"
 dependencies = [
