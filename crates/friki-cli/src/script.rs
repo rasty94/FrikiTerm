@@ -43,10 +43,19 @@ impl StreamHost {
         });
         let s = shared.clone();
         tokio::spawn(async move {
-            while let Some(StreamEvent::Data(d)) = reader.next_event().await {
-                lock(&s.term).process(&d);
-                lock(&s.buf).extend_from_slice(&d);
-                s.notify.notify_one();
+            // `Exit` no corta: aún pueden llegar datos hasta `Closed`/`Lost`.
+            while let Some(ev) = reader.next_event().await {
+                match ev {
+                    StreamEvent::Data(d) => {
+                        lock(&s.term).process(&d);
+                        let mut buf = lock(&s.buf);
+                        buf.extend_from_slice(&d);
+                        cap_buf(&mut buf);
+                        s.notify.notify_one();
+                    }
+                    StreamEvent::Exit(_) => {}
+                    StreamEvent::Closed | StreamEvent::Lost(_) => break,
+                }
             }
             s.closed.store(true, SeqCst);
             s.notify.notify_one();
@@ -78,6 +87,26 @@ impl StreamHost {
                 return Ok(None);
             }
             let _ = tokio::time::timeout(left, self.shared.notify.notified()).await;
+        }
+    }
+}
+
+const MAX_BUF: usize = 256 * 1024;
+
+/// Descarta lo más antiguo para que el búfer no pase de `MAX_BUF`.
+fn cap_buf(buf: &mut Vec<u8>) {
+    if buf.len() > MAX_BUF {
+        buf.drain(..buf.len() - MAX_BUF);
+    }
+}
+
+/// `crt.Quit(n)`: 0 → 0; 1..=249 → n; fuera de rango (los 250..=254 son de friki) → 254.
+fn quit_code(n: i64) -> i32 {
+    match i32::try_from(n) {
+        Ok(c @ 0..=249) => c,
+        _ => {
+            eprintln!("friki: aviso: crt.Quit({n}) fuera de 0..=249; se usa 254");
+            crate::EXIT_OTHER
         }
     }
 }
@@ -212,13 +241,32 @@ pub async fn run(args: ScriptArgs) -> anyhow::Result<i32> {
     if let Some(c) = conn {
         let _ = c.disconnect().await;
     }
-    // El código de salida de un proceso son 8 bits.
-    Ok((res? & 0xff) as i32)
+    Ok(quit_code(res?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_code_rangos() {
+        assert_eq!(quit_code(0), 0);
+        assert_eq!(quit_code(7), 7);
+        assert_eq!(quit_code(249), 249);
+        assert_eq!(quit_code(250), 254);
+        assert_eq!(quit_code(300), 254);
+        assert_eq!(quit_code(-1), 254);
+        assert_eq!(quit_code(1 << 40), 254);
+    }
+
+    #[test]
+    fn buffer_acotado() {
+        let mut b = vec![1u8; MAX_BUF + 10];
+        b.extend_from_slice(&[9, 9]);
+        cap_buf(&mut b);
+        assert_eq!(b.len(), MAX_BUF);
+        assert_eq!(&b[MAX_BUF - 2..], &[9, 9]);
+    }
 
     #[test]
     fn earliest_elige_la_primera_aparicion() {

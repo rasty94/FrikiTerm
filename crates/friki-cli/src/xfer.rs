@@ -25,7 +25,18 @@ fn usage(msg: impl Into<String>) -> anyhow::Error {
 }
 
 /// Separa `destino:ruta` (como scp: los `:` tras un `/` o dentro de `[..]` no cuentan).
+/// Una letra y `:` seguidos de `\`, `/` o el fin (`C:\x`, `c:/x`, `C:`) es una unidad de
+/// Windows, es decir una ruta local, en cualquier plataforma; un host de una letra se
+/// escribe con usuario (`u@c:ruta`).
 pub fn split_remote(spec: &str) -> Option<(&str, &str)> {
+    let b = spec.as_bytes();
+    if b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && matches!(b.get(2), None | Some(b'\\' | b'/'))
+    {
+        return None;
+    }
     let start = spec.find('@').map_or(0, |i| i + 1);
     let host_end = if spec[start..].starts_with('[') {
         start + spec[start..].find(']')? + 1
@@ -465,6 +476,24 @@ async fn remove(fs: &dyn RemoteFs, path: &str) -> friki_xfer::Result<()> {
     }
 }
 
+const MAX_DELETES_SIN_CONFIRMAR: usize = 20;
+
+#[derive(Debug, PartialEq)]
+enum Gate {
+    Go,
+    Ask,
+    Refuse,
+}
+
+/// Más de 20 borrados exigen `--yes` o confirmación en terminal.
+fn delete_gate(n: usize, yes: bool, tty: bool) -> Gate {
+    match (n > MAX_DELETES_SIN_CONFIRMAR && !yes, tty) {
+        (false, _) => Gate::Go,
+        (true, true) => Gate::Ask,
+        (true, false) => Gate::Refuse,
+    }
+}
+
 async fn sync_run(args: SyncArgs, remote: Fs, rroot: &str) -> anyhow::Result<()> {
     let mode = if args.both {
         SyncMode::Both
@@ -481,6 +510,10 @@ async fn sync_run(args: SyncArgs, remote: Fs, rroot: &str) -> anyhow::Result<()>
         if !args.dry_run {
             std::fs::create_dir_all(&dir)?;
         }
+    }
+    // Raíz de origen remota inexistente: error claro antes de planificar (y de borrar nada).
+    if mode == SyncMode::Download && remote.stat(rroot).await?.is_none() {
+        return Err(friki_xfer::Error::NotFound(format!("origen remoto {rroot}")).into());
     }
     let local: Fs = Arc::new(LocalFs::new(dir));
     let opts = SyncOptions {
@@ -504,6 +537,25 @@ async fn sync_run(args: SyncArgs, remote: Fs, rroot: &str) -> anyhow::Result<()>
             }
         }
         return Ok(());
+    }
+    let n_del = actions
+        .iter()
+        .filter(|a| matches!(a, Action::DeleteRemote { .. } | Action::DeleteLocal { .. }))
+        .count();
+    match delete_gate(n_del, args.yes, std::io::stdin().is_terminal()) {
+        Gate::Go => {}
+        Gate::Refuse => {
+            return Err(usage(format!(
+                "el plan borra {n_del} elementos; confirma con --yes"
+            )));
+        }
+        Gate::Ask => {
+            let q = format!("el plan borra {n_del} elementos. ¿Continuar? [s/N] ");
+            let ok = crate::ask(&q, true).await;
+            if !ok.is_some_and(|r| matches!(r.trim(), "s" | "S" | "y" | "Y")) {
+                return Err(usage("cancelado por el usuario"));
+            }
+        }
     }
     if mode != SyncMode::Download {
         mkdir_p(&*remote, rroot).await?;
@@ -571,7 +623,22 @@ pub async fn sync(args: SyncArgs) -> anyhow::Result<i32> {
 
 // ------------------------------------------------------------------ ftp
 
+/// FTP sin TLS: aviso siempre; un usuario no anónimo exige `--insecure-plaintext`.
+fn check_plaintext(c: &FtpConn) -> anyhow::Result<()> {
+    if c.tls {
+        return Ok(());
+    }
+    eprintln!("friki: aviso: FTP sin cifrar; usa --tls si el servidor lo admite");
+    if c.user != "anonymous" && !c.insecure_plaintext {
+        return Err(usage(
+            "credenciales en claro: añade --tls o --insecure-plaintext",
+        ));
+    }
+    Ok(())
+}
+
 async fn ftp_open(c: &FtpConn) -> anyhow::Result<Fs> {
+    check_plaintext(c)?;
     let (host, port) =
         split_host_port(&c.host).ok_or_else(|| usage(format!("destino no válido: {}", c.host)))?;
     let password = match std::env::var("FRIKI_FTP_PASSWORD") {
@@ -641,8 +708,25 @@ mod tests {
         assert_eq!(split_remote("/tmp/a:b"), None);
         assert_eq!(split_remote("fichero"), None);
         assert_eq!(split_remote(":x"), None);
+        assert_eq!(split_remote("C:\\a"), None);
+        assert_eq!(split_remote("c:/a"), None);
+        assert_eq!(split_remote("C:"), None);
+        assert_eq!(split_remote("u@c:ruta"), Some(("u@c", "ruta")));
+        assert_eq!(split_remote("c:ruta"), Some(("c", "ruta")));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn rutas_locales_se_normalizan() {
+        let abs = absolute(Path::new(r"C:\a\b\..\c")).expect("absoluta");
+        assert_eq!(abs, PathBuf::from(r"C:\a\c"));
+        // local_rel depende de la unidad del directorio actual.
+        if abs.starts_with(local_root().expect("raíz")) {
+            assert_eq!(local_rel(&abs).ok().as_deref(), Some("a/c"));
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn rutas_locales_se_normalizan() {
         let abs = absolute(Path::new("/a/b/../c/./d")).expect("absoluta");
@@ -651,6 +735,33 @@ mod tests {
             local_rel(Path::new("/a/b/../c")).ok().as_deref(),
             Some("a/c")
         );
+    }
+
+    #[test]
+    fn ftp_en_claro_exige_flag() {
+        let mut c = FtpConn {
+            host: "h".into(),
+            user: "ana".into(),
+            tls: false,
+            insecure_plaintext: false,
+        };
+        assert!(check_plaintext(&c).is_err());
+        c.insecure_plaintext = true;
+        assert!(check_plaintext(&c).is_ok());
+        c.insecure_plaintext = false;
+        c.tls = true;
+        assert!(check_plaintext(&c).is_ok());
+        c.tls = false;
+        c.user = "anonymous".into();
+        assert!(check_plaintext(&c).is_ok());
+    }
+
+    #[test]
+    fn delete_gate_casos() {
+        assert_eq!(delete_gate(20, false, false), Gate::Go);
+        assert_eq!(delete_gate(21, true, false), Gate::Go);
+        assert_eq!(delete_gate(21, false, true), Gate::Ask);
+        assert_eq!(delete_gate(21, false, false), Gate::Refuse);
     }
 
     #[test]

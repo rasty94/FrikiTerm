@@ -125,7 +125,9 @@ fn xfer_code(e: &friki_xfer::Error) -> i32 {
     }
 }
 
-/// Un fallo de la cola llega como texto (`QueueEvent::Failed`): se clasifica por su prefijo.
+/// Único punto que traduce un fallo de la cola a código de salida (251/254, o 252/253).
+/// Hoy se deduce del texto; con `QueueEvent::Failed { kind }` se mapea `kind` aquí
+/// (Network → 251, el resto → 254) y el texto desaparece.
 fn failure_code(msg: &str) -> i32 {
     if msg.starts_with("E/S:") || msg.starts_with("red:") {
         EXIT_NETWORK
@@ -282,6 +284,13 @@ async fn connect(cfg: &SessionConfig) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+/// Sin shell interactivo no hay quien vigile el agente: se desactiva el reenvío, con aviso.
+fn sin_agente(cfg: &mut SessionConfig) {
+    if std::mem::take(&mut cfg.forward_agent) {
+        eprintln!("friki: aviso: reenvío de agente desactivado en órdenes no interactivas");
+    }
+}
+
 /// Resuelve el destino, aplica las opciones de conexión y conecta.
 async fn connect_target(
     target: &str,
@@ -289,6 +298,7 @@ async fn connect_target(
 ) -> anyhow::Result<Connection> {
     let mut cfg = load_target(target)?;
     conn.apply(&mut cfg);
+    sin_agente(&mut cfg);
     connect(&cfg).await
 }
 

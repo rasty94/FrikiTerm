@@ -6,11 +6,12 @@ version = 2
 unmaintained = "all"
 yanked = "deny"
 # Excepciones revisadas a mano; quitar en cuanto el origen se actualice.
+# Todas: próxima revisión 2027-05-25.
 ignore = [
     # chrono sin mantenimiento: llega solo por russh -> russh-util; no lo usamos directamente.
-    { id = "RUSTSEC-2026-0543", reason = "transitiva de russh-util; revisar al subir russh" },
+    { id = "RUSTSEC-2026-0543", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de russh-util; revisar al subir russh (revisión 2027-05-25)" },
     # smartstring sin mantenimiento: la usa rhai internamente; sin alternativa sin cambiar de motor.
-    { id = "RUSTSEC-2026-0249", reason = "transitiva de rhai; revisar al subir rhai" },
+    { id = "RUSTSEC-2026-0249", reason = "sin mantenimiento, no es vulnerabilidad; transitiva de rhai, sin alternativa sin cambiar de motor; revisar al subir rhai (revisión 2027-05-25)" },
 ]
 
 [licenses]

@@ -340,6 +340,9 @@ pub struct SyncArgs {
     /// Imprime el plan y no cambia nada.
     #[arg(long)]
     pub dry_run: bool,
+    /// No pedir confirmación con más de 20 borrados.
+    #[arg(long)]
+    pub yes: bool,
     #[command(flatten)]
     pub conn: ConnArgs,
     #[arg(long)]
@@ -392,6 +395,9 @@ pub struct FtpConn {
     /// FTPS explícito (AUTH TLS).
     #[arg(long)]
     pub tls: bool,
+    /// Permite usuario y contraseña en claro (sin `--tls`) para un usuario no anónimo.
+    #[arg(long)]
+    pub insecure_plaintext: bool,
 }
 
 #[derive(Debug, clap::Args)]
