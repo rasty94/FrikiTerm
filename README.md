@@ -38,3 +38,16 @@ eval "$(scripts/test-sshd.sh up)"
 FRIKI_TEST_REQUIRED=1 cargo test --workspace -- --include-ignored
 scripts/test-sshd.sh down
 ```
+
+## FrikiTerm Desktop
+
+Aplicación de escritorio (Tauri v2 + Svelte 5) en `apps/desktop`. Trabajo en curso: el backend y la UI se están completando por partes, así que todavía no hay binarios publicados.
+
+```sh
+cd apps/desktop
+npm ci
+npx tauri dev          # desarrollo, con recarga de la UI
+npx tauri build        # empaquetado (dmg, deb, appimage, msi, nsis según plataforma)
+```
+
+En Linux hacen falta las dependencias de sistema de Tauri (`libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libdbus-1-dev`, `pkg-config`). Las comprobaciones de CI están en [`.github/workflows/desktop.yml`](.github/workflows/desktop.yml).

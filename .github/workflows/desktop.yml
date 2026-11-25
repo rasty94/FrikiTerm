@@ -1,0 +1,90 @@
+name: Desktop
+
+on:
+  push:
+    paths:
+      - "apps/desktop/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - ".github/workflows/desktop.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependencias de sistema (Linux, Tauri/WebKitGTK)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev pkg-config
+
+      - name: Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Instalar dependencias de la UI
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Comprobación de Svelte
+        working-directory: apps/desktop
+        run: npm run check
+
+      - name: Compilar la UI
+        # Antes que cargo: generate_context! necesita frontendDist (apps/desktop/dist).
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Pruebas de la UI
+        working-directory: apps/desktop
+        run: npm test
+
+      - name: Auditoría de dependencias de producción
+        working-directory: apps/desktop
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Formato (Rust)
+        working-directory: apps/desktop/src-tauri
+        run: cargo fmt --all --check
+
+      - name: Clippy (Rust)
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests (Rust)
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --no-fail-fast
+
+      - name: Instalar cargo-deny
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-deny@0.22.1
+
+      - name: cargo deny
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop/src-tauri
+        run: cargo deny check
