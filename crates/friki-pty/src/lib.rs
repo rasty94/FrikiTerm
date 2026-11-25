@@ -23,7 +23,8 @@ fn size(cols: u16, rows: u16) -> PtySize {
 /// Las escrituras solo se encolan; un hilo propio las vuelca al PTY, así un hijo que
 /// no lee no puede congelar a quien llama.
 struct Writer {
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    /// `None` cuando el hijo ya terminó y se cerró el PTY.
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     queue: std::sync::mpsc::SyncSender<Vec<u8>>,
 }
 
@@ -43,7 +44,10 @@ impl StreamWriter for Writer {
 
     async fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         let m = self.master.lock().map_err(|_| err("PTY envenenado"))?;
-        m.resize(size(cols, rows)).map_err(err)
+        match m.as_ref() {
+            Some(m) => m.resize(size(cols, rows)).map_err(err),
+            None => Ok(()),
+        }
     }
 }
 
@@ -112,8 +116,28 @@ pub async fn spawn(
         }
     });
     let killer = child.clone_killer();
+    let master = Arc::new(Mutex::new(Some(pair.master)));
+
+    // Hilo que espera al hijo. Al terminar cierra el PTY: en Windows (ConPTY) el lector
+    // no recibe EOF solo porque el hijo acabe; hay que cerrar la pseudoconsola.
+    let waiter_master = Arc::clone(&master);
+    let waiter = std::thread::spawn(move || {
+        let ev = match child.wait() {
+            Ok(st) => StreamEvent::Exit(i32::try_from(st.exit_code()).unwrap_or(i32::MAX)),
+            Err(e) => StreamEvent::Lost(e.to_string()),
+        };
+        if cfg!(windows) {
+            // ponytail: en Unix se deja abierto hasta drenar la salida (EOF llega solo).
+            if let Ok(mut m) = waiter_master.lock() {
+                m.take();
+            }
+        }
+        ev
+    });
 
     let (tx, rx) = mpsc::channel(64);
+    // Segundo "matador" para el hilo lector (el primero lo guarda `Reader` para su `Drop`).
+    let reader_killer = Mutex::new(killer.clone_killer());
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -125,26 +149,22 @@ pub async fn spawn(
                         .blocking_send(StreamEvent::Data(buf[..n].to_vec()))
                         .is_err()
                     {
-                        // Nadie escucha: matar y recoger al hijo (sin zombi).
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        // Nadie escucha: matar al hijo; el hilo `waiter` lo recoge (sin zombi).
+                        let _ = reader_killer.lock().map(|mut k| k.kill());
+                        let _ = waiter.join();
                         return;
                     }
                 }
             }
         }
-        let ev = match child.wait() {
-            Ok(st) => StreamEvent::Exit(st.exit_code() as i32),
-            Err(e) => StreamEvent::Lost(e.to_string()),
-        };
+        let ev = waiter
+            .join()
+            .unwrap_or_else(|_| StreamEvent::Lost("hilo del proceso terminó con pánico".into()));
         let _ = tx.blocking_send(ev);
     });
 
     Ok((
-        Arc::new(Writer {
-            master: Mutex::new(pair.master),
-            queue: wq,
-        }),
+        Arc::new(Writer { master, queue: wq }),
         Box::new(Reader { rx, killer }),
     ))
 }
