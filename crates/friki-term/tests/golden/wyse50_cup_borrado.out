@@ -1,0 +1,13 @@
+size 6x20
+cursor 2,0 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|linea1|
+01||
+02|linea3|
+03|        HOLXX|
+04||
+05||
+attrs: ninguno

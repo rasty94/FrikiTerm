@@ -52,6 +52,8 @@ pub(crate) struct Pre {
     /// Bytes de la cadena OSC/DCS/APC/PM/SOS en curso y si se está descartando por larga.
     slen: usize,
     sdrop: bool,
+    /// Traductor previo de Wyse/TeleVideo (solo con esas emulaciones).
+    wy: Option<crate::wyse::Wyse>,
 }
 
 /// Tope de una cadena OSC/DCS/APC/PM; lo que pasa se descarta (CAN a `vt100`).
@@ -103,7 +105,15 @@ impl Pre {
             awm: true,
             slen: 0,
             sdrop: false,
+            wy: None,
         }
+    }
+
+    pub(crate) fn emulate(mut self, e: friki_core::config::Emulation) -> Self {
+        if crate::wyse::is_wyse_tvi(e) {
+            self.wy = Some(crate::wyse::Wyse::new(e));
+        }
+        self
     }
 
     pub(crate) fn resize(&mut self, cols: u16) {
@@ -134,6 +144,15 @@ impl Pre {
     }
 
     pub(crate) fn run(&mut self, bytes: &[u8], p: &mut vt100::Parser<TitleCb>) {
+        if let Some(w) = self.wy.as_mut() {
+            let mut t = Vec::with_capacity(bytes.len() + 16);
+            w.feed(bytes, &mut t);
+            return self.run_vt(&t, p);
+        }
+        self.run_vt(bytes, p);
+    }
+
+    fn run_vt(&mut self, bytes: &[u8], p: &mut vt100::Parser<TitleCb>) {
         let mut out = Vec::with_capacity(bytes.len() + 16);
         let mut i = 0;
         while i < bytes.len() {
@@ -347,6 +366,18 @@ impl Pre {
             // ANSI.SYS: guardar / restaurar cursor. Con parámetros `CSI s` es DECSLRM.
             (b's', []) => out.extend_from_slice(b"\x1b7"),
             (b'u', []) => out.extend_from_slice(b"\x1b8"),
+            // CBT (vt100 no lo implementa): a la parada anterior con `CSI n D`.
+            (b'Z', [] | b"1") => {
+                let (c, _) = Self::col(out, p);
+                let c = usize::from(c);
+                let prev = (0..c)
+                    .rev()
+                    .find(|&j| self.tabs.get(j).copied().unwrap_or(false))
+                    .unwrap_or(0);
+                if c > prev {
+                    out.extend_from_slice(format!("\x1b[{}D", c - prev).as_bytes());
+                }
+            }
             (b'g', [] | b"0") => {
                 let (c, _) = Self::col(out, p);
                 self.tabs_default = false;

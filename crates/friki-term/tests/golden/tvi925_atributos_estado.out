@@ -1,0 +1,17 @@
+size 4x20
+cursor 1,8 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|sub rev parp|
+01|hiddenok|
+02||
+03||
+attrs:
+  0,0: underline
+  0,1: underline
+  0,2: underline
+  0,4: inverse
+  0,5: inverse
+  0,6: inverse

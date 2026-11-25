@@ -1,0 +1,4 @@
+# fuente: terminfo wy60: controles ^K ^L ^^ ^J ^H, ri=ESC j, hts=ESC 1, cbt=ESC I; sin soporte de protegidos ESC ) / ESC (
+# size: 5 20
+# emulation: wyse60
+\e+uno\r\ndos\r\ntres\x0b\x0b\x0cX\x1eH\e)prot\e(\x0c\x0c\e=$\x20\ejR\e=#\x20\t\e1\tZ\r\t\eI

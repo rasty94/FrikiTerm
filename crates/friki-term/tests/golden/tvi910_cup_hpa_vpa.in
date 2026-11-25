@@ -1,0 +1,4 @@
+# fuente: terminfo tvi910: cup=ESC = r c, clear=^Z, hpa=ESC ] c, vpa=ESC [ r, rev=ESC G 4, rmso=ESC G 0, home=^^
+# size: 6 20
+# emulation: tvi910
+\x1a\e=#(TVI910\e=%#\eG4inv\eG0\eT\e]%A\e[$B\x1eC\e=&#abc\x0b\x0b\eY

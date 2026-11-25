@@ -202,6 +202,10 @@ pub enum Emulation {
     Vt220,
     Linux,
     Ansi,
+    Wyse50,
+    Wyse60,
+    Tvi910,
+    Tvi925,
 }
 
 /// Qué envía la tecla Retroceso.
@@ -700,6 +704,19 @@ mod tests {
             name: name.into(),
             host: format!("{name}.example"),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn emulaciones_wyse_tvi_en_kebab_case() {
+        for (nombre, e) in [
+            ("wyse50", Emulation::Wyse50),
+            ("wyse60", Emulation::Wyse60),
+            ("tvi910", Emulation::Tvi910),
+            ("tvi925", Emulation::Tvi925),
+        ] {
+            let t: TerminalProfile = toml::from_str(&format!("emulation = \"{nombre}\"")).unwrap();
+            assert_eq!(t.emulation, e);
         }
     }
 

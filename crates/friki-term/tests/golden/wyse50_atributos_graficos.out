@@ -1,0 +1,14 @@
+size 4x20
+cursor 3,1 oculto
+alt no
+scrollback 0
+title ""
+rows:
+00|INVok|
+01||
+02||
+03|┼x┌─┐rzs|
+attrs:
+  0,0: inverse
+  0,1: inverse
+  0,2: inverse

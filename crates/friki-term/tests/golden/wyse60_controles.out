@@ -1,0 +1,12 @@
+size 5x20
+cursor 3,0 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|HprotX|
+01|dos|
+02|tres|
+03|R               Z|
+04||
+attrs: ninguno

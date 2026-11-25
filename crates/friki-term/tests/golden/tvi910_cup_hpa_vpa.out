@@ -1,0 +1,13 @@
+size 6x20
+cursor 3,6 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|C|
+01||
+02||
+03||
+04||
+05||
+attrs: ninguno

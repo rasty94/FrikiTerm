@@ -1,0 +1,6 @@
+# fuente: terminfo wy50 (ncurses terminfo.src): clear=ESC +, cup=ESC = r c (+32), el=ESC T, ed=ESC Y, il1=ESC E, dl1=ESC R
+# size: 6 20
+# emulation: wyse50
+\e+\e=#(HOLA\e=%$mundo\e=#+XX
+\e=&#abcdef\e=&&\eT
+\e=\x20\x20linea1\r\nlinea2\r\nlinea3\e=!\x20\eE\e=\x22\x20\eR

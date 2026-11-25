@@ -14,6 +14,7 @@ use std::num::NonZeroU16;
 use std::path::Path;
 
 mod pre;
+mod wyse;
 
 use friki_core::config::{BackspaceMode, Emulation, LogConfig, TerminalProfile};
 
@@ -318,7 +319,7 @@ impl Terminal {
             }
         }
         Self {
-            pre: pre::Pre::new(cols.max(1)),
+            pre: pre::Pre::new(cols.max(1)).emulate(profile.emulation),
             parser: vt100::Parser::new_with_callbacks(
                 nz(rows),
                 nz(cols),
@@ -345,6 +346,10 @@ impl Terminal {
             Emulation::Vt220 => "vt220",
             Emulation::Linux => "linux",
             Emulation::Ansi => "ansi",
+            Emulation::Wyse50 => "wy50",
+            Emulation::Wyse60 => "wy60",
+            Emulation::Tvi910 => "tvi910",
+            Emulation::Tvi925 => "tvi925",
         }
     }
 
@@ -531,6 +536,13 @@ impl Terminal {
         }
         let app = self.parser.screen().application_cursor();
         let e = self.emulation;
+        if let Some(b) = wyse::encode_key(e, key).filter(|_| wyse::is_wyse_tvi(e)) {
+            return if mods.alt {
+                [vec![0x1b], b].concat()
+            } else {
+                b
+            };
+        }
         // Solo xterm codifica modificadores en CSI (`ESC[1;5A`); el resto los ignora.
         let m = if e == Emulation::Xterm {
             1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.ctrl)
@@ -1332,6 +1344,10 @@ mod tests {
         assert_eq!(Terminal::term_name(Emulation::Vt220), "vt220");
         assert_eq!(Terminal::term_name(Emulation::Linux), "linux");
         assert_eq!(Terminal::term_name(Emulation::Ansi), "ansi");
+        assert_eq!(Terminal::term_name(Emulation::Wyse50), "wy50");
+        assert_eq!(Terminal::term_name(Emulation::Wyse60), "wy60");
+        assert_eq!(Terminal::term_name(Emulation::Tvi910), "tvi910");
+        assert_eq!(Terminal::term_name(Emulation::Tvi925), "tvi925");
     }
 
     #[test]

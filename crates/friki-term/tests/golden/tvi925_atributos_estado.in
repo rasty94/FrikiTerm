@@ -1,0 +1,4 @@
+# fuente: terminfo tvi925: smul=ESC G 8, smso=ESC G 4, rmso=ESC G 0, cvvis=ESC . 2, civis: ESC . 0, tsl=ESC h ESC f ... CR (status), flash ESC b/ESC d
+# size: 4 20
+# emulation: tvi925
+\e+\eG8sub\eG0 \eG4rev\eG0 \eG2parp\eG0\r\n\e.0\ehhidden\ef\x20estado\rok\eb\ed\e.2

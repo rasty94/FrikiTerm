@@ -16,6 +16,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use friki_core::config::{Emulation, TerminalProfile};
 use friki_term::{Cell, Color, Terminal};
 
 /// Diferencias conocidas entre el emulador y la fuente citada en el `.in`. El `.out` del
@@ -32,6 +33,7 @@ enum Step {
 
 struct Case {
     size: (u16, u16),
+    emulation: Emulation,
     steps: Vec<Step>,
 }
 
@@ -78,6 +80,7 @@ fn unescape(line: &str) -> Result<Vec<u8>, String> {
 
 fn parse_case(text: &str) -> Result<Case, String> {
     let mut size = None;
+    let mut emulation = Emulation::default();
     let mut steps = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let n = n + 1;
@@ -91,6 +94,14 @@ fn parse_case(text: &str) -> Result<Case, String> {
                 [r, c] => size = Some((r, c)),
                 _ => return Err(format!("línea {n}: se esperan FILAS COLS")),
             }
+        } else if let Some(rest) = line.strip_prefix("# emulation:") {
+            emulation = match rest.trim() {
+                "wyse50" => Emulation::Wyse50,
+                "wyse60" => Emulation::Wyse60,
+                "tvi910" => Emulation::Tvi910,
+                "tvi925" => Emulation::Tvi925,
+                o => return Err(format!("línea {n}: emulación {o:?} desconocida")),
+            };
         } else if line.starts_with('#') || line.is_empty() {
             continue;
         } else if let Some(rest) = line.strip_prefix("@resize ") {
@@ -110,7 +121,11 @@ fn parse_case(text: &str) -> Result<Case, String> {
         }
     }
     let size = size.ok_or("falta la cabecera '# size: FILAS COLS'")?;
-    Ok(Case { size, steps })
+    Ok(Case {
+        size,
+        emulation,
+        steps,
+    })
 }
 
 fn color_str(c: Color) -> Option<String> {
@@ -200,7 +215,12 @@ fn dump(t: &Terminal) -> String {
 
 fn run(case: &Case) -> String {
     let (rows, cols) = case.size;
-    let mut t = Terminal::new(rows, cols, SCROLLBACK);
+    let profile = TerminalProfile {
+        scrollback: SCROLLBACK,
+        emulation: case.emulation,
+        ..TerminalProfile::default()
+    };
+    let mut t = Terminal::with_profile(rows, cols, &profile);
     for step in &case.steps {
         match step {
             Step::Bytes(b) => t.process(b),
