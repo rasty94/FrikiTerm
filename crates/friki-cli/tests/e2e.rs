@@ -167,6 +167,27 @@ fn sync_dry_run_y_real() {
 
 #[test]
 #[ignore = "necesita el sshd de pruebas"]
+fn sync_down_con_raiz_remota_inexistente_no_toca_nada() {
+    let e = env("syncmiss");
+    let work = tempfile::tempdir().expect("tempdir");
+    let dir = work.path().join("local");
+    write(&dir.join("importante.txt"), "no borrar");
+    let r = format!("{}:{}/no-existe", e.host, e.tag);
+    let o = e.run(&["sync", &s(&dir), &r, "--down", "--delete", "--yes"]);
+    assert_eq!(
+        o.status.code(),
+        Some(254),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("importante.txt")).expect("leer"),
+        "no borrar"
+    );
+}
+
+#[test]
+#[ignore = "necesita el sshd de pruebas"]
 fn pubkey_install_es_idempotente() {
     let e = env("pubkey");
     let work = tempfile::tempdir().expect("tempdir");
@@ -190,6 +211,12 @@ fn pubkey_install_es_idempotente() {
         .nth(1)
         .expect("base64")
         .to_string();
+
+    // Comentario previo en authorized_keys: debe sobrevivir y no contar como clave.
+    let nota = format!("# nota previa {}", e.tag);
+    e.exec(&format!(
+        "mkdir -p ~/.ssh && echo '{nota}' >> ~/.ssh/authorized_keys"
+    ));
 
     // `-I` autentica con la clave de pruebas; `-i` es la que se instala.
     let install = |e: &Env| {
@@ -231,8 +258,14 @@ fn pubkey_install_es_idempotente() {
         .expect("exec");
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 
+    let nota_n = e.exec(&format!("grep -c '{nota}' ~/.ssh/authorized_keys"));
+    assert_eq!(String::from_utf8_lossy(&nota_n.stdout).trim(), "1");
+
     // Deja el servidor como estaba.
-    e.exec(&format!("sed -i '/{blob}/d' ~/.ssh/authorized_keys"));
+    e.exec(&format!(
+        "sed -i -e '/{blob}/d' -e '/{}/d' ~/.ssh/authorized_keys",
+        e.tag
+    ));
 }
 
 #[test]
@@ -253,6 +286,22 @@ fn script_devuelve_su_codigo() {
     assert_eq!(
         o.status.code(),
         Some(3),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
+#[ignore = "necesita el sshd de pruebas"]
+fn script_quit_fuera_de_rango_es_254() {
+    let e = env("quit");
+    let work = tempfile::tempdir().expect("tempdir");
+    let sc = work.path().join("q.rhai");
+    write(&sc, "crt.Quit(300);");
+    let o = e.run(&["script", &s(&sc), "--target", &e.host]);
+    assert_eq!(
+        o.status.code(),
+        Some(254),
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );

@@ -5,7 +5,8 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use friki_cli::cli::{ConnArgs, PubkeyArgs};
 use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::FileAttributes;
+use russh_sftp::protocol::{FileAttributes, OpenFlags};
+use tokio::io::AsyncWriteExt;
 
 use crate::{UsageError, connect_target, home_dir};
 
@@ -42,6 +43,10 @@ fn read_pubkey(path: Option<&Path>) -> anyhow::Result<String> {
 
 /// (tipo, base64) de una línea de `authorized_keys`; ignora opciones y comentarios.
 fn key_id(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
     let mut f = line.split_whitespace();
     f.find(|t| t.starts_with("ssh-") || t.starts_with("ecdsa-") || t.starts_with("sk-"))
         .and_then(|ty| f.next().map(|b| (ty, b)))
@@ -107,8 +112,41 @@ async fn add_key(sftp: &SftpSession, key: &str) -> anyhow::Result<bool> {
     let Some(new) = with_key(&existing, key) else {
         return Ok(false);
     };
-    sftp.write(AUTHORIZED, new.as_bytes()).await?;
-    sftp.set_metadata(AUTHORIZED, mode(0o600)).await?;
+    // Temporal 0600 + rename: un corte a medias nunca deja `authorized_keys` truncado.
+    let tmp = format!("{AUTHORIZED}.friki-tmp");
+    let mut f = sftp
+        .open_with_flags_and_attributes(
+            tmp.as_str(),
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            mode(0o600),
+        )
+        .await?;
+    f.write_all(new.as_bytes()).await?;
+    f.shutdown().await?;
+    drop(f);
+    sftp.set_metadata(tmp.as_str(), mode(0o600)).await?;
+    let renamed = match sftp.posix_rename(tmp.as_str(), AUTHORIZED).await {
+        Ok(true) => true,
+        _ => sftp.rename(tmp.as_str(), AUTHORIZED).await.is_ok(),
+    };
+    if !renamed {
+        // Sin sobrescritura por rename: se añade solo la línea nueva, sin truncar.
+        let _ = sftp.remove_file(tmp.as_str()).await;
+        let sep = if existing.is_empty() || existing.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let mut f = sftp
+            .open_with_flags(
+                AUTHORIZED,
+                OpenFlags::WRITE | OpenFlags::APPEND | OpenFlags::CREATE,
+            )
+            .await?;
+        f.write_all(format!("{sep}{key}\n").as_bytes()).await?;
+        f.shutdown().await?;
+        sftp.set_metadata(AUTHORIZED, mode(0o600)).await?;
+    }
     Ok(true)
 }
 
@@ -132,6 +170,13 @@ mod tests {
         assert!(with_key("ssh-ed25519 AAAAC3Nza otro\n", K).is_none());
         assert!(with_key("from=\"1.2.3.4\" ssh-ed25519 AAAAC3Nza\n", K).is_none());
         assert!(with_key("ssh-ed25519 AAAAC3NzaDISTINTA\n", K).is_some());
+    }
+
+    #[test]
+    fn ignora_comentadas_y_vacias() {
+        assert!(key_id("# ssh-ed25519 AAAAC3Nza x").is_none());
+        assert!(key_id("   ").is_none());
+        assert!(with_key("# ssh-ed25519 AAAAC3Nza x\n\n", K).is_some());
     }
 
     #[test]

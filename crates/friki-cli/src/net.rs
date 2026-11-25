@@ -82,6 +82,7 @@ pub async fn fwd(args: FwdArgs) -> anyhow::Result<i32> {
     if forwards.is_empty() {
         return Err(UsageError("fwd necesita al menos un -L, -R o -D".into()).into());
     }
+    crate::sin_agente(&mut cfg);
     let conn = connect(&cfg).await?;
     for f in &forwards {
         let h = conn.start_forward(f).await?;

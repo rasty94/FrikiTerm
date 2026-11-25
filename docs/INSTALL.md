@@ -134,3 +134,13 @@ cargo deb --no-build -p friki-cli --output target/debian/
 ```
 
 En macOS y Windows el `.deb` no se puede generar: `$auto` necesita `dpkg-shlibdeps`.
+
+## 5. Para mantenedores: preparar el entorno de release
+
+El job que firma y publica usa `environment: release`. Antes de la primera release hay que configurarlo en GitHub:
+
+1. Settings > Environments > New environment: `release`. Añade revisores obligatorios (Required reviewers) y, si procede, desactiva la aprobación por quien lanzó el tag.
+2. Settings > Rules > Rulesets (o Tags protegidos): protege el patrón de tag `v*` para que solo los mantenedores puedan crearlo, moverlo o borrarlo.
+3. En el entorno `release`, restringe las ramas/tags de despliegue a `v*`.
+
+Antes de firmar, el workflow ejecuta el job `verify` (fmt, clippy, tests, `cargo deny check`, `cargo audit -D warnings`); si falla, no se construye ni se publica nada.

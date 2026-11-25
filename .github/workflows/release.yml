@@ -12,8 +12,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    name: Verificar (fmt, clippy, tests, deny, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependencias de sistema (Linux, keyring/dbus)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - name: Formato
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Instalar cargo-deny y cargo-audit
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-deny@0.22.1,cargo-audit@0.23.0
+
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: cargo audit
+        run: cargo audit -D warnings
+
   build:
     name: build (${{ matrix.target }})
+    needs: verify
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -120,9 +158,11 @@ jobs:
 
   release:
     name: Firmar, atestar y publicar
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Entorno con revisores obligatorios: nadie firma ni publica sin aprobación (docs/INSTALL.md).
+    environment: release
     # Único job con id-token: el OIDC de GitHub se usa solo para la firma keyless y la atestación.
     permissions:
       contents: write
