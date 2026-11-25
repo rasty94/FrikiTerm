@@ -1626,6 +1626,7 @@ name = "friki-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "friki-core",
  "friki-session",
  "friki-ssh",
@@ -1635,6 +1636,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "zeroize",
