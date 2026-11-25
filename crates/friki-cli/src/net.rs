@@ -1,9 +1,41 @@
 //! `fwd` y los subcomandos que abren la TUI con un protocolo distinto de SSH.
 
-use friki_cli::cli::{FwdArgs, SerialArgs, ShellArgs, TelnetArgs};
+use friki_cli::cli::{FwdArgs, SerialArgs, ShellArgs, TelnetArgs, TftpServerArgs};
 use friki_core::config::{Forward, Protocol, SerialConfig, SessionConfig};
 
-use crate::{UsageError, connect, load_target, sanitize_remote};
+use crate::{CodedError, EXIT_NETWORK, UsageError, connect, load_target, sanitize_remote};
+
+/// Servidor TFTP en primer plano hasta Ctrl+C.
+pub async fn tftp_server(args: TftpServerArgs) -> anyhow::Result<i32> {
+    if !args.root.is_dir() {
+        return Err(UsageError(format!("{} no es un directorio", args.root.display())).into());
+    }
+    let net_err = |e: std::io::Error| CodedError(EXIT_NETWORK, format!("TFTP {}: {e}", args.bind));
+    let sock = tokio::net::UdpSocket::bind(args.bind)
+        .await
+        .map_err(net_err)?;
+    eprintln!(
+        "TFTP en {} sirviendo {} ({})",
+        args.bind,
+        args.root.display(),
+        if args.allow_write {
+            "lectura y escritura"
+        } else {
+            "solo lectura"
+        }
+    );
+    let cfg = friki_tftp::Config {
+        root: args.root.clone(),
+        allow_write: args.allow_write,
+        overwrite: args.overwrite,
+        log: |m| eprintln!("tftp: {}", sanitize_remote(m)),
+    };
+    tokio::select! {
+        r = friki_tftp::serve(sock, cfg) => r.map_err(net_err)?,
+        _ = tokio::signal::ctrl_c() => {}
+    }
+    Ok(0)
+}
 
 /// `host[:puerto]` o `[v6][:puerto]`. Un IPv6 sin corchetes no admite puerto.
 pub fn split_host_port(s: &str) -> Option<(String, Option<u16>)> {
