@@ -14,6 +14,7 @@ pub fn tag(p: Protocol) -> &'static str {
         Protocol::Telnet => "telnet",
         Protocol::TelnetTls => "telnets",
         Protocol::Raw => "raw",
+        Protocol::Tn3270 => "tn3270",
         Protocol::Serial => "serie",
         Protocol::LocalShell => "local",
     }
@@ -23,7 +24,7 @@ pub fn tag(p: Protocol) -> &'static str {
 pub fn label(s: &SessionConfig) -> String {
     match s.protocol {
         Protocol::Ssh => format!("{}:{}", s.host, s.port),
-        Protocol::Telnet | Protocol::TelnetTls | Protocol::Raw => {
+        Protocol::Telnet | Protocol::TelnetTls | Protocol::Raw | Protocol::Tn3270 => {
             format!("{} {}:{}", tag(s.protocol), s.host, s.port)
         }
         Protocol::Serial => format!("serie {}@{}", s.serial.device, s.serial.baud),
@@ -45,11 +46,12 @@ pub fn term_for(s: &SessionConfig) -> String {
     }
 }
 
-/// Opciones de `friki_telnet::connect` para Telnet, Telnet/TLS y RAW.
+/// Opciones de `friki_telnet::connect` para Telnet, Telnet/TLS, RAW y TN3270 (RAW: la
+/// negociación TN3270 la hace `friki-tn3270`).
 pub fn telnet_options(s: &SessionConfig, term: &str) -> TelnetOptions {
     TelnetOptions {
         tls: s.protocol == Protocol::TelnetTls,
-        raw: s.protocol == Protocol::Raw,
+        raw: matches!(s.protocol, Protocol::Raw | Protocol::Tn3270),
         term: term.to_string(),
         connect_timeout_secs: s.connect_timeout_secs,
     }

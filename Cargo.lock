@@ -1688,6 +1688,7 @@ dependencies = [
  "friki-ssh",
  "friki-telnet",
  "friki-term",
+ "friki-tn3270",
  "friki-zmodem",
  "futures-util",
  "ratatui",

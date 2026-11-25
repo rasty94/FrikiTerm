@@ -23,6 +23,8 @@ mod script_host;
 mod search;
 mod target;
 mod theme;
+#[cfg(feature = "tn3270")]
+mod tn3270;
 mod xfer;
 
 use std::io::{Stdout, stdout};
