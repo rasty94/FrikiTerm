@@ -6,8 +6,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod cache;
 pub mod ftp;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod local;
 pub mod queue;
+#[cfg(feature = "s3")]
+pub mod s3;
 pub mod scp;
 pub mod sftp;
 pub mod sync;
