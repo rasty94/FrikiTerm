@@ -117,26 +117,14 @@ pub async fn spawn(
     });
     let killer = child.clone_killer();
     let master = Arc::new(Mutex::new(Some(pair.master)));
-
-    // Hilo que espera al hijo. Al terminar cierra el PTY: en Windows (ConPTY) el lector
-    // no recibe EOF solo porque el hijo acabe; hay que cerrar la pseudoconsola.
-    let waiter_master = Arc::clone(&master);
-    let waiter = std::thread::spawn(move || {
-        let ev = match child.wait() {
-            Ok(st) => StreamEvent::Exit(i32::try_from(st.exit_code()).unwrap_or(i32::MAX)),
-            Err(e) => StreamEvent::Lost(e.to_string()),
-        };
-        if cfg!(windows) {
-            // ponytail: en Unix se deja abierto hasta drenar la salida (EOF llega solo).
-            if let Ok(mut m) = waiter_master.lock() {
-                m.take();
-            }
-        }
-        ev
-    });
-
     let (tx, rx) = mpsc::channel(64);
-    // Segundo "matador" para el hilo lector (el primero lo guarda `Reader` para su `Drop`).
+    // El lector avisa aquí cuando ve EOF (o se rinde), para que `Exit` vaya después de
+    // toda la salida.
+    let (reader_done_tx, reader_done) = std::sync::mpsc::channel::<()>();
+
+    // Lector: solo reenvía datos. No emite el evento final: en Windows (ConPTY) el lector
+    // puede no recibir EOF aunque el hijo haya terminado.
+    let reader_tx = tx.clone();
     let reader_killer = Mutex::new(killer.clone_killer());
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -145,21 +133,33 @@ pub async fn spawn(
                 // EOF o EIO (Linux) = el proceso cerró el PTY
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if tx
+                    if reader_tx
                         .blocking_send(StreamEvent::Data(buf[..n].to_vec()))
                         .is_err()
                     {
-                        // Nadie escucha: matar al hijo; el hilo `waiter` lo recoge (sin zombi).
+                        // Nadie escucha: matar al hijo; el hilo de espera lo recoge (sin zombi).
                         let _ = reader_killer.lock().map(|mut k| k.kill());
-                        let _ = waiter.join();
-                        return;
+                        break;
                     }
                 }
             }
         }
-        let ev = waiter
-            .join()
-            .unwrap_or_else(|_| StreamEvent::Lost("hilo del proceso terminó con pánico".into()));
+        let _ = reader_done_tx.send(());
+    });
+
+    // Espera al hijo y emite el evento final, tras dar al lector hasta 500 ms para
+    // vaciar la salida pendiente (en Unix llega antes por EOF).
+    let waiter_master = Arc::clone(&master);
+    std::thread::spawn(move || {
+        let ev = match child.wait() {
+            Ok(st) => StreamEvent::Exit(i32::try_from(st.exit_code()).unwrap_or(i32::MAX)),
+            Err(e) => StreamEvent::Lost(e.to_string()),
+        };
+        let _ = reader_done.recv_timeout(std::time::Duration::from_millis(500));
+        if let Ok(mut m) = waiter_master.lock() {
+            // Cierra el PTY (en ConPTY, la pseudoconsola) para liberar al lector.
+            m.take();
+        }
         let _ = tx.blocking_send(ev);
     });
 
