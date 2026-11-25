@@ -2,11 +2,14 @@
 :root {
   --bg: #f6f7f9;
   --bg-elev: #ffffff;
+  --bg-hover: #eceff3;
   --fg: #1c1f24;
   --fg-dim: #5b6470;
   --border: #d8dce2;
   --accent: #2f6fed;
   --danger: #d1344b;
+  --warn: #b26a00;
+  --ok: #1d8a4e;
   --term-bg: #ffffff;
   --term-fg: #1c1f24;
   --term-cursor: #2f6fed;
@@ -19,11 +22,14 @@
   :root:not([data-theme="light"]) {
     --bg: #14161a;
     --bg-elev: #1d2026;
+    --bg-hover: #272c35;
     --fg: #e4e7ec;
     --fg-dim: #9099a6;
     --border: #2d323b;
     --accent: #6a9bff;
     --danger: #ff6b81;
+    --warn: #f0b429;
+    --ok: #4cc38a;
     --term-bg: #0f1114;
     --term-fg: #e4e7ec;
     --term-cursor: #6a9bff;
@@ -33,11 +39,14 @@
 :root[data-theme="dark"] {
   --bg: #14161a;
   --bg-elev: #1d2026;
+  --bg-hover: #272c35;
   --fg: #e4e7ec;
   --fg-dim: #9099a6;
   --border: #2d323b;
   --accent: #6a9bff;
   --danger: #ff6b81;
+  --warn: #f0b429;
+  --ok: #4cc38a;
   --term-bg: #0f1114;
   --term-fg: #e4e7ec;
   --term-cursor: #6a9bff;
@@ -45,3 +54,20 @@
 }
 html, body, #app { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+button {
+  font: inherit; color: var(--fg); background: var(--bg-elev);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--bg-hover); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.ghost { background: none; border-color: transparent; color: var(--fg-dim); }
+input, select, textarea {
+  font: inherit; color: var(--fg); background: var(--bg); min-width: 0;
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+}
