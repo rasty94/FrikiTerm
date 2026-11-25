@@ -77,6 +77,26 @@ pub struct Modifiers {
     pub shift: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Down(MouseButton),
+    Up(MouseButton),
+    Drag(MouseButton),
+    /// Movimiento sin botón.
+    Moved,
+    WheelUp,
+    WheelDown,
+    WheelLeft,
+    WheelRight,
+}
+
 /// Máximo de caracteres del título de ventana.
 const MAX_TITLE: usize = 256;
 
@@ -318,7 +338,14 @@ impl Terminal {
             }
         }
         Self {
-            pre: pre::Pre::new(cols.max(1)),
+            pre: pre::Pre::new(
+                cols.max(1),
+                match profile.emulation {
+                    Emulation::Vt100 | Emulation::Ansi => b"\x1b[?1;2c",
+                    Emulation::Linux => b"\x1b[?6c",
+                    _ => b"\x1b[?62;22c",
+                },
+            ),
             parser: vt100::Parser::new_with_callbacks(
                 nz(rows),
                 nz(cols),
@@ -440,6 +467,70 @@ impl Terminal {
 
     pub fn process(&mut self, bytes: &[u8]) {
         self.pre.run(bytes, &mut self.parser);
+    }
+
+    /// Respuestas a consultas del remoto (DSR, CPR, DA1/DA2) acumuladas por `process`; el
+    /// llamador debe escribirlas al remoto. Vacío si no hay ninguna.
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        self.pre.take_replies()
+    }
+
+    /// Codifica un evento de ratón según el modo y la codificación que el remoto activó
+    /// (`col`/`row` base 0, relativos al panel). `None` si el remoto no pidió ese evento o
+    /// la posición no cabe en la codificación.
+    pub fn encode_mouse(
+        &self,
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+        mods: Modifiers,
+    ) -> Option<Vec<u8>> {
+        use vt100::{MouseProtocolEncoding as Enc, MouseProtocolMode as Mode};
+        let s = self.parser.screen();
+        let (mode, enc) = (s.mouse_protocol_mode(), s.mouse_protocol_encoding());
+        let btn = |b: MouseButton| b as u16;
+        let (mut code, release) = match kind {
+            MouseKind::Down(b) => (btn(b), false),
+            MouseKind::Up(b) => (btn(b), true),
+            MouseKind::Drag(b) if matches!(mode, Mode::ButtonMotion | Mode::AnyMotion) => {
+                (btn(b) + 32, false)
+            }
+            MouseKind::Moved if mode == Mode::AnyMotion => (35, false),
+            MouseKind::WheelUp => (64, false),
+            MouseKind::WheelDown => (65, false),
+            MouseKind::WheelLeft => (66, false),
+            MouseKind::WheelRight => (67, false),
+            _ => return None,
+        };
+        match mode {
+            Mode::None => return None,
+            Mode::Press if release => return None,
+            Mode::Press => {} // X10: sin modificadores
+            _ => {
+                code +=
+                    4 * u16::from(mods.shift) + 8 * u16::from(mods.alt) + 16 * u16::from(mods.ctrl);
+            }
+        }
+        let (x, y) = (u32::from(col) + 1, u32::from(row) + 1);
+        if enc == Enc::Sgr {
+            let f = if release { 'm' } else { 'M' };
+            return Some(format!("\x1b[<{code};{x};{y}{f}").into_bytes());
+        }
+        // Sin SGR la suelta no dice qué botón fue.
+        let code = if release { (code & !3) | 3 } else { code };
+        let mut out = b"\x1b[M".to_vec();
+        for v in [u32::from(code), x, y] {
+            let v = v + 32;
+            if enc == Enc::Utf8 && v < 2048 {
+                let mut b = [0u8; 4];
+                out.extend_from_slice(char::from_u32(v)?.encode_utf8(&mut b).as_bytes());
+            } else if v < 256 {
+                out.push(u8::try_from(v).ok()?);
+            } else {
+                return None;
+            }
+        }
+        Some(out)
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -1788,5 +1879,138 @@ mod tests {
         let row: String = (0..3).map(|c| cell(&s, 0, c).text.clone()).collect();
         assert_eq!(row, "abc");
         assert_eq!(s.title, "tx");
+    }
+
+    fn replies(e: Emulation, bytes: &[u8]) -> Vec<u8> {
+        let mut t = Terminal::with_profile(5, 20, &prof(e));
+        t.process(bytes);
+        t.take_replies()
+    }
+
+    #[test]
+    fn dsr_estado() {
+        assert_eq!(replies(Emulation::Xterm, b"\x1b[5n"), b"\x1b[0n");
+    }
+
+    #[test]
+    fn cpr_usa_la_posicion_tras_el_texto_previo() {
+        assert_eq!(replies(Emulation::Xterm, b"\x1b[6n"), b"\x1b[1;1R");
+        assert_eq!(replies(Emulation::Xterm, b"ab\r\ncde\x1b[6n"), b"\x1b[2;4R");
+        // Cursor en espera de ajuste: se informa la última columna.
+        assert_eq!(
+            replies(
+                Emulation::Xterm,
+                &[b"x".repeat(20), b"\x1b[6n".to_vec()].concat()
+            ),
+            b"\x1b[1;20R"
+        );
+    }
+
+    #[test]
+    fn da1_segun_emulacion() {
+        assert_eq!(replies(Emulation::Xterm, b"\x1b[c"), b"\x1b[?62;22c");
+        assert_eq!(replies(Emulation::Vt220, b"\x1b[0c"), b"\x1b[?62;22c");
+        assert_eq!(replies(Emulation::Vt100, b"\x1b[c"), b"\x1b[?1;2c");
+        assert_eq!(replies(Emulation::Linux, b"\x1b[c"), b"\x1b[?6c");
+    }
+
+    #[test]
+    fn da2() {
+        assert_eq!(replies(Emulation::Xterm, b"\x1b[>c"), b"\x1b[>0;10;0c");
+        assert_eq!(replies(Emulation::Xterm, b"\x1b[>0c"), b"\x1b[>0;10;0c");
+    }
+
+    #[test]
+    fn consultas_partidas_entre_trozos() {
+        let mut t = Terminal::new(5, 20, 0);
+        for c in b"hi\x1b[6n" {
+            t.process(&[*c]);
+        }
+        assert_eq!(t.take_replies(), b"\x1b[1;3R");
+        assert!(t.take_replies().is_empty());
+    }
+
+    fn mouse(mode: &str, kind: MouseKind, m: Modifiers) -> Option<Vec<u8>> {
+        let mut t = Terminal::new(5, 20, 0);
+        t.process(mode.as_bytes());
+        t.encode_mouse(kind, 4, 2, m)
+    }
+
+    const L: MouseKind = MouseKind::Down(MouseButton::Left);
+    const NM: Modifiers = Modifiers {
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
+
+    #[test]
+    fn raton_sin_modo_no_codifica() {
+        assert_eq!(mouse("", L, NM), None);
+    }
+
+    #[test]
+    fn raton_x10_solo_pulsaciones() {
+        let m = "\x1b[?9h";
+        assert_eq!(mouse(m, L, NM), Some(b"\x1b[M %#".to_vec()));
+        assert_eq!(mouse(m, MouseKind::Up(MouseButton::Left), NM), None);
+        let ctrl = Modifiers { ctrl: true, ..NM };
+        assert_eq!(mouse(m, L, ctrl), Some(b"\x1b[M %#".to_vec()));
+    }
+
+    #[test]
+    fn raton_normal_default_y_suelta() {
+        let m = "\x1b[?1000h";
+        assert_eq!(mouse(m, L, NM), Some(b"\x1b[M %#".to_vec()));
+        assert_eq!(
+            mouse(m, MouseKind::Up(MouseButton::Right), NM),
+            Some(b"\x1b[M#%#".to_vec())
+        );
+        assert_eq!(mouse(m, MouseKind::Drag(MouseButton::Left), NM), None);
+        assert_eq!(
+            mouse(m, MouseKind::WheelUp, NM),
+            Some(b"\x1b[M`%#".to_vec())
+        );
+    }
+
+    #[test]
+    fn raton_modificadores_y_movimiento() {
+        let all = Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: true,
+        };
+        assert_eq!(
+            mouse("\x1b[?1000h\x1b[?1006h", L, all),
+            Some(b"\x1b[<28;5;3M".to_vec())
+        );
+        let d = MouseKind::Drag(MouseButton::Left);
+        assert_eq!(
+            mouse("\x1b[?1002h\x1b[?1006h", d, NM),
+            Some(b"\x1b[<32;5;3M".to_vec())
+        );
+        assert_eq!(mouse("\x1b[?1002h", MouseKind::Moved, NM), None);
+        assert_eq!(
+            mouse("\x1b[?1003h\x1b[?1006h", MouseKind::Moved, NM),
+            Some(b"\x1b[<35;5;3M".to_vec())
+        );
+    }
+
+    #[test]
+    fn raton_sgr_suelta_conserva_boton() {
+        let up = MouseKind::Up(MouseButton::Middle);
+        assert_eq!(
+            mouse("\x1b[?1000h\x1b[?1006h", up, NM),
+            Some(b"\x1b[<1;5;3m".to_vec())
+        );
+    }
+
+    #[test]
+    fn raton_utf8_y_limite_default() {
+        let mut t = Terminal::new(5, 20, 0);
+        t.process(b"\x1b[?1000h");
+        assert!(t.encode_mouse(L, 300, 0, NM).is_none()); // no cabe en un byte
+        t.process(b"\x1b[?1005h");
+        let b = t.encode_mouse(L, 300, 0, NM).unwrap();
+        assert_eq!(b, "\x1b[M \u{14d}!".as_bytes());
     }
 }

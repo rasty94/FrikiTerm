@@ -13,7 +13,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyEvent, KeyModifiers, MouseButton as CtButton, MouseEvent, MouseEventKind,
+};
 use friki_core::config::{
     AppConfig, Protocol, SessionConfig, load_app_config, load_sessions, resolve_target,
 };
@@ -23,7 +25,7 @@ use friki_script::{CancelToken, Limits, Permissions, ScriptError};
 use friki_ssh::{
     AuthPrompter, Connection, Error, HostKeyDecision, KnownHostsVerifier, Negotiated, Zeroizing,
 };
-use friki_term::{Key, Modifiers, Terminal as Emulator};
+use friki_term::{Key, Modifiers, MouseButton, MouseKind, Terminal as Emulator};
 use friki_zmodem::{FileProtocol, Progress, ZmodemStart};
 use futures_util::{Stream, StreamExt};
 use ratatui::Frame;
@@ -946,16 +948,74 @@ impl<'a> App<'a> {
                 self.size = (w, h);
                 self.relayout().await;
             }
-            Event::Mouse(m) => {
-                let delta = match m.kind {
-                    MouseEventKind::ScrollUp => WHEEL_LINES,
-                    MouseEventKind::ScrollDown => -WHEEL_LINES,
-                    _ => return,
-                };
-                self.scroll_focus(delta);
-            }
+            Event::Mouse(m) => self.on_mouse(m).await,
             _ => {}
         }
+    }
+
+    /// Ratón: si el remoto del panel bajo el puntero pidió eventos se le reenvían (Mayús
+    /// los deja para el comportamiento local); si no, la rueda desplaza el scrollback.
+    async fn on_mouse(&mut self, m: MouseEvent) {
+        if !m.modifiers.contains(KeyModifiers::SHIFT)
+            && self.overlay.is_none()
+            && self.asks.is_empty()
+            && let Some((id, bytes)) = self.mouse_bytes(&m)
+        {
+            self.send(id, &bytes).await;
+            return;
+        }
+        let delta = match m.kind {
+            MouseEventKind::ScrollUp => WHEEL_LINES,
+            MouseEventKind::ScrollDown => -WHEEL_LINES,
+            _ => return,
+        };
+        self.scroll_focus(delta);
+    }
+
+    /// Panel bajo el puntero y bytes del evento codificados para su remoto.
+    fn mouse_bytes(&self, m: &MouseEvent) -> Option<(PaneId, Vec<u8>)> {
+        let tab = self.tabs.get(self.cur)?;
+        let (panes, _) = compute(tab, body_of(self.size.0, self.size.1, self.tabs.len()));
+        let multi = panes.len() > 1;
+        let (id, area) = panes.into_iter().find_map(|(id, r)| {
+            let i = inner(r, multi);
+            (m.column >= i.x && m.column < i.x + i.width && m.row >= i.y && m.row < i.y + i.height)
+                .then_some((id, i))
+        })?;
+        let p = self.panes.get(&id)?;
+        if !matches!(p.state, State::Live)
+            || p.modal.is_some()
+            || p.xfer.is_some()
+            || p.search.is_some()
+            || p.copy.is_some()
+        {
+            return None;
+        }
+        let b = |b| match b {
+            CtButton::Left => MouseButton::Left,
+            CtButton::Middle => MouseButton::Middle,
+            CtButton::Right => MouseButton::Right,
+        };
+        let kind = match m.kind {
+            MouseEventKind::Down(x) => MouseKind::Down(b(x)),
+            MouseEventKind::Up(x) => MouseKind::Up(b(x)),
+            MouseEventKind::Drag(x) => MouseKind::Drag(b(x)),
+            MouseEventKind::Moved => MouseKind::Moved,
+            MouseEventKind::ScrollUp => MouseKind::WheelUp,
+            MouseEventKind::ScrollDown => MouseKind::WheelDown,
+            MouseEventKind::ScrollLeft => MouseKind::WheelLeft,
+            MouseEventKind::ScrollRight => MouseKind::WheelRight,
+        };
+        let mods = Modifiers {
+            ctrl: m.modifiers.contains(KeyModifiers::CONTROL),
+            alt: m.modifiers.contains(KeyModifiers::ALT),
+            shift: false,
+        };
+        let bytes = p
+            .emu
+            .as_ref()?
+            .encode_mouse(kind, m.column - area.x, m.row - area.y, mods)?;
+        Some((id, bytes))
     }
 
     fn scroll_focus(&mut self, delta: i32) {
@@ -1850,6 +1910,15 @@ fn deliver(p: &mut Pane, d: &[u8]) {
     }
     if let Some(e) = p.emu.as_mut() {
         e.process(d);
+        // Respuestas a consultas del remoto (DSR, CPR, DA).
+        let r = e.take_replies();
+        if !r.is_empty()
+            && let Some(w) = p.out.as_ref().map(|o| o.writer.clone())
+        {
+            tokio::spawn(async move {
+                let _ = w.write(&r).await;
+            });
+        }
         if let Some(sc) = &p.script {
             sc.shared.set_screen(&e.screen());
         }
