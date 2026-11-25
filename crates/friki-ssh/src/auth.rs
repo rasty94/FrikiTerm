@@ -102,10 +102,23 @@ pub(crate) async fn authenticate(
         key_left: KEY_TRIES,
         offered: None,
     };
+    #[cfg(not(feature = "pkcs11"))]
+    if cfg.pkcs11_provider.is_some() {
+        st.warnings
+            .push("pkcs11_provider ignorado: compila con la feature `pkcs11`".into());
+    }
     for method in &cfg.auth {
         let done = match method {
             AuthMethod::Agent => try_agent(&mut st).await?,
-            AuthMethod::PublicKey => try_keys(&mut st, &cfg.identity_files).await?,
+            AuthMethod::PublicKey => {
+                #[cfg(feature = "pkcs11")]
+                if let Some(p) = &cfg.pkcs11_provider
+                    && try_pkcs11(&mut st, p).await?
+                {
+                    return Ok(());
+                }
+                try_keys(&mut st, &cfg.identity_files).await?
+            }
             AuthMethod::KeyboardInteractive => try_kbd(&mut st).await?,
             AuthMethod::Password => try_password(&mut st).await?,
         };
@@ -241,6 +254,76 @@ async fn try_keys(st: &mut State<'_>, files: &[PathBuf]) -> Result<bool> {
             .map_err(|e| st.err(e))?;
         if st.record(r) {
             return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Claves de un token PKCS#11 (`pkcs11_provider`). El PIN viene del llavero
+/// (`pkcs11-pin:<etiqueta>`) o se pide; nunca de la configuración. Un PIN erróneo
+/// no se reintenta: gastaría intentos del token.
+#[cfg(feature = "pkcs11")]
+async fn try_pkcs11(st: &mut State<'_>, path: &std::path::Path) -> Result<bool> {
+    use crate::pkcs11::Module;
+    use russh::keys::Algorithm;
+    use zeroize::Zeroizing;
+
+    let module = match Module::load(path) {
+        Ok(m) => m,
+        Err(e) => {
+            st.warnings.push(format!("PKCS#11 {}: {e}", path.display()));
+            return Ok(false);
+        }
+    };
+    for t in module.tokens() {
+        let pin: Option<Zeroizing<String>> = if t.needs_pin {
+            match friki_core::secrets::get(&format!("pkcs11-pin:{}", t.label)) {
+                Ok(Some(p)) => Some(Zeroizing::new(p)),
+                _ => {
+                    if !st.spend() {
+                        return Ok(false);
+                    }
+                    let Some(p) = st.prompter.pin(&t.label).await else {
+                        continue;
+                    };
+                    Some(p)
+                }
+            }
+        } else {
+            None
+        };
+        let mut signer = match module.open(&t, pin.as_ref().map(|p| p.as_str())) {
+            Ok(s) => s,
+            Err(e) => {
+                st.warnings.push(format!("PKCS#11 {}: {e}", t.label));
+                continue;
+            }
+        };
+        for key in signer.public_keys() {
+            if !st.spend_key() {
+                return Ok(false);
+            }
+            let hash = match key.algorithm() {
+                Algorithm::Rsa { .. } => st
+                    .handle
+                    .best_supported_rsa_hash()
+                    .await
+                    .map_err(|e| st.err(e))?
+                    .flatten(),
+                _ => None,
+            };
+            match st
+                .handle
+                .authenticate_publickey_with(st.user, key, hash, &mut signer)
+                .await
+            {
+                Ok(r) => {
+                    if st.record(r) {
+                        return Ok(true);
+                    }
+                }
+                Err(e) => st.warnings.push(format!("PKCS#11 {}: {e}", t.label)),
+            }
         }
     }
     Ok(false)

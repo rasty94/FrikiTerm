@@ -79,6 +79,9 @@ pub async fn install(args: PubkeyArgs) -> anyhow::Result<i32> {
         fwd_dynamic: Vec::new(),
         forward_agent: false,
         require_strict_kex: args.require_strict_kex,
+        pkcs11: None,
+        gssapi: false,
+        gssapi_delegate: false,
     };
     let conn = connect_target(&args.target, conn_args).await?;
     let res = async {

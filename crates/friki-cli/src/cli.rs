@@ -170,6 +170,15 @@ pub struct ConnArgs {
     /// Aborta si el servidor no anuncia strict KEX (Terrapin).
     #[arg(long)]
     pub require_strict_kex: bool,
+    /// Módulo PKCS#11 de la smartcard/HSM (requiere compilar con `pkcs11`).
+    #[arg(long, value_name = "LIB")]
+    pub pkcs11: Option<PathBuf>,
+    /// Autenticación GSSAPI/Kerberos (requiere compilar con `gssapi`).
+    #[arg(long)]
+    pub gssapi: bool,
+    /// Delega las credenciales Kerberos al servidor (con --gssapi).
+    #[arg(long)]
+    pub gssapi_delegate: bool,
 }
 
 impl ConnArgs {
@@ -192,6 +201,11 @@ impl ConnArgs {
         cfg.forwards.extend(self.fwd_dynamic);
         cfg.forward_agent |= self.forward_agent;
         cfg.require_strict_kex |= self.require_strict_kex;
+        if self.pkcs11.is_some() {
+            cfg.pkcs11_provider = self.pkcs11;
+        }
+        cfg.gssapi |= self.gssapi;
+        cfg.gssapi_delegate |= self.gssapi_delegate;
     }
 }
 
