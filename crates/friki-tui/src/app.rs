@@ -2355,7 +2355,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "depende de la fusión: friki_script::run_cancellable"]
     async fn script_sends_waits_and_reports() {
         let mut f = fixture("script-ok");
         write_script(
@@ -2378,7 +2377,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "depende de la fusión: friki_script::run_cancellable"]
     async fn script_errors_show_a_notice_and_ctrl_c_cancels() {
         let mut f = fixture("script-err");
         write_script(&f, "mal.rhai", "esto no compila (((");
@@ -2409,7 +2407,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "depende de la fusión: friki_script::run_cancellable"]
     async fn script_outside_the_scripts_dir_cannot_disconnect() {
         let mut f = fixture("script-conn");
         // Sin permiso (script fuera del directorio de scripts): error de permiso.
