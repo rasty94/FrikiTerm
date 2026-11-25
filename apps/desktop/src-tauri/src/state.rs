@@ -3,11 +3,12 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use friki_ssh::Connection;
 use tauri::ipc::Channel;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::dto::{AppEvent, Prompt, PromptAnswer, PromptId, PromptKind, SftpId};
 use crate::error::CmdError;
@@ -22,9 +23,23 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-// Marcadores: T2/T3 los sustituyen por los recursos reales.
-pub struct TermHandle;
-pub struct ConnHandle;
+/// Orden a la tarea de una terminal (la que posee el flujo).
+pub enum TermCmd {
+    Write(Vec<u8>),
+    Resize(u16, u16),
+    Close,
+}
+
+pub struct TermHandle {
+    pub tx: mpsc::UnboundedSender<TermCmd>,
+}
+
+/// Conexión SSH compartida por terminal, SFTP y redirecciones.
+pub struct ConnHandle {
+    pub conn: Arc<Connection>,
+}
+
+// Marcadores: T3 los sustituye por los recursos reales.
 pub struct SftpHandle;
 pub struct QueueHandle;
 
@@ -54,6 +69,10 @@ impl<T> Registry<T> {
     }
     pub fn contains(&self, id: u64) -> bool {
         lock(&self.map).contains_key(&id)
+    }
+    /// Usa el recurso sin sacarlo del mapa.
+    pub fn with<R>(&self, id: u64, f: impl FnOnce(&T) -> R) -> Option<R> {
+        lock(&self.map).get(&id).map(f)
     }
 }
 
@@ -107,15 +126,16 @@ impl Prompts {
     }
 }
 
-#[derive(Default)]
+/// `Arc` en cada campo: las tareas en segundo plano (terminales, prompts) poseen un clon.
+#[derive(Default, Clone)]
 pub struct AppState {
-    pub terms: Registry<TermHandle>,
-    pub conns: Registry<ConnHandle>,
-    pub sftps: Registry<SftpHandle>,
+    pub terms: Arc<Registry<TermHandle>>,
+    pub conns: Arc<Registry<ConnHandle>>,
+    pub sftps: Arc<Registry<SftpHandle>>,
     /// Una cola por (sftp, raíz local).
-    pub queues: Mutex<HashMap<(SftpId, String), QueueHandle>>,
-    pub prompts: Prompts,
-    events: Mutex<Option<Channel<AppEvent>>>,
+    pub queues: Arc<Mutex<HashMap<(SftpId, String), QueueHandle>>>,
+    pub prompts: Arc<Prompts>,
+    events: Arc<Mutex<Option<Channel<AppEvent>>>>,
 }
 
 impl AppState {
