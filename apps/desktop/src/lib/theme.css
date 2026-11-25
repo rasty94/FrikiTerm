@@ -1,0 +1,47 @@
+/* Sigue prefers-color-scheme; [data-theme] lo fuerza. xterm lee estas variables. */
+:root {
+  --bg: #f6f7f9;
+  --bg-elev: #ffffff;
+  --fg: #1c1f24;
+  --fg-dim: #5b6470;
+  --border: #d8dce2;
+  --accent: #2f6fed;
+  --danger: #d1344b;
+  --term-bg: #ffffff;
+  --term-fg: #1c1f24;
+  --term-cursor: #2f6fed;
+  --term-selection: #b9d2ff;
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14161a;
+    --bg-elev: #1d2026;
+    --fg: #e4e7ec;
+    --fg-dim: #9099a6;
+    --border: #2d323b;
+    --accent: #6a9bff;
+    --danger: #ff6b81;
+    --term-bg: #0f1114;
+    --term-fg: #e4e7ec;
+    --term-cursor: #6a9bff;
+    --term-selection: #2b4a85;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14161a;
+  --bg-elev: #1d2026;
+  --fg: #e4e7ec;
+  --fg-dim: #9099a6;
+  --border: #2d323b;
+  --accent: #6a9bff;
+  --danger: #ff6b81;
+  --term-bg: #0f1114;
+  --term-fg: #e4e7ec;
+  --term-cursor: #6a9bff;
+  --term-selection: #2b4a85;
+}
+html, body, #app { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; }

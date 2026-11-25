@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fwd-list"
+description = "Enables the fwd_list command without any pre-configured scope."
+commands.allow = ["fwd_list"]
+
+[[permission]]
+identifier = "deny-fwd-list"
+description = "Denies the fwd_list command without any pre-configured scope."
+commands.deny = ["fwd_list"]
