@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fwd-start"
+description = "Enables the fwd_start command without any pre-configured scope."
+commands.allow = ["fwd_start"]
+
+[[permission]]
+identifier = "deny-fwd-start"
+description = "Denies the fwd_start command without any pre-configured scope."
+commands.deny = ["fwd_start"]

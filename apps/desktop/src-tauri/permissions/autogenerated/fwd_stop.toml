@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fwd-stop"
+description = "Enables the fwd_stop command without any pre-configured scope."
+commands.allow = ["fwd_stop"]
+
+[[permission]]
+identifier = "deny-fwd-stop"
+description = "Denies the fwd_stop command without any pre-configured scope."
+commands.deny = ["fwd_stop"]

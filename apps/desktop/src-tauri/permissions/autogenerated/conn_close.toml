@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-conn-close"
+description = "Enables the conn_close command without any pre-configured scope."
+commands.allow = ["conn_close"]
+
+[[permission]]
+identifier = "deny-conn-close"
+description = "Denies the conn_close command without any pre-configured scope."
+commands.deny = ["conn_close"]
