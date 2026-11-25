@@ -1,0 +1,6 @@
+# fuente: terminfo tvi910: nl ^_, cub/cuf/cuu ^H ^L ^K; ESC desconocidas y secuencias partidas se descartan sin efecto
+# size: 4 20
+# emulation: tvi910
+abc\x1fdef\x08\x08\x0bX\e%\e
+(\e=\x22\x22\e
+=  Z\ez

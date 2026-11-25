@@ -1,0 +1,4 @@
+# fuente: terminfo tvi925: cup, clear=^Z, cud1=^V, ich1=ESC Q, dch1=ESC W, il1=ESC E, dl1=ESC R, ri=ESC j, ed=ESC Y, el=ESC T
+# size: 6 20
+# emulation: tvi925
+\x1a\e=#(ABCDEF\e=#*\eQ\eQ\eW\e=%#fila2\e=%#\eE\e=%#nueva\x16\x16\x16\ej

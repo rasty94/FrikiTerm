@@ -1,0 +1,7 @@
+# fuente: terminfo wy50: rev=ESC ` 6 ESC ), sgr0=ESC (, smacs=ESC H ^B, rmacs=ESC H ^C, acsc; secuencia partida en trozos
+# size: 4 20
+# emulation: wyse50
+\e+\e`6\e)INV\e(ok\e=#"\eH\x02rzs\eH\x03rzs
+\e=$ \eH
+\x02x\eH\x03x\e
+=%!\e`0

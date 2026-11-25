@@ -1,0 +1,13 @@
+size 6x20
+cursor 4,8 visible
+alt no
+scrollback 0
+title ""
+rows:
+00||
+01||
+02||
+03|        AB CDEF|
+04||
+05|   nueva|
+attrs: ninguno

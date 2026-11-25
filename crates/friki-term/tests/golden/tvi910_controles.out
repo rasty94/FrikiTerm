@@ -1,0 +1,11 @@
+size 4x20
+cursor 0,1 visible
+alt no
+scrollback 0
+title ""
+rows:
+00|ZXc|
+01|def|
+02||
+03||
+attrs: ninguno

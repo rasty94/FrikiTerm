@@ -1,0 +1,19 @@
+size 6x24
+cursor 5,1 visible
+alt no
+scrollback 0
+title ""
+rows:
+00||
+01||
+02|    WY60|
+03|XAB|
+04|rev sub|
+05|z|
+attrs:
+  4,0: inverse
+  4,1: inverse
+  4,2: inverse
+  4,4: underline
+  4,5: underline
+  4,6: underline

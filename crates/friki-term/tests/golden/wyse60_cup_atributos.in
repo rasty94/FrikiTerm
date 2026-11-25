@@ -1,0 +1,5 @@
+# fuente: terminfo wy60: cup=ESC a r R c C (decimal), attrs ESC G n, clear=ESC +, dch1=ESC W, ich: ESC q
+# size: 6 24
+# emulation: wyse60
+\e+\ea3R5CWYSE60\ea5R1C\eG4rev\eG0 \eG8sub\eG0
+\ea3R7C\eW\eW\ea4R1CAB\ea4R1C\eqX\er\ea6R1C\eFestado\r\eZ1Atexto\x7fz
