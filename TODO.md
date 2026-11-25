@@ -14,7 +14,8 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 
 **Pendiente:**
 - [ ] Probar a mano la TUI en una terminal real en las tres plataformas (las pruebas usan un backend simulado).
-- [ ] Sin probar en real: ConPTY en Windows, puerto serie (la prueba con par PTY solo corre en Linux), FTP contra un servidor real, el caso negativo de strict KEX, interoperabilidad Zmodem con `rz/sz` fuera del contenedor.
+- [ ] Sin probar en real: puerto serie con hardware (la prueba con par PTY corre en el CI de Linux), FTP contra un servidor real, el caso negativo de strict KEX, interoperabilidad Zmodem con `rz/sz` fuera del contenedor. (ConPTY sí se prueba en el CI de Windows.)
+- [ ] El emulador no responde a consultas de la terminal (DSR, DA). En Windows, `friki-pty` responde a la de ConPTY al arrancar con una posición fija `1;1`.
 - [ ] Agente SSH en Windows (Pageant / named pipe).
 - [ ] Mantenedor del `.deb`: hoy `frikiSSH <noreply@invalid>`.
 - [ ] Crear el entorno `release` con revisores y proteger los tags `v*` en GitHub (`docs/INSTALL.md` §5).
