@@ -19,7 +19,6 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - [ ] Mantenedor del `.deb`: hoy `FrikiTerm <noreply@invalid>`.
 - [ ] Crear el entorno `release` con revisores y proteger los tags `v*` en GitHub (`docs/INSTALL.md` §5).
 - [ ] Sin probar en real (fase 6): agente de Windows y reenvío (solo compila en el CI de Windows), PKCS#11 con un token y login SSH real, GSSAPI contra un KDC, TN3270 contra un host, S3 en la CI (MinIO solo en local), Kermit con C-Kermit solo en local.
-- [ ] Decidir si `http` y `s3` siguen activadas por defecto en `friki-cli` (añaden ~75 crates).
 - [ ] Los scripts Rhai no contestan a consultas DSR/DA del remoto (las respuestas se descartan, acotadas a 4 KiB).
 - [ ] Revisar las excepciones de `deny.toml` / `.cargo/audit.toml` antes del 2027-05-25.
 

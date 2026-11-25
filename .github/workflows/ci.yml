@@ -94,11 +94,13 @@ jobs:
       - name: Dependencias de sistema (gssapi, MIT krb5)
         run: sudo apt-get install -y --no-install-recommends libkrb5-dev
 
-      - name: Clippy (pkcs11, gssapi)
-        run: cargo clippy -p friki-cli --features pkcs11,gssapi --all-targets -- -D warnings
+      - name: Clippy (pkcs11, gssapi, http, s3)
+        run: cargo clippy -p friki-cli --features pkcs11,gssapi,http,s3 --all-targets -- -D warnings
 
-      - name: Tests (pkcs11, gssapi)
-        run: cargo test -p friki-ssh --features pkcs11,gssapi
+      - name: Tests (pkcs11, gssapi, http, s3)
+        run: |
+          cargo test -p friki-ssh --features pkcs11,gssapi
+          cargo test -p friki-xfer -p friki-cli --features friki-xfer/http,friki-xfer/s3,friki-cli/http,friki-cli/s3
 
   fuzz:
     name: fuzzing (30 s por objetivo)

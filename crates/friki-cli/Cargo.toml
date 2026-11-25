@@ -14,8 +14,9 @@ name = "friki"
 path = "src/main.rs"
 
 [features]
-# HTTP/S de solo lectura y S3 en `get`/`put`/`cp`/`ls` (ver friki-xfer).
-default = ["http", "s3"]
+# HTTP/S de solo lectura y S3 en `get`/`put`/`cp`/`ls` (ver friki-xfer). Fuera por defecto
+# (unos 75 crates más); la release las activa.
+default = []
 http = ["friki-xfer/http"]
 s3 = ["friki-xfer/s3"]
 # Reenvían a friki-ssh (desactivadas por defecto).

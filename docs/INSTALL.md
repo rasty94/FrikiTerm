@@ -116,6 +116,8 @@ cargo build --release --locked -p friki-cli
 
 El binario queda en `target/release/friki` (`friki.exe` en Windows).
 
+Features opcionales (`--features a,b`): `http` y `s3` (URLs `https://` y `s3://` en `get`/`put`/`cp`/`ls`; los binarios de la release las incluyen), `pkcs11` (claves en token) y `gssapi` (Kerberos, solo Unix, necesita `libkrb5-dev` en Debian/Ubuntu). Para compilar como la release: `cargo build --release --locked -p friki-cli --features http,s3`.
+
 Para generar la página man y las completions (bash, zsh, fish, PowerShell):
 
 ```sh
@@ -129,7 +131,7 @@ Para generar el `.deb` localmente (solo Linux, con `dpkg-shlibdeps` disponible):
 ```sh
 cargo install cargo-deb --locked --version 3.8.0
 cargo run --locked -p xtask -- assets
-cargo build --release --locked -p friki-cli
+cargo build --release --locked -p friki-cli --features http,s3
 cargo deb --no-build -p friki-cli --output target/debian/
 ```
 
