@@ -14,7 +14,7 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - **Fase 6**: respuestas a consultas de la terminal (DSR/CPR/DA) y reenvío del ratón; agente SSH en Windows (pipes de OpenSSH y Pageant); PKCS#11 y GSSAPI (features opcionales); `sync --both` con caché (aborta si una raíz falta o queda vacía) y `cp` con varios orígenes; fecha local en el log; HTTP/S (solo lectura) y S3; servidor TFTP (`friki tftp-server`); Kermit; Wyse 50/60 y TVI 910/925; TN3270 (feature `tn3270`); fuzzing con `cargo-fuzz` de todos los parsers propios (job en CI); prueba negativa de strict KEX contra OpenSSH 9.5. 485 pruebas; revisión con Opus y hallazgos corregidos.
 
 **Pendiente:**
-- [ ] Probar a mano la TUI en una terminal real en las tres plataformas (las pruebas usan un backend simulado).
+- [ ] Probar a mano la TUI en Linux y Windows (en macOS probada a mano el 2026-11-25: funciona).
 - [ ] Sin probar en real: puerto serie con hardware (la prueba con par PTY corre en el CI de Linux), FTP contra un servidor real, interoperabilidad Zmodem con `rz/sz` fuera del contenedor. (ConPTY sí se prueba en el CI de Windows.)
 - [ ] Mantenedor del `.deb`: hoy `FrikiTerm <noreply@invalid>`.
 - [ ] Crear el entorno `release` con revisores y proteger los tags `v*` en GitHub (`docs/INSTALL.md` §5).
