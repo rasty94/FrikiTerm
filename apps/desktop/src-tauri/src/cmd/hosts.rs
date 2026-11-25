@@ -112,6 +112,20 @@ pub fn save_in(
         .ok_or_else(|| CmdError::invalid(format!("carpeta no válida: '{}'", host.folder)))?;
     if let Some(prev) = previous.as_deref().filter(|p| *p != host.name) {
         check_name(prev)?;
+        if prev.eq_ignore_ascii_case(&host.name) {
+            // Solo cambia la capitalización: en un sistema sin distinguir mayúsculas el fichero
+            // anterior es el mismo que el nuevo (el existente no es un conflicto). Se renombra
+            // primero, que vale con o sin distinguir mayúsculas, y luego se guarda encima.
+            match std::fs::rename(
+                dir.join(format!("{prev}.toml")),
+                dir.join(format!("{}.toml", host.name)),
+            ) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            config::save_session(dir, &host)?;
+            return Ok(());
+        }
         if dir.join(format!("{}.toml", host.name)).exists() {
             return Err(CmdError::invalid(format!(
                 "la sesión '{}' ya existe",
@@ -119,11 +133,7 @@ pub fn save_in(
             )));
         }
         config::save_session(dir, &host)?;
-        // ponytail: en sistemas de nombres sin distinguir mayúsculas, renombrar solo el caso
-        // deja el mismo fichero; no se borra para no perder el recién escrito.
-        if !prev.eq_ignore_ascii_case(&host.name) {
-            config::delete_session(dir, prev)?;
-        }
+        config::delete_session(dir, prev)?;
         return Ok(());
     }
     config::save_session(dir, &host)?;

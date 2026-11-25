@@ -45,6 +45,7 @@ pub enum Prompt {
     Password {
         user: String,
         host: String,
+        port: u16,
     },
     Passphrase {
         key_path: String,
@@ -181,6 +182,10 @@ pub enum AppEvent {
     ConnClosed {
         conn: ConnId,
         reason: Option<String>,
+    },
+    /// El prompt ya no espera respuesta (plazo vencido o cancelado): la UI debe cerrar su modal.
+    PromptDone {
+        id: PromptId,
     },
 }
 

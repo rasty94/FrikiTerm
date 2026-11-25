@@ -78,6 +78,24 @@ fn local_fs(root: &str) -> Result<LocalFs, CmdError> {
     Ok(LocalFs::new(p))
 }
 
+/// En local, las rutas son relativas a la raíz (`""` o `"."` = la raíz). Las absolutas se rechazan
+/// con un mensaje claro, y la raíz no se puede modificar. En remoto no cambia nada.
+fn check_fs_path(fs: &FsRef, path: &str, modifies: bool) -> Result<(), CmdError> {
+    if !matches!(fs, FsRef::Local { .. }) {
+        return Ok(());
+    }
+    let p = Path::new(path);
+    if p.has_root() {
+        return Err(CmdError::invalid(
+            "ruta absoluta: en local las rutas son relativas a la raíz",
+        ));
+    }
+    if modifies && p.components().all(|c| c == Component::CurDir) {
+        return Err(CmdError::invalid("la raíz local no se puede modificar"));
+    }
+    Ok(())
+}
+
 fn remote_fs(state: &AppState, sftp: SftpId) -> Result<Arc<dyn RemoteFs>, CmdError> {
     state
         .sftps
@@ -148,12 +166,14 @@ pub async fn fs_list_op(
     // "" = raíz (o cwd en SFTP): se pide como ".".
     let path = if path.is_empty() { "." } else { path };
     check_path(path)?;
+    check_fs_path(fs, path, false)?;
     let r = fs_for(state, fs)?;
     Ok(r.list(path).await?.into_iter().map(entry_dto).collect())
 }
 
 pub async fn fs_mkdir_op(state: &AppState, fs: &FsRef, path: &str) -> Result<(), CmdError> {
     check_path(path)?;
+    check_fs_path(fs, path, true)?;
     Ok(fs_for(state, fs)?.mkdir(path).await?)
 }
 
@@ -165,6 +185,8 @@ pub async fn fs_rename_op(
 ) -> Result<(), CmdError> {
     check_path(from)?;
     check_path(to)?;
+    check_fs_path(fs, from, true)?;
+    check_fs_path(fs, to, true)?;
     Ok(fs_for(state, fs)?.rename(from, to).await?)
 }
 
@@ -176,6 +198,7 @@ pub async fn fs_remove_op(
     recursive: bool,
 ) -> Result<(), CmdError> {
     check_path(path)?;
+    check_fs_path(fs, path, true)?;
     let r = fs_for(state, fs)?;
     let st = r
         .stat(path)
@@ -285,15 +308,35 @@ fn map_event(seq: u64, ev: QueueEvent) -> TransferEvent {
 
 async fn forward_events(
     state: AppState,
-    sftp: SftpId,
+    key: (SftpId, String),
     seq: u64,
     mut rx: mpsc::UnboundedReceiver<QueueEvent>,
 ) {
     while let Some(ev) = rx.recv().await {
+        let terminal = matches!(
+            ev,
+            QueueEvent::Finished { .. } | QueueEvent::Failed { .. } | QueueEvent::Cancelled { .. }
+        );
         state.emit(AppEvent::Transfer {
-            sftp,
+            sftp: key.0,
             ev: map_event(seq, ev),
         });
+        if terminal {
+            job_done(&state, &key, seq);
+        }
+    }
+}
+
+/// Un trabajo de la cola acabó. Si era el último pendiente, la cola se libera: su bucle de eventos
+/// termina al soltarse (no quedan colas por cada carpeta subida).
+fn job_done(state: &AppState, key: &(SftpId, String), seq: u64) {
+    let mut qs = queues(state);
+    let Some(h) = qs.get_mut(key).filter(|h| h.seq == seq) else {
+        return;
+    };
+    h.pending = h.pending.saturating_sub(1);
+    if h.pending == 0 {
+        qs.remove(key);
     }
 }
 
@@ -309,8 +352,7 @@ fn ensure_queue(state: &AppState, sftp: SftpId, root: &str) -> Result<(), CmdErr
         .with(sftp, |h| (h.fs.clone(), h.paused.load(Relaxed), h.conn))
         .ok_or_else(|| CmdError::new(ErrorKind::Notfound, "sesión SFTP desconocida"))?;
     let local: Arc<dyn RemoteFs> = Arc::new(local_fs(root)?);
-    // Las colas nunca se quitan: el número de colas + 1 es un `seq` único.
-    let seq = qs.len() as u64 + 1;
+    let seq = state.queue_seq.fetch_add(1, Relaxed) + 1;
     let (tx, rx) = mpsc::unbounded_channel();
     let mut queue = Queue::new(local, handle.0, QueueOptions::default(), tx);
     if let Some(conn) = handle.2 {
@@ -327,8 +369,15 @@ fn ensure_queue(state: &AppState, sftp: SftpId, root: &str) -> Result<(), CmdErr
         }));
     }
     queue.pause(handle.1);
-    tokio::spawn(forward_events(state.clone(), sftp, seq, rx));
-    qs.insert(key, QueueHandle { seq, queue });
+    tokio::spawn(forward_events(state.clone(), key.clone(), seq, rx));
+    qs.insert(
+        key,
+        QueueHandle {
+            seq,
+            queue,
+            pending: 0,
+        },
+    );
     Ok(())
 }
 
@@ -354,14 +403,13 @@ fn push_jobs(
     jobs: Vec<Job>,
 ) -> Result<Vec<JobId>, CmdError> {
     ensure_queue(state, sftp, root)?;
-    let qs = queues(state);
+    let mut qs = queues(state);
     let h = qs
-        .get(&(sftp, root.to_string()))
+        .get_mut(&(sftp, root.to_string()))
         .ok_or_else(|| CmdError::new(ErrorKind::Other, "cola perdida"))?;
-    Ok(jobs
-        .into_iter()
-        .map(|j| gid(h.seq, h.queue.push(j)))
-        .collect())
+    h.pending += jobs.len();
+    let (seq, queue) = (h.seq, &h.queue);
+    Ok(jobs.into_iter().map(|j| gid(seq, queue.push(j))).collect())
 }
 
 pub fn xfer_enqueue_op(
@@ -571,6 +619,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn local_raiz_y_absolutas_con_mensaje_claro() {
+        let t = Tmp::new("raiz");
+        let st = AppState::default();
+        let fs = local(&t);
+        fs_mkdir_op(&st, &fs, "a").await.unwrap();
+        for raiz in ["", "."] {
+            let names: Vec<_> = fs_list_op(&st, &fs, raiz)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            assert_eq!(names, ["a"], "raíz {raiz:?}");
+        }
+        let e = fs_list_op(&st, &fs, &t.s()).await.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Invalid);
+        assert!(e.message.contains("relativas"), "{}", e.message);
+        // La raíz local no se borra ni se renombra.
+        let e = fs_remove_op(&st, &fs, ".", true).await.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Invalid);
+        assert!(t.0.join("a").is_dir());
+    }
+
     #[test]
     fn enqueue_valida_antes_de_encolar() {
         let t = Tmp::new("enq");
@@ -634,6 +706,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert_eq!(std::fs::read(&target).unwrap(), b"contenido");
+        // Sin trabajos pendientes la cola se libera (antes quedaba para siempre).
+        for _ in 0..200 {
+            if st.queues.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(st.queues.lock().unwrap().is_empty());
         xfer_cancel_op(&st, sftp, ids[0]).unwrap();
         xfer_pause_op(&st, sftp, true).unwrap();
     }

@@ -52,6 +52,10 @@ pub trait HostKeyVerifier: Send + Sync {
 #[async_trait::async_trait]
 pub trait AuthPrompter: Send + Sync {
     async fn password(&self, user: &str, host: &str) -> Option<Zeroizing<String>>;
+    /// Como `password`, con el puerto del servidor que pregunta (un salto de ProxyJump tiene el suyo).
+    async fn password_on(&self, user: &str, host: &str, _port: u16) -> Option<Zeroizing<String>> {
+        self.password(user, host).await
+    }
     async fn passphrase(&self, key_path: &Path) -> Option<Zeroizing<String>>;
     /// PIN de un token PKCS#11 (por su etiqueta). Por defecto se pide como passphrase.
     async fn pin(&self, token_label: &str) -> Option<Zeroizing<String>> {
@@ -455,6 +459,17 @@ impl Connection {
     }
 
     pub async fn disconnect(self) -> Result<()> {
+        self.close().await
+    }
+
+    /// Cierra la sesión y sus redirecciones locales aunque otras tareas conserven referencias.
+    pub async fn close(&self) -> Result<()> {
+        // Las tareas de escucha (-L, -D) se abortan al soltar su `Active`.
+        self.forwards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .clear();
         self.handle
             .disconnect(russh::Disconnect::ByApplication, "", "en")
             .await
