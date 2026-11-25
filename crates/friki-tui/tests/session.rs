@@ -566,7 +566,9 @@ async fn recibe_un_fichero_por_zmodem_de_extremo_a_extremo() {
         })
         .await;
         if sc.text().contains("Recibir ficheros por Zmodem") {
-            keys.typed("s");
+            // El diálogo descarta el teclado durante 1 s y exige yes + Enter.
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            keys.typed("yes\n");
             wait_for("transferencia terminada", || {
                 sc.text().contains("Recibidos 1 fichero")
             })

@@ -37,6 +37,18 @@ impl PaneIo {
             pending: None,
         }
     }
+
+    /// Lo recibido y no consumido (resto del búfer y cola del canal): al terminar la
+    /// transferencia vuelve al emulador en vez de perderse.
+    pub fn drain_rest(&mut self) -> Vec<u8> {
+        let mut out = self.buf.split_off(self.pos.min(self.buf.len()));
+        self.buf.clear();
+        self.pos = 0;
+        while let Ok(v) = self.rx.try_recv() {
+            out.extend_from_slice(&v);
+        }
+        out
+    }
 }
 
 impl AsyncRead for PaneIo {
@@ -176,6 +188,21 @@ mod tests {
         assert_eq!(std::fs::read(&got[0]).expect("leer"), data);
         assert!(seen > 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn drain_rest_returns_unread_and_queued_bytes() {
+        use tokio::io::AsyncReadExt;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_, w) = split(tokio::io::duplex(8).0);
+        let mut io = PaneIo::new(rx, Arc::new(DuplexWriter(Mutex::new(w))));
+        tx.send(b"abcdef".to_vec()).unwrap();
+        tx.send(b"gh".to_vec()).unwrap();
+        let mut two = [0u8; 2];
+        io.read_exact(&mut two).await.unwrap();
+        assert_eq!(&two, b"ab");
+        assert_eq!(io.drain_rest(), b"cdefgh");
+        assert!(io.drain_rest().is_empty());
     }
 
     #[test]
