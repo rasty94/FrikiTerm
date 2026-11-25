@@ -66,6 +66,44 @@ fn base_name(path: &str) -> anyhow::Result<&str> {
     }
 }
 
+/// `https://…`, `http://…` o `s3://bucket/prefijo` (antes que `destino:ruta`).
+fn is_url(spec: &str) -> bool {
+    spec.starts_with("s3://") || spec.starts_with("http://") || spec.starts_with("https://")
+}
+
+/// Backend de una URL y la ruta dentro de él. HTTP/S es solo lectura.
+fn url_fs(spec: &str, write: bool) -> anyhow::Result<(Fs, String)> {
+    if let Some(rest) = spec.strip_prefix("s3://") {
+        #[cfg(feature = "s3")]
+        {
+            let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
+            let o = friki_xfer::s3::S3Options::from_env(bucket);
+            let fs = friki_xfer::s3::S3Fs::new(&o, friki_xfer::s3::credentials_from_env()?)?;
+            let fs: Fs = Arc::new(fs);
+            return Ok((fs, key.to_string()));
+        }
+        #[cfg(not(feature = "s3"))]
+        {
+            let _ = rest;
+            return Err(usage("S3 no está compilado (feature `s3`)"));
+        }
+    }
+    if write {
+        return Err(usage("HTTP/S es de solo lectura"));
+    }
+    #[cfg(feature = "http")]
+    {
+        // Origen (`https://host:puerto`) y ruta con query; la ruta vacía es `/`.
+        let i = spec.find("://").map_or(0, |i| i + 3);
+        let end = spec[i..].find('/').map_or(spec.len(), |j| i + j);
+        let path = if end == spec.len() { "/" } else { &spec[end..] };
+        let fs: Fs = Arc::new(friki_xfer::http::HttpFs::new(&spec[..end])?);
+        Ok((fs, path.to_string()))
+    }
+    #[cfg(not(feature = "http"))]
+    Err(usage("HTTP/S no está compilado (feature `http`)"))
+}
+
 async fn open_sftp(conn: &Connection) -> anyhow::Result<Fs> {
     Ok(Arc::from(sftp::open(conn).await?))
 }
@@ -331,6 +369,11 @@ async fn finish(conn: Connection, res: anyhow::Result<()>) -> anyhow::Result<i32
 }
 
 pub async fn get(args: GetArgs) -> anyhow::Result<i32> {
+    if is_url(&args.remote) {
+        let (fs, rpath) = url_fs(&args.remote, false)?;
+        download_fs(fs, &rpath, args.local.as_deref(), args.recursive, args.json).await?;
+        return Ok(0);
+    }
     let (target, rpath) = need_remote(&args.remote)?;
     let conn = connect_target(target, args.conn).await?;
     let res = async {
@@ -345,6 +388,12 @@ pub async fn put(args: PutArgs) -> anyhow::Result<i32> {
     let Some((remote, locals)) = args.paths.split_last() else {
         return Err(usage("faltan argumentos"));
     };
+    if is_url(remote) {
+        let (fs, rpath) = url_fs(remote, true)?;
+        let locals: Vec<PathBuf> = locals.iter().map(PathBuf::from).collect();
+        upload_fs(fs, &locals, &rpath, args.recursive, args.json).await?;
+        return Ok(0);
+    }
     let (target, rpath) = need_remote(remote)?;
     let locals: Vec<PathBuf> = locals.iter().map(PathBuf::from).collect();
     let conn = connect_target(target, args.conn).await?;
@@ -361,6 +410,25 @@ pub async fn cp(args: CpArgs) -> anyhow::Result<i32> {
         return Err(usage("faltan argumentos"));
     };
     let (rec, json, scp) = (args.recursive, args.json, args.scp);
+    if scp && (is_url(dst) || srcs.iter().any(|s| is_url(s))) {
+        return Err(usage("--scp no se usa con URLs"));
+    }
+    if is_url(dst) {
+        if srcs.iter().any(|s| split_remote(s).is_some()) {
+            return Err(usage("solo un lado puede ser remoto"));
+        }
+        let (fs, rpath) = url_fs(dst, true)?;
+        let locals: Vec<PathBuf> = srcs.iter().map(PathBuf::from).collect();
+        upload_fs(fs, &locals, &rpath, rec, json).await?;
+        return Ok(0);
+    }
+    if let [src] = srcs
+        && is_url(src)
+    {
+        let (fs, rpath) = url_fs(src, false)?;
+        download_fs(fs, &rpath, Some(Path::new(dst)), rec, json).await?;
+        return Ok(0);
+    }
     if let Some((target, rpath)) = split_remote(dst) {
         if srcs.iter().any(|s| split_remote(s).is_some()) {
             return Err(usage("solo un lado puede ser remoto"));
@@ -432,6 +500,11 @@ fn print_entries(mut entries: Vec<Entry>, json: bool) {
 }
 
 pub async fn ls(args: LsArgs) -> anyhow::Result<i32> {
+    if is_url(&args.remote) {
+        let (fs, rpath) = url_fs(&args.remote, false)?;
+        print_entries(fs.list(remote_path(&rpath)).await?, args.json);
+        return Ok(0);
+    }
     let (target, rpath) = need_remote(&args.remote)?;
     let conn = connect_target(target, args.conn).await?;
     let res = async {
@@ -703,6 +776,21 @@ pub async fn ftp(action: FtpAction) -> anyhow::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_no_es_host() {
+        assert!(is_url("https://h/x") && is_url("s3://b/p") && !is_url("host:/x"));
+        assert!(url_fs("https://h/x", true).is_err());
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn url_http_separa_origen_y_ruta() {
+        let (_, p) = url_fs("http://127.0.0.1:1/a/b?q=1", false).unwrap();
+        assert_eq!(p, "/a/b?q=1");
+        let (_, p) = url_fs("https://h", false).unwrap();
+        assert_eq!(p, "/");
+    }
 
     #[test]
     fn split_remote_casos() {

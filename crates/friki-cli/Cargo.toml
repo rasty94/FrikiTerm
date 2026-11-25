@@ -13,6 +13,12 @@ path = "src/lib.rs"
 name = "friki"
 path = "src/main.rs"
 
+[features]
+# HTTP/S de solo lectura y S3 en `get`/`put`/`cp`/`ls` (ver friki-xfer).
+default = ["http", "s3"]
+http = ["friki-xfer/http"]
+s3 = ["friki-xfer/s3"]
+
 [dependencies]
 friki-core = { path = "../friki-core" }
 friki-ssh = { path = "../friki-ssh" }

@@ -30,6 +30,8 @@ allow = [
     # Permisivas: clipboard-win/error-code (vía arboard, solo Windows) y tiny-keccak.
     "BSL-1.0",
     "CC0-1.0",
+    # Datos de raíces TLS (webpki-root-certs), vía rustls-platform-verifier de reqwest (feature http).
+    "CDLA-Permissive-2.0",
 ]
 
 [sources]
