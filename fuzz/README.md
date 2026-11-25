@@ -10,6 +10,10 @@ Esta carpeta está fuera del workspace (necesita nightly; no afecta a stable ni 
 | `telnet`       | analizador y negociación de opciones Telnet |
 | `core_files`   | config TOML, sesiones, importación de `ssh_config`, `known_hosts` |
 | `xfer`         | `safe_name`, `local_target`, listados FTP y cabeceras SCP |
+| `kermit`       | recepción Kermit (`receive_ex`) con bytes arbitrarios sobre un dúplex en memoria |
+| `tn3270`       | analizador Telnet/TN3270E y flujo de datos 3270 |
+| `wyse`         | `Terminal::process` con los perfiles Wyse50/60 y TVI910/925 |
+| `tftp`         | análisis de RRQ/WRQ y opciones (`friki_tftp::parse`) |
 
 ## Requisitos
 

@@ -96,9 +96,12 @@ fn error_pkt(code: u16, msg: &str) -> Vec<u8> {
 }
 
 /// `(opcode, nombre, opciones)` de un RRQ/WRQ.
-type Req = (u16, String, Vec<(String, String)>);
+#[doc(hidden)]
+pub type Req = (u16, String, Vec<(String, String)>);
 
-fn parse(p: &[u8]) -> Option<Req> {
+/// Expuesta solo para fuzzing (`fuzz/`).
+#[doc(hidden)]
+pub fn parse(p: &[u8]) -> Option<Req> {
     let op = u16::from_be_bytes(p.get(..2)?.try_into().ok()?);
     if !matches!(op, 1 | 2) || p.last() != Some(&0) {
         return None;
