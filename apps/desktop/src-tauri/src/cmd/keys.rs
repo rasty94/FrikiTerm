@@ -189,9 +189,17 @@ pub async fn key_install(
     conn: ConnId,
     key_path: String,
 ) -> Result<bool, CmdError> {
+    key_install_op(&state, conn, &key_path).await
+}
+
+pub async fn key_install_op(
+    state: &AppState,
+    conn: ConnId,
+    key_path: &str,
+) -> Result<bool, CmdError> {
     let c = state.conn(conn)?;
     let list = keys_list_op()?;
-    let key = find_key(&list, &key_path)?;
+    let key = find_key(&list, key_path)?;
     let line = friki_session::pubkey::read_pubkey(Path::new(&key.path))
         .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?
         .ok_or_else(|| CmdError::invalid("no es una clave pública"))?;
