@@ -1,4 +1,4 @@
-# Arquitectura de frikiSSH
+# Arquitectura de FrikiTerm
 
 Requisitos en [TODO.md](TODO.md). Decisiones tomadas: **TUI** (ratatui) primero, scripting con **Rhai** (fase 4), sesiones en **TOML** propio con importación de `~/.ssh/config`.
 

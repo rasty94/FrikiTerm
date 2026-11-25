@@ -4,7 +4,7 @@
 #   scripts/test-sshd.sh down           para el contenedor y borra claves, contraseña y known_hosts
 # Solo stdout lleva las lineas export; los mensajes van a stderr.
 # Estado: la ruta del directorio de secretos (mktemp -d, en $XDG_RUNTIME_DIR o $TMPDIR) se guarda
-# en $HOME/.cache/frikissh-test/current (directorio 0700). Antes de borrar se comprueba que sea un
+# en $HOME/.cache/frikiterm-test/current (directorio 0700). Antes de borrar se comprueba que sea un
 # directorio propio (no enlace) llamado friki-sshd-test.* directamente bajo esa base.
 set -eu
 
@@ -13,7 +13,7 @@ IMAGE=friki/sshd-test:local
 NAME=friki-sshd-test
 TMP_BASE=${TMPDIR:-/tmp}
 TMP_BASE=${TMP_BASE%/}
-CACHE="$HOME/.cache/frikissh-test"
+CACHE="$HOME/.cache/frikiterm-test"
 POINTER="$CACHE/current"
 
 log() { printf '%s\n' "$*" >&2; }

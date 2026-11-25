@@ -3,7 +3,7 @@
 
 use crate::{Error, Result};
 
-pub const SERVICE: &str = "frikiSSH";
+pub const SERVICE: &str = "FrikiTerm";
 
 fn entry(account: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, account).map_err(|e| Error::Secret(e.to_string()))

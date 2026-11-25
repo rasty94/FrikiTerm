@@ -940,7 +940,7 @@ mod tests {
         }
         match parse(&["friki", "keygen"]) {
             Command::Keygen(a) => {
-                assert!(a.file.is_none() && a.comment == "frikiSSH" && !a.no_passphrase);
+                assert!(a.file.is_none() && a.comment == "FrikiTerm" && !a.no_passphrase);
             }
             other => panic!("subcomando inesperado: {other:?}"),
         }

@@ -246,7 +246,7 @@ pub struct KeygenArgs {
     #[arg(short, long)]
     pub file: Option<PathBuf>,
     /// Comentario de la clave pública.
-    #[arg(short = 'C', long, default_value = "frikiSSH")]
+    #[arg(short = 'C', long, default_value = "FrikiTerm")]
     pub comment: String,
     /// No pedir passphrase.
     #[arg(long)]

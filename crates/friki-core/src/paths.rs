@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub fn config_dir() -> PathBuf {
     resolve_config_dir(
         std::env::var_os("FRIKI_HOME"),
-        directories::ProjectDirs::from("", "", "frikiSSH").map(|d| d.config_dir().to_path_buf()),
+        directories::ProjectDirs::from("", "", "FrikiTerm").map(|d| d.config_dir().to_path_buf()),
     )
 }
 
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn friki_home_overrides_platform_dir() {
-        let want = PathBuf::from("/plat/frikiSSH");
+        let want = PathBuf::from("/plat/FrikiTerm");
         let plat = Some(want.clone());
         assert_eq!(
             resolve_config_dir(Some("/tmp/friki-x".into()), plat.clone()),

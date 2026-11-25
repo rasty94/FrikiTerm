@@ -1,4 +1,4 @@
-# frikiSSH: TODO
+# FrikiTerm: TODO
 
 Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capacidades de SecureCRT/SecureFX documentadas en `docs/`.
 
@@ -17,7 +17,7 @@ Cliente SSH/terminal y transferencia de archivos en Rust, inspirado en las capac
 - [ ] Sin probar en real: puerto serie con hardware (la prueba con par PTY corre en el CI de Linux), FTP contra un servidor real, el caso negativo de strict KEX, interoperabilidad Zmodem con `rz/sz` fuera del contenedor. (ConPTY sí se prueba en el CI de Windows.)
 - [ ] El emulador no responde a consultas de la terminal (DSR, DA). En Windows, `friki-pty` responde a la de ConPTY al arrancar con una posición fija `1;1`.
 - [ ] Agente SSH en Windows (Pageant / named pipe).
-- [ ] Mantenedor del `.deb`: hoy `frikiSSH <noreply@invalid>`.
+- [ ] Mantenedor del `.deb`: hoy `FrikiTerm <noreply@invalid>`.
 - [ ] Crear el entorno `release` con revisores y proteger los tags `v*` en GitHub (`docs/INSTALL.md` §5).
 - [ ] Revisar las excepciones de `deny.toml` / `.cargo/audit.toml` antes del 2027-05-25.
 - [ ] Fecha del nombre del log en UTC (`time` no da el desfase local con varios hilos).

@@ -1,4 +1,4 @@
-# Política de cargo-deny para frikiSSH. Comprobar con: cargo deny check
+# Política de cargo-deny para FrikiTerm. Comprobar con: cargo deny check
 
 [advisories]
 version = 2

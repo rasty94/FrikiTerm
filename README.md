@@ -47,7 +47,7 @@ Solo análisis estático: no se ejecutó ningún binario del producto.
 - **Uso:** `GHIDRA_INSTALL_DIR=~/tools/ghidra JAVA_HOME=/opt/homebrew/opt/openjdk npx -y rea-agents@latest decompile <binario> <dirección> --json`
 - **Registro MCP actual:** `claude mcp add -s user rea -e GHIDRA_INSTALL_DIR=$HOME/tools/ghidra -e JAVA_HOME=/opt/homebrew/opt/openjdk -- npx -y rea-agents@latest mcp`. La opción de Docker de arriba sigue siendo válida si no quieres compilar nada.
 
-## Cliente frikiSSH (Rust)
+## Cliente FrikiTerm (Rust)
 
 Cliente SSH/terminal propio, escrito desde cero a partir de los RFC y de los requisitos de [TODO.md](TODO.md) (sala limpia: no usa nada de los binarios analizados). Arquitectura y contrato entre crates en [ARCHITECTURE.md](ARCHITECTURE.md).
 

@@ -1,4 +1,4 @@
-# OpenSSH de pruebas para frikiSSH. Un contenedor, dos sshd:
+# OpenSSH de pruebas para FrikiTerm. Un contenedor, dos sshd:
 #   2222: configuración moderna (solo algoritmos seguros, Ed25519, contraseña y clave pública).
 #   2224: como 2222 pero solo en 127.0.0.1 del contenedor (no publicado): destino de ProxyJump.
 #   2223: solo algoritmos heredados que OpenSSH aún admite. El cliente seguro debe negarse a negociarlos.

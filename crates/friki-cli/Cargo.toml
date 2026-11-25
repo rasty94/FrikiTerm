@@ -37,7 +37,7 @@ tempfile = "3"
 [package.metadata.deb]
 name = "friki"
 # ponytail: placeholder hasta fijar el mantenedor real del paquete (obligatorio en control de .deb).
-maintainer = "frikiSSH <noreply@invalid>"
+maintainer = "FrikiTerm <noreply@invalid>"
 extended-description = "Cliente SSH y de terminal con sesiones TOML, known_hosts compatible con OpenSSH y llavero del sistema."
 section = "net"
 priority = "optional"
