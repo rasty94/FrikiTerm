@@ -127,21 +127,30 @@ fn absolute(p: &Path) -> anyhow::Result<PathBuf> {
     Ok(out)
 }
 
-/// `LocalFs` desde la raíz del sistema de ficheros, para aceptar rutas absolutas.
-fn local_root() -> anyhow::Result<PathBuf> {
-    let cwd = std::env::current_dir()?;
-    Ok(cwd.ancestors().last().unwrap_or(&cwd).to_path_buf())
-}
-
-/// Ruta de `p` relativa a la raíz, con `/` como separador (la que entiende `LocalFs`).
-fn local_rel(p: &Path) -> anyhow::Result<String> {
+/// Raíz del sistema de ficheros de `p` (en Windows, su unidad) y la ruta relativa a ella
+/// con `/` como separador (la que entiende `LocalFs`).
+fn local_rel(p: &Path) -> anyhow::Result<(PathBuf, String)> {
     let abs = absolute(p)?;
-    let rel = abs.strip_prefix(local_root()?)?;
-    Ok(rel
+    let root = abs.ancestors().last().unwrap_or(&abs).to_path_buf();
+    let rel = abs
+        .strip_prefix(&root)?
         .components()
         .map(|c| c.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
-        .join("/"))
+        .join("/");
+    Ok((root, rel))
+}
+
+/// Un `LocalFs` sirve una sola raíz: todas las rutas locales deben compartirla.
+fn same_root(root: &mut Option<PathBuf>, r: PathBuf) -> anyhow::Result<()> {
+    match root {
+        Some(prev) if *prev != r => Err(usage("las rutas locales están en unidades distintas")),
+        Some(_) => Ok(()),
+        None => {
+            *root = Some(r);
+            Ok(())
+        }
+    }
 }
 
 // ------------------------------------------------------------------ cola y progreso
@@ -276,6 +285,7 @@ async fn download_fs(
         )));
     }
     let mut jobs = Vec::new();
+    let mut root = None;
     let mut destinos = HashSet::new();
     for rpath in rpaths {
         let rpath = remote_path(rpath);
@@ -284,14 +294,16 @@ async fn download_fs(
             Some(l) => l.to_path_buf(),
             None => PathBuf::from(base_name(rpath)?),
         };
-        let dst = local_rel(&dest)?;
         // Dos orígenes con el mismo nombre base escribirían el mismo `.friki-part` a la vez.
-        if !destinos.insert(dst.clone()) {
+        if !destinos.insert(dest.clone()) {
             return Err(usage(format!("destino duplicado `{}`", dest.display())));
         }
+        let (r, dst) = local_rel(&dest)?;
+        same_root(&mut root, r)?;
         jobs.push(job(Direction::Download, rpath.to_string(), dst, recursive));
     }
-    let fs: Fs = Arc::new(LocalFs::new(local_root()?));
+    let Some(root) = root else { return Ok(()) };
+    let fs: Fs = Arc::new(LocalFs::new(root));
     run_jobs(fs, remote, jobs, json).await
 }
 
@@ -312,6 +324,7 @@ async fn upload_fs(
         return Err(usage(format!("`{rpath}` debe ser un directorio remoto")));
     }
     let mut jobs = Vec::new();
+    let mut root = None;
     for l in locals {
         let dst = if is_dir {
             let name = l
@@ -323,9 +336,12 @@ async fn upload_fs(
         } else {
             rpath.to_string()
         };
-        jobs.push(job(Direction::Upload, local_rel(l)?, dst, recursive));
+        let (r, src) = local_rel(l)?;
+        same_root(&mut root, r)?;
+        jobs.push(job(Direction::Upload, src, dst, recursive));
     }
-    let fs: Fs = Arc::new(LocalFs::new(local_root()?));
+    let Some(root) = root else { return Ok(()) };
+    let fs: Fs = Arc::new(LocalFs::new(root));
     run_jobs(fs, remote, jobs, json).await
 }
 
@@ -871,10 +887,9 @@ mod tests {
     fn rutas_locales_se_normalizan() {
         let abs = absolute(Path::new(r"C:\a\b\..\c")).expect("absoluta");
         assert_eq!(abs, PathBuf::from(r"C:\a\c"));
-        // local_rel depende de la unidad del directorio actual.
-        if abs.starts_with(local_root().expect("raíz")) {
-            assert_eq!(local_rel(&abs).ok().as_deref(), Some("a/c"));
-        }
+        // La raíz es la unidad de la propia ruta, no la del directorio actual.
+        let (root, rel) = local_rel(&abs).expect("relativa");
+        assert_eq!((root, rel.as_str()), (PathBuf::from(r"C:\"), "a/c"));
     }
 
     #[cfg(unix)]
@@ -882,10 +897,8 @@ mod tests {
     fn rutas_locales_se_normalizan() {
         let abs = absolute(Path::new("/a/b/../c/./d")).expect("absoluta");
         assert_eq!(abs, PathBuf::from("/a/c/d"));
-        assert_eq!(
-            local_rel(Path::new("/a/b/../c")).ok().as_deref(),
-            Some("a/c")
-        );
+        let (root, rel) = local_rel(Path::new("/a/b/../c")).expect("relativa");
+        assert_eq!((root, rel.as_str()), (PathBuf::from("/"), "a/c"));
     }
 
     #[test]
