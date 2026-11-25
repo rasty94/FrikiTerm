@@ -26,7 +26,7 @@ const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Conexiones `-R` simultáneas por conexión SSH.
 const MAX_REMOTE_CONNS: usize = 256;
 /// Canales de agente simultáneos.
-#[cfg_attr(not(unix), allow(dead_code))] // el reenvío de agente solo existe en Unix
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 const MAX_AGENT_CHANNELS: usize = 8;
 /// Salida del servidor pendiente de leer por la TUI antes de dar el canal por perdido.
 /// La tarea lectora debe drenar siempre a russh (si no, la conexión entera se detiene).
@@ -117,6 +117,23 @@ impl Info {
     fn set_lost(&self, why: String) {
         *self.lost.lock().unwrap_or_else(PoisonError::into_inner) = Some(why);
     }
+}
+
+/// Conexión al agente local para reenviarlo: `SSH_AUTH_SOCK` en Unix; en Windows el
+/// pipe de `SSH_AUTH_SOCK` o el de OpenSSH (Pageant no se reenvía: no es un flujo).
+#[cfg(unix)]
+async fn connect_local_agent() -> Option<tokio::net::UnixStream> {
+    let sock = std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty())?;
+    tokio::net::UnixStream::connect(sock).await.ok()
+}
+
+#[cfg(windows)]
+async fn connect_local_agent() -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
+    crate::auth::agent_pipes().into_iter().find_map(|p| {
+        tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(p)
+            .ok()
+    })
 }
 
 pub(crate) struct Handler {
@@ -261,7 +278,7 @@ impl client::Handler for Handler {
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
         // Solo tras un `auth-agent-req` aceptado en un shell interactivo, y con tope.
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.info.agent.load(Ordering::SeqCst)
             && self.info.agent_granted.load(Ordering::SeqCst)
             && self.info.agent_open.fetch_add(1, Ordering::SeqCst) < MAX_AGENT_CHANNELS
@@ -270,12 +287,8 @@ impl client::Handler for Handler {
             let done = move || {
                 info.agent_open.fetch_sub(1, Ordering::SeqCst);
             };
-            if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty())
-                && let Ok(Ok(mut agent)) = tokio::time::timeout(
-                    REMOTE_CONNECT_TIMEOUT,
-                    tokio::net::UnixStream::connect(sock),
-                )
-                .await
+            if let Ok(Some(mut agent)) =
+                tokio::time::timeout(REMOTE_CONNECT_TIMEOUT, connect_local_agent()).await
             {
                 reply.accept().await;
                 tokio::spawn(async move {
@@ -405,7 +418,7 @@ pub(crate) async fn connect(
     }
     if cfg.forward_agent {
         warnings.push(
-            if cfg!(unix) {
+            if cfg!(any(unix, windows)) {
                 "reenvío del agente activo: un administrador del servidor podría usar tus claves mientras dure la sesión"
             } else {
                 "forward_agent no está soportado en esta plataforma: no se reenvía el agente"
@@ -536,8 +549,10 @@ where
     let info = Arc::new(Info::default());
     info.require_strict
         .store(cfg.require_strict_kex, Ordering::SeqCst);
-    info.agent
-        .store(cfg.forward_agent && cfg!(unix), Ordering::SeqCst);
+    info.agent.store(
+        cfg.forward_agent && cfg!(any(unix, windows)),
+        Ordering::SeqCst,
+    );
     let handler = Handler {
         verifier: verifier.clone(),
         host: cfg.host.clone(),

@@ -285,17 +285,55 @@ async fn load_key(st: &mut State<'_>, path: &std::path::Path) -> Option<russh::k
     None
 }
 
-#[cfg(unix)]
+/// Agente: `SSH_AUTH_SOCK` (socket Unix; en Windows, pipe con nombre), y en Windows
+/// además el pipe del agente de OpenSSH y por último Pageant.
 async fn try_agent(st: &mut State<'_>) -> Result<bool> {
-    use russh::keys::agent::{AgentIdentity, client::AgentClient};
-
     if !st.offers(MethodKind::PublicKey) {
         return Ok(false);
     }
     // Sin agente (sin SSH_AUTH_SOCK, socket muerto): se pasa al siguiente método.
-    let Ok(mut agent) = AgentClient::connect_env().await else {
-        return Ok(false);
-    };
+    #[cfg(unix)]
+    {
+        let Ok(agent) = russh::keys::agent::client::AgentClient::connect_env().await else {
+            return Ok(false);
+        };
+        use_agent(st, agent).await
+    }
+    #[cfg(windows)]
+    {
+        use russh::keys::agent::client::AgentClient;
+        for path in agent_pipes() {
+            if let Ok(agent) = AgentClient::connect_named_pipe(path).await {
+                return use_agent(st, agent).await;
+            }
+        }
+        let Ok(agent) = AgentClient::connect_pageant().await else {
+            return Ok(false);
+        };
+        use_agent(st, agent).await
+    }
+}
+
+/// Pipes de agente candidatos en Windows, por orden.
+#[cfg(windows)]
+pub(crate) fn agent_pipes() -> Vec<std::ffi::OsString> {
+    let mut v = Vec::new();
+    if let Some(s) = std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()) {
+        v.push(s);
+    }
+    v.push(r"\\.\pipe\openssh-ssh-agent".into());
+    v
+}
+
+async fn use_agent<S>(
+    st: &mut State<'_>,
+    mut agent: russh::keys::agent::client::AgentClient<S>,
+) -> Result<bool>
+where
+    S: russh::keys::agent::client::AgentStream + Unpin + Send,
+{
+    use russh::keys::agent::AgentIdentity;
+
     let Ok(ids) = agent.request_identities().await else {
         return Ok(false);
     };
@@ -322,11 +360,5 @@ async fn try_agent(st: &mut State<'_>) -> Result<bool> {
             return Ok(true);
         }
     }
-    Ok(false)
-}
-
-// ponytail: agente solo en Unix (SSH_AUTH_SOCK); Pageant/pipe de Windows cuando se pruebe en Windows.
-#[cfg(not(unix))]
-async fn try_agent(_st: &mut State<'_>) -> Result<bool> {
     Ok(false)
 }
