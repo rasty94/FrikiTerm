@@ -76,6 +76,28 @@ pub async fn receive<T: AsyncRead + AsyncWrite + Unpin + Send>(
     }
 }
 
+/// Resultado de `receive_ex`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Received {
+    pub files: Vec<PathBuf>,
+    /// Bytes leídos del flujo después del fin del protocolo (p. ej. el prompt del shell),
+    /// que el llamador debe devolver al terminal.
+    pub leftover: Vec<u8>,
+}
+
+/// `receive` con tope total de bytes escritos (corta y borra el parcial al superarlo, o al
+/// superar el tamaño anunciado de un fichero) y devolución de los bytes sobrantes.
+pub async fn receive_ex<T: AsyncRead + AsyncWrite + Unpin + Send>(
+    io: &mut T,
+    protocol: FileProtocol,
+    dest_dir: &Path,
+    progress: &mut (dyn FnMut(Progress) + Send),
+    max_total_bytes: u64,
+) -> std::io::Result<Received> {
+    let _ = (io, protocol, dest_dir, progress, max_total_bytes);
+    todo!("friki-zmodem: receive_ex")
+}
+
 /// Envía ficheros. Xmodem admite un único fichero.
 pub async fn send<T: AsyncRead + AsyncWrite + Unpin + Send>(
     io: &mut T,

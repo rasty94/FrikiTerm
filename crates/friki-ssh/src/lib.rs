@@ -56,6 +56,18 @@ pub trait AuthPrompter: Send + Sync {
         instructions: &str,
         prompts: &[(String, bool)],
     ) -> Option<Vec<Zeroizing<String>>>;
+    /// Igual que `keyboard_interactive` indicando qué servidor pregunta (el salto de
+    /// ProxyJump o el destino). friki-ssh llama siempre a esta; por defecto delega.
+    async fn keyboard_interactive_for(
+        &self,
+        host: &str,
+        name: &str,
+        instructions: &str,
+        prompts: &[(String, bool)],
+    ) -> Option<Vec<Zeroizing<String>>> {
+        let _ = host;
+        self.keyboard_interactive(name, instructions, prompts).await
+    }
 }
 
 /// Algoritmos ofrecidos, en orden de preferencia (TODO.md §2 y §11).

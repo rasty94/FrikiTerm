@@ -415,6 +415,36 @@ fn run_blocking(
     }
 }
 
+/// Cancelación cooperativa de un script: la comprueban `crt.Sleep`, las esperas del host y
+/// el contador de operaciones; un script cancelado termina con `ScriptError::Runtime("cancelado")`.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// `run` con cancelación. El hilo del motor termina en <200 ms tras `cancel()`.
+pub async fn run_cancellable(
+    source: &str,
+    args: &[String],
+    host: Arc<dyn ScriptHost>,
+    perms: &Permissions,
+    limits: &Limits,
+    cancel: &CancelToken,
+) -> Result<i64, ScriptError> {
+    let _ = (source, args, host, perms, limits, cancel);
+    todo!("friki-script: run_cancellable")
+}
+
 /// Ejecuta el script con `args` (`crt.Arguments`). Devuelve el valor de `crt.Quit(n)` o 0.
 pub async fn run(
     source: &str,
