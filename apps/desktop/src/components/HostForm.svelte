@@ -5,6 +5,7 @@
   import { defaultSession, errMsg } from "../lib/session";
   import { normFolder } from "../lib/folderTree";
   import { toast } from "../lib/state.svelte";
+  import Icon from "./Icon.svelte";
 
   let {
     host,
@@ -111,8 +112,11 @@
 <div class="scrim" onclick={onclose} role="presentation"></div>
 <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="hf-title">
   <header>
-    <h2 id="hf-title">{host ? "Editar host" : "Nuevo host"}</h2>
-    <button class="ghost" aria-label="Cerrar" onclick={onclose}>×</button>
+    <div>
+      <h2 id="hf-title">{host ? "Editar host" : "Nuevo host"}</h2>
+      {#if host}<p class="sub">{host.name}</p>{/if}
+    </div>
+    <button class="icon-btn" aria-label="Cerrar" title="Cerrar (Esc)" onclick={onclose}><Icon name="x" /></button>
   </header>
 
   <div class="tabs" role="tablist">
@@ -150,11 +154,14 @@
         </div>
         <label>Intentos de autenticación <input type="number" min="1" bind:value={draft.max_auth_attempts} /></label>
         <label>PKCS#11 provider <input bind:value={draft.pkcs11_provider} /></label>
+        <fieldset class="opts">
+        <legend>Opciones SSH</legend>
         <label class="check"><input type="checkbox" bind:checked={draft.forward_agent} /> Reenviar agente SSH</label>
         <label class="check"><input type="checkbox" bind:checked={draft.gssapi} /> GSSAPI</label>
         <label class="check"><input type="checkbox" bind:checked={draft.gssapi_delegate} /> Delegar credenciales GSSAPI</label>
         <label class="check"><input type="checkbox" bind:checked={draft.legacy_algorithms} /> Algoritmos legacy</label>
         <label class="check"><input type="checkbox" bind:checked={draft.require_strict_kex} /> Exigir strict KEX</label>
+        </fieldset>
       {:else if section === "auth"}
         <label>Usuario <input bind:value={draft.user} autocomplete="off" /></label>
         <label>Archivos de identidad (uno por línea)
@@ -196,12 +203,12 @@
               <input bind:value={f.host} aria-label="Host destino" />
               <input type="number" bind:value={f.host_port} aria-label="Puerto destino" />
             {/if}
-            <button type="button" class="ghost" aria-label="Quitar redirección" onclick={() => fwd.splice(i, 1)}>×</button>
+            <button type="button" class="icon-btn danger-hover" aria-label="Quitar redirección" title="Quitar" onclick={() => fwd.splice(i, 1)}><Icon name="x" /></button>
           </div>
         {:else}
           <p class="hint">Sin redirecciones.</p>
         {/each}
-        <button type="button" onclick={addForward}>+ Redirección</button>
+        <button type="button" class="add" onclick={addForward}><Icon name="plus" />Redirección</button>
       {:else}
         <label>Dispositivo <input bind:value={draft.serial.device} placeholder="/dev/ttyUSB0" /></label>
         <div class="row2">
@@ -224,10 +231,10 @@
       {/if}
     </div>
 
-    {#if error}<p class="err" role="alert">{error}</p>{/if}
+    {#if error}<p class="alert err" role="alert"><Icon name="alert" />{error}</p>{/if}
 
     <footer>
-      {#if host && ondelete}<button type="button" class="danger" onclick={() => ondelete?.(host)}>Eliminar</button>{/if}
+      {#if host && ondelete}<button type="button" class="ghost del" onclick={() => ondelete?.(host)}><Icon name="trash" />Eliminar</button>{/if}
       <span class="grow"></span>
       <button type="button" onclick={onclose}>Cancelar</button>
       <button class="primary" disabled={saving}>Guardar</button>
@@ -236,21 +243,33 @@
 </div>
 
 <style>
-  .scrim { position: fixed; inset: 0; background: rgb(0 0 0 / 0.35); z-index: 20; }
-  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw); z-index: 21; display: flex; flex-direction: column; background: var(--bg-elev); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgb(0 0 0 / 0.2); }
-  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; }
-  h2 { margin: 0; font-size: 16px; }
-  .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--border); overflow-x: auto; }
-  .tabs button { border: 0; border-radius: 0; background: none; padding: 8px 10px; color: var(--fg-dim); border-bottom: 2px solid transparent; }
-  .tabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+  .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: var(--z-drawer); animation: fade 160ms var(--ease-out); }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(480px, 100vw); z-index: calc(var(--z-drawer) + 1);
+    display: flex; flex-direction: column; background: var(--bg-raised); border-left: 1px solid var(--border-strong); box-shadow: var(--shadow-3);
+    animation: slide-in 220ms var(--ease-out);
+  }
+  header { display: flex; align-items: flex-start; justify-content: space-between; padding: 18px 16px 12px 20px; }
+  h2 { font-size: 16px; }
+  .sub { margin: 2px 0 0; color: var(--fg-dim); font-family: var(--font-mono); font-size: 12px; }
+  .tabs { display: flex; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+  .tabs button { height: 36px; border: 0; border-radius: 0; background: none; padding: 0 8px; color: var(--fg-dim); box-shadow: inset 0 -2px 0 transparent; }
+  .tabs button:hover:not(:disabled) { background: none; color: var(--fg); }
+  .tabs button.on { color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
   form { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .body { flex: 1; overflow: auto; padding: 16px; display: grid; gap: 12px; align-content: start; }
-  label { display: grid; gap: 4px; font-size: 12px; color: var(--fg-dim); }
-  label.check { display: flex; align-items: center; gap: 8px; }
+  .body { flex: 1; overflow: auto; padding: 20px; display: grid; gap: 14px; align-content: start; }
+  label { display: grid; gap: 5px; font-size: 12px; font-weight: 500; color: var(--fg-dim); }
+  label.check { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 400; color: var(--fg); cursor: pointer; }
+  .opts { display: grid; gap: 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--border); border-radius: var(--r); }
+  legend { padding: 0 6px; margin-left: -6px; font-size: 12px; font-weight: 500; color: var(--fg-dim); }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .fwd { display: grid; grid-template-columns: 90px 1fr 80px 1fr 80px auto; gap: 6px; align-items: center; }
+  .fwd { display: grid; grid-template-columns: 92px 1fr 72px 1fr 72px auto; gap: 6px; align-items: center; }
+  .add { justify-self: start; }
   .hint { font-size: 12px; color: var(--fg-dim); margin: 0; }
-  .err { color: var(--danger); margin: 0; padding: 0 16px; }
-  footer { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+  .err { margin: 0 20px 12px; }
+  footer { display: flex; align-items: center; gap: 8px; padding: 12px 16px 12px 20px; border-top: 1px solid var(--border); background: var(--bg-elev); }
+  .del:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); }
   .grow { flex: 1; }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes slide-in { from { transform: translateX(24px); opacity: 0; } }
 </style>

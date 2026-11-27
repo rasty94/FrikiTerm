@@ -11,6 +11,7 @@
   import HostForm from "../components/HostForm.svelte";
   import SearchBox from "../components/SearchBox.svelte";
   import ContextMenu from "../components/ContextMenu.svelte";
+  import Icon from "../components/Icon.svelte";
 
   let folder = $state<string | null>(null);
   let query = $state("");
@@ -80,28 +81,40 @@
 </script>
 
 <div class="hosts">
-  <aside class="folders">
+  <aside class="folders" aria-label="Carpetas">
     <button class="all" class:on={folder === null} aria-pressed={folder === null} onclick={() => (folder = null)}>
-      Todos los hosts <span class="count">{app.hosts.length}</span>
+      <Icon name="layers" size={15} />
+      <span class="lbl">Todos los hosts</span>
+      <span class="count">{app.hosts.length}</span>
     </button>
-    <FolderTree nodes={tree.children} selected={folder} onselect={(p) => (folder = p)} />
+    {#if tree.children.length}
+      <h2 class="group">Carpetas</h2>
+      <FolderTree nodes={tree.children} selected={folder} onselect={(p) => (folder = p)} />
+    {/if}
   </aside>
 
   {#if loaded && app.hosts.length === 0}
-    <section class="first">
+    <section class="empty-state first">
+      <span class="ico"><Icon name="server" size={22} /></span>
       <h2>Bienvenido a FrikiTerm</h2>
-      <p>Aún no tienes hosts guardados. Empieza importando los de tu <code>~/.ssh/config</code> o crea uno nuevo.</p>
+      <p>Aún no tienes hosts guardados. Importa los de tu <code>~/.ssh/config</code> o crea uno a mano.</p>
       <div class="cta">
-        <button class="primary" onclick={importSsh}>Importar ~/.ssh/config</button>
-        <button onclick={() => (editor = { host: null })}>Nuevo host</button>
+        <button class="primary" onclick={importSsh}><Icon name="download" />Importar ~/.ssh/config</button>
+        <button onclick={() => (editor = { host: null })}><Icon name="plus" />Nuevo host</button>
       </div>
     </section>
   {:else}
   <section class="list">
-    <header>
+    <header class="view-head">
+      <div class="titles">
+        <h1>{folder ?? "Hosts"}</h1>
+        <span class="sub">{visible.length} {visible.length === 1 ? "host" : "hosts"}</span>
+      </div>
       <SearchBox bind:value={query} />
-      <button class="ghost" onclick={importSsh}>Importar ssh_config</button>
-      <button class="primary" onclick={() => (editor = { host: null })}>+ Nuevo host</button>
+      <div class="actions">
+        <button class="ghost" onclick={importSsh} title="Importar hosts de ~/.ssh/config"><Icon name="download" />Importar</button>
+        <button class="primary" onclick={() => (editor = { host: null })}><Icon name="plus" />Nuevo host</button>
+      </div>
     </header>
     <ul>
       {#each visible as h (h.name)}
@@ -112,7 +125,11 @@
           oncontext={(e) => (menu = { x: e.clientX, y: e.clientY, host: h })}
         />
       {:else}
-        <li class="empty">{app.hosts.length ? "Sin resultados" : "Aún no hay hosts. Crea uno o importa tu ssh_config."}</li>
+        <li class="empty-state">
+          <span class="ico"><Icon name="search" size={20} /></span>
+          <h3>{app.hosts.length ? "Sin resultados" : "Carpeta vacía"}</h3>
+          <p>{query ? `Ningún host coincide con «${query}».` : "No hay hosts en esta carpeta."}</p>
+        </li>
       {/each}
     </ul>
   </section>
@@ -149,17 +166,14 @@
 </div>
 
 <style>
-  .hosts { flex: 1; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 16px; }
-  .folders { overflow: auto; border-right: 1px solid var(--border); padding-right: 8px; }
-  .all { width: 100%; display: flex; justify-content: space-between; border: 0; background: none; border-radius: 6px; padding: 5px 8px; text-align: left; margin-bottom: 4px; }
-  .all.on { background: var(--bg-hover); color: var(--accent); }
-  .count { color: var(--fg-dim); font-size: 12px; }
-  .list { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  header { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-  ul { list-style: none; margin: 0; padding: 0; overflow: auto; border-top: 1px solid var(--border); }
-  .first { grid-column: 1 / -1; margin: auto; max-width: 440px; text-align: center; display: grid; gap: 12px; }
-  .first h2 { margin: 0; }
-  .first p { margin: 0; color: var(--fg-dim); }
-  .cta { display: flex; gap: 8px; justify-content: center; }
-  .empty { padding: 24px; color: var(--fg-dim); }
+  .hosts { flex: 1; min-height: 0; display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: 28px; }
+  .folders { overflow: auto; display: grid; gap: 1px; align-content: start; }
+  .all { width: 100%; height: 30px; justify-content: flex-start; gap: 9px; border: 0; background: none; padding: 0 10px; color: var(--fg-dim); font-weight: 500; }
+  .all .lbl { flex: 1; text-align: left; color: var(--fg); }
+  .all.on, .all.on:hover:not(:disabled) { background: var(--bg-active); color: var(--accent); }
+  .group { font-size: 11.5px; font-weight: 500; color: var(--fg-faint); margin: 18px 10px 6px; }
+  .count { color: var(--fg-faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .list { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; min-height: 0; }
+  ul { list-style: none; margin: 0 -10px; padding: 0; overflow: auto; display: grid; gap: 2px; align-content: start; }
+  .first { grid-column: 2; }
 </style>

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { buildFolderTree, hostsInFolder, normFolder } from "./folderTree";
+import { buildFolderTree, hostsInFolder, hueOf, normFolder } from "./folderTree";
 import { defaultSession } from "./session";
 import type { SessionConfig } from "./types";
 
@@ -26,4 +26,12 @@ test("hostsInFolder incluye subcarpetas; null devuelve todos", () => {
   expect(hostsInFolder(hosts, null)).toHaveLength(3);
   expect(hostsInFolder(hosts, "prod").map((h) => h.host)).toEqual(["h1", "h2"]);
   expect(hostsInFolder(hosts, "pro")).toEqual([]);
+});
+
+test("hueOf es estable y está en rango", () => {
+  expect(hueOf("produccion")).toBe(hueOf("produccion"));
+  for (const k of ["", "a", "web", "produccion/db"]) {
+    expect(hueOf(k)).toBeGreaterThanOrEqual(0);
+    expect(hueOf(k)).toBeLessThan(360);
+  }
 });

@@ -3,6 +3,14 @@
   import { errorMessage } from "../lib/errors";
   import { clearFinishedJobs, sessions, type Job } from "../lib/sessions.svelte";
   import { formatSize } from "../lib/sftp-logic";
+  import Icon from "./Icon.svelte";
+
+  const LABEL: Record<Job["status"], string> = {
+    queued: "En cola", running: "Transfiriendo", retrying: "Reintentando", done: "Completada", failed: "Error", cancelled: "Cancelada",
+  };
+  const TONE: Record<Job["status"], string> = {
+    queued: "", running: "accent", retrying: "warn", done: "ok", failed: "danger", cancelled: "",
+  };
 
   let open = $state(true);
   let paused = $state(false);
@@ -38,64 +46,69 @@
   }
 </script>
 
-<section class="queue" class:open>
+<section class="queue panel" class:open aria-label="Transferencias">
   <header>
     <button class="toggle" onclick={() => (open = !open)} aria-expanded={open}>
-      Transferencias ({active.length} activas)
+      <span class="chev"><Icon name="chevronRight" size={14} /></span>
+      Transferencias
+      <span class="badge" class:accent={active.length > 0}>{active.length} activas</span>
     </button>
     <div class="actions">
-      <button onclick={togglePauseAll} disabled={active.length === 0}>{paused ? "Reanudar todo" : "Pausar todo"}</button>
-      <button onclick={clearFinishedJobs} disabled={!hasFinished}>Limpiar</button>
+      <button class="sm ghost" onclick={togglePauseAll} disabled={active.length === 0}><Icon name={paused ? "play" : "pause"} size={14} />{paused ? "Reanudar todo" : "Pausar todo"}</button>
+      <button class="sm ghost" onclick={clearFinishedJobs} disabled={!hasFinished}>Limpiar</button>
     </div>
   </header>
 
   {#if open}
-    {#if error}<p class="error">{error}</p>{/if}
+    {#if error}<p class="alert">{error}</p>{/if}
     <ul>
       {#each sessions.jobs as j (`${j.sftp}-${j.id}`)}
         <li>
           <div class="row">
+            <span class="fico"><Icon name="file" size={15} /></span>
             <span class="file" title={j.file}>{j.file || `Trabajo ${j.id}`}</span>
-            <span class="status {j.status}">{j.status}</span>
+            <span class="meta">
+              {formatSize(j.done)}{j.total ? ` / ${formatSize(j.total)}` : ""}
+              {#if j.error}<span class="err"> · {j.error}</span>{/if}
+            </span>
+            <span class="badge {TONE[j.status]}">{LABEL[j.status] ?? j.status}</span>
             {#if j.status === "queued" || j.status === "running" || j.status === "retrying"}
-              <button class="cancel" onclick={() => cancel(j)}>Cancelar</button>
+              <button class="icon-btn danger-hover" title="Cancelar" aria-label="Cancelar {j.file}" onclick={() => cancel(j)}><Icon name="x" size={14} /></button>
             {/if}
           </div>
-          <div class="bar" class:indet={pct(j) === null}>
-            <div style:width="{pct(j) ?? 100}%"></div>
-          </div>
-          <div class="meta">
-            {formatSize(j.done)}{j.total ? ` / ${formatSize(j.total)}` : ""}
-            {#if j.error}<span class="error"> · {j.error}</span>{/if}
-          </div>
+          {#if j.status !== "done" && j.status !== "cancelled"}
+            <div class="bar" class:indet={pct(j) === null} class:failed={j.status === "failed"}>
+              <div style:width="{pct(j) ?? 100}%"></div>
+            </div>
+          {/if}
         </li>
       {:else}
-        <li class="empty">Sin transferencias</li>
+        <li class="empty">Arrastra archivos entre paneles para transferirlos.</li>
       {/each}
     </ul>
   {/if}
 </section>
 
 <style>
-  .queue { border-top: 1px solid var(--border); background: var(--bg-elev); }
-  header { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; }
-  .toggle { background: none; border: 0; color: var(--fg); font: inherit; font-weight: 600; cursor: pointer; }
-  .actions { display: flex; gap: 6px; }
-  button { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  ul { list-style: none; margin: 0; padding: 0 12px 10px; max-height: 220px; overflow: auto; }
-  li { padding: 6px 0; border-top: 1px solid var(--border); }
-  .row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-  .file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
-  .status { color: var(--fg-dim); font-size: 12px; }
-  .status.failed { color: var(--danger); }
-  .status.done { color: var(--accent); }
-  .cancel { padding: 1px 8px; font-size: 12px; }
-  .bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin: 4px 0; }
-  .bar > div { height: 100%; background: var(--accent); transition: width 0.2s; }
+  .queue { flex: none; }
+  header { display: flex; justify-content: space-between; align-items: center; height: 40px; padding: 0 8px 0 6px; }
+  .toggle { height: 30px; padding: 0 8px; gap: 8px; border: 0; background: none; font-weight: 600; }
+  .chev { display: flex; color: var(--fg-dim); transition: transform 150ms var(--ease-out); }
+  .open .chev { transform: rotate(90deg); }
+  .actions { display: flex; gap: 2px; }
+  ul { list-style: none; margin: 0; padding: 0 14px 8px; max-height: 200px; overflow: auto; border-top: 1px solid var(--border); }
+  li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  li:last-child { border-bottom: 0; }
+  .row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+  .fico { display: flex; color: var(--fg-faint); }
+  .file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
+  .meta { font-size: 11.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .err { color: var(--danger); }
+  .bar { height: 3px; background: var(--bg-active); border-radius: 2px; overflow: hidden; margin: 7px 0 0 25px; }
+  .bar > div { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.2s var(--ease-out); }
+  .bar.failed > div { background: var(--danger); }
   .bar.indet > div { width: 30% !important; animation: slide 1.2s linear infinite; }
   @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
-  .meta { font-size: 12px; color: var(--fg-dim); }
-  .error { color: var(--danger); margin: 4px 12px; }
-  .empty { color: var(--fg-dim); font-size: 13px; }
+  .alert { margin: 0 14px 8px; }
+  .empty { color: var(--fg-faint); font-size: 12px; padding: 10px 0 4px; border: 0; }
 </style>

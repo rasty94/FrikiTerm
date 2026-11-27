@@ -5,6 +5,7 @@
   import { errorMessage } from "../lib/errors";
   import { validateSnippets } from "../lib/snippet-logic";
   import type { Snippet } from "../lib/types";
+  import Icon from "../components/Icon.svelte";
 
   let list = $state<Snippet[]>([]);
   let sel = $state<number | null>(null);
@@ -61,58 +62,69 @@
 </script>
 
 <section class="view">
-  <header class="head">
-    <h2>Snippets</h2>
-    <div class="row">
-      <button onclick={add}>Nuevo</button>
-      <button onclick={remove} disabled={sel === null}>Eliminar</button>
-      <button onclick={save} disabled={loading}>Guardar</button>
+  <header class="view-head">
+    <div class="titles">
+      <h1>Snippets</h1>
+      <span class="sub">Comandos reutilizables que puedes enviar a una o varias sesiones a la vez.</span>
+    </div>
+    <div class="actions">
+      <button onclick={add}><Icon name="plus" />Nuevo</button>
+      <button class="primary" onclick={save} disabled={loading}><Icon name="save" />Guardar</button>
     </div>
   </header>
 
-  {#if error}<p class="error">{error}</p>{/if}
-  {#if notice}<p class="notice">{notice}</p>{/if}
+  {#if error}<p class="alert" role="alert"><Icon name="alert" />{error}</p>{/if}
+  {#if notice}<p class="alert ok" role="status"><Icon name="check" />{notice}</p>{/if}
 
   <div class="layout">
-    <ul class="list">
+    <ul class="list panel">
       {#each list as s, i (i)}
         <li>
-          <button class:active={sel === i} onclick={() => { sel = i; notice = null; }}>{s.name || "(sin nombre)"}</button>
+          <button class:active={sel === i} aria-current={sel === i ? "true" : undefined} onclick={() => { sel = i; notice = null; }}>
+            <span class="sico"><Icon name="braces" size={14} /></span>
+            <span class="sname">{s.name || "(sin nombre)"}</span>
+          </button>
         </li>
       {:else}
-        <li class="dim">{loading ? "Cargando…" : "Sin snippets"}</li>
+        <li class="dim">{loading ? "Cargando…" : "Sin snippets todavía"}</li>
       {/each}
     </ul>
 
     <div class="editor">
       {#if current && sel !== null}
-        <label>Nombre <input bind:value={list[sel].name} /></label>
-        <label>Comando <textarea rows="6" bind:value={list[sel].command} spellcheck="false"></textarea></label>
+        <div class="panel card">
+          <div class="card-head">
+            <label class="field grow">Nombre <input bind:value={list[sel].name} /></label>
+            <button class="icon-btn danger-hover" onclick={remove} title="Eliminar snippet" aria-label="Eliminar"><Icon name="trash" /></button>
+          </div>
+          <label class="field">Comando <textarea rows="6" bind:value={list[sel].command} spellcheck="false"></textarea></label>
+        </div>
         <SnippetRunner command={current.command} />
       {:else}
-        <p class="dim">Selecciona o crea un snippet.</p>
+        <div class="empty-state">
+          <span class="ico"><Icon name="braces" size={20} /></span>
+          <h3>Ningún snippet seleccionado</h3>
+          <p>Crea uno con <strong>Nuevo</strong> y guárdalo para tenerlo siempre a mano.</p>
+        </div>
       {/if}
     </div>
   </div>
 </section>
 
 <style>
-  .view { display: flex; flex-direction: column; gap: 12px; }
-  .head { display: flex; justify-content: space-between; align-items: center; }
-  h2 { margin: 0; }
-  .row { display: flex; gap: 8px; }
-  .layout { display: grid; grid-template-columns: 220px 1fr; gap: 12px; align-items: start; }
-  .list { list-style: none; margin: 0; padding: 0; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .list li button { width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--border); color: var(--fg); padding: 8px 12px; font: inherit; cursor: pointer; }
-  .list li button.active { background: var(--term-selection); }
-  .editor { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--fg-dim); }
-  input, textarea { font: inherit; color: var(--fg); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
-  textarea { font-family: var(--font-mono); font-size: 13px; resize: vertical; }
-  button { font: inherit; color: var(--fg); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  .dim { color: var(--fg-dim); }
-  .error { color: var(--danger); margin: 0; }
-  .notice { color: var(--accent); margin: 0; }
+  .layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .list { list-style: none; margin: 0; padding: 4px; display: grid; gap: 1px; }
+  .list li button { width: 100%; height: 32px; justify-content: flex-start; gap: 9px; padding: 0 10px; border: 0; background: none; font-weight: 400; }
+  .list li button:hover:not(:disabled) { background: var(--bg-hover); }
+  .list li button.active, .list li button.active:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+  .sico { display: flex; color: var(--fg-faint); }
+  .active .sico { color: var(--accent); }
+  .sname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
+  .dim { color: var(--fg-faint); padding: 10px; font-size: 12.5px; }
+  .editor { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .card { padding: 16px; display: grid; gap: 12px; }
+  .card-head { display: flex; align-items: flex-end; gap: 8px; }
+  .grow { flex: 1; }
+  textarea { font-family: var(--font-mono); font-size: 12.5px; }
   @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } }
 </style>

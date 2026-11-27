@@ -90,8 +90,11 @@ export function formatSize(bytes: number): string {
   return i === 0 ? `${v} B` : `${v.toFixed(1)} ${UNITS[i]}`;
 }
 
+// Locale del usuario, formato compacto: "14 nov 2023, 23:13" en es-ES.
+const MTIME_FMT = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
 /** mtime llega en segundos Unix (null si el servidor no lo da). */
 export function formatMtime(secs: number | null): string {
   if (secs === null) return "—";
-  return new Date(secs * 1000).toLocaleString();
+  return MTIME_FMT.format(new Date(secs * 1000));
 }

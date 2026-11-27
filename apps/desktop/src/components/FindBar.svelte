@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "./Icon.svelte";
   import { onMount } from "svelte";
 
   let { onfind, onclose }: { onfind: (q: string, dir: 1 | -1, incremental: boolean) => boolean; onclose: () => void } = $props();
@@ -31,14 +32,13 @@
     oninput={() => (miss = q !== "" && !onfind(q, 1, true))}
     onkeydown={key}
   />
-  <button aria-label="Anterior (Mayús+Intro)" title="Anterior (Mayús+Intro)" onclick={() => (miss = q !== "" && !onfind(q, -1, false))}>↑</button>
-  <button aria-label="Siguiente (Intro)" title="Siguiente (Intro)" onclick={() => (miss = q !== "" && !onfind(q, 1, false))}>↓</button>
-  <button class="ghost" aria-label="Cerrar búsqueda (Esc)" onclick={onclose}>×</button>
+  <button class="icon-btn" aria-label="Anterior (Mayús+Intro)" title="Anterior (Mayús+Intro)" onclick={() => (miss = q !== "" && !onfind(q, -1, false))}><Icon name="chevronUp" /></button>
+  <button class="icon-btn" aria-label="Siguiente (Intro)" title="Siguiente (Intro)" onclick={() => (miss = q !== "" && !onfind(q, 1, false))}><Icon name="chevronDown" /></button>
+  <button class="icon-btn" aria-label="Cerrar búsqueda (Esc)" title="Cerrar (Esc)" onclick={onclose}><Icon name="x" /></button>
 </div>
 
 <style>
-  .find { position: absolute; top: 6px; right: 18px; z-index: 5; display: flex; gap: 4px; padding: 4px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgb(0 0 0 / 0.25); }
-  input { width: 200px; }
-  input.miss { border-color: var(--danger); }
-  button { padding: 4px 8px; }
+  .find { position: absolute; top: 8px; right: 18px; z-index: 5; display: flex; align-items: center; gap: 2px; padding: 4px; background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--r); box-shadow: var(--shadow-2); }
+  input { width: 210px; height: 28px; margin-right: 4px; }
+  input.miss, input.miss:focus { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
 </style>

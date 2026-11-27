@@ -4,6 +4,8 @@
   import { isLoopbackBind, validateForward, type FwdDraft } from "../lib/forward-logic";
   import { sessions } from "../lib/sessions.svelte";
   import type { ConnId, Forward, ForwardStatus } from "../lib/types";
+  import Icon from "../components/Icon.svelte";
+  import { app } from "../lib/state.svelte";
 
   let conn = $state<ConnId | null>(null);
   let error = $state<string | null>(null);
@@ -86,99 +88,112 @@
 </script>
 
 <section class="view">
-  <header class="head">
-    <h2>Redirecciones</h2>
-    <select bind:value={conn}>
-      <option value={null} disabled>Conexión abierta…</option>
-      {#each sessions.conns as c (c.id)}
-        <option value={c.id}>{c.host}</option>
-      {/each}
-    </select>
+  <header class="view-head">
+    <div class="titles">
+      <h1>Redirecciones</h1>
+      <span class="sub">Túneles de puertos (-L, -R, -D) sobre una conexión SSH abierta.</span>
+    </div>
+    <div class="actions">
+      <span class="conn">
+        <span class="dot {conn === null ? 'closed' : 'open'}" aria-hidden="true"></span>
+        <select bind:value={conn} aria-label="Conexión">
+          <option value={null} disabled>{sessions.conns.length ? "Conexión abierta…" : "Sin conexiones"}</option>
+          {#each sessions.conns as c (c.id)}
+            <option value={c.id}>{c.host}</option>
+          {/each}
+        </select>
+      </span>
+    </div>
   </header>
 
-  {#if error}<p class="error">{error}</p>{/if}
+  {#if error}<p class="alert" role="alert"><Icon name="alert" />{error}</p>{/if}
 
   {#if conn === null}
-    <p class="dim">Abre una conexión SSH desde SFTP o Hosts para gestionar sus redirecciones.</p>
+    <div class="empty-state">
+      <span class="ico"><Icon name="arrows" size={20} /></span>
+      <h3>Sin conexión SSH abierta</h3>
+      <p>Abre un host desde Hosts o SFTP; después podrás crear y activar sus redirecciones aquí.</p>
+      <div class="cta"><button class="primary" onclick={() => (app.view = "hosts")}><Icon name="server" />Ir a Hosts</button></div>
+    </div>
   {:else}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Tipo</th><th>Redirección</th><th>Escucha</th><th>Estado</th><th></th></tr></thead>
+    <div class="panel table-wrap">
+      <table class="table">
+        <thead><tr><th>Tipo</th><th>Redirección</th><th>Escucha</th><th>Estado</th><th class="right">Activa</th></tr></thead>
         <tbody>
           {#each list as f (f.id)}
             <tr>
-              <td class="mono">{kindLabel(f.spec.kind)}</td>
+              <td><span class="badge kind">{kindLabel(f.spec.kind)}</span></td>
               <td class="mono">
                 {describe(f.spec)}
-                {#if !isLoopbackBind(f.spec.bind)}<span class="warn" title="Accesible desde otras máquinas">no loopback</span>{/if}
+                {#if !isLoopbackBind(f.spec.bind)}<span class="badge warn" title="Accesible desde otras máquinas">no loopback</span>{/if}
               </td>
-              <td class="mono">{f.listen}</td>
+              <td class="mono dim">{f.listen}</td>
               <td>
-                {#if f.error}<span class="error">{f.error}</span>{:else}<span class={f.active ? "on" : "dim"}>{f.active ? "activa" : "parada"}</span>{/if}
+                {#if f.error}<span class="state err"><span class="dot failed"></span>{f.error}</span>
+                {:else}<span class="state"><span class="dot {f.active ? 'open' : 'closed'}"></span>{f.active ? "Activa" : "Parada"}</span>{/if}
               </td>
               <td class="right">
                 <label class="switch" title={f.active ? "Parar" : "Arrancar"}>
-                  <input type="checkbox" checked={f.active} onchange={() => toggle(f)} disabled={busy} />
+                  <input type="checkbox" role="switch" checked={f.active} onchange={() => toggle(f)} disabled={busy} aria-label="{f.active ? 'Parar' : 'Arrancar'} {describe(f.spec)}" />
                   <span></span>
                 </label>
               </td>
             </tr>
           {:else}
-            <tr><td colspan="5" class="dim center">Sin redirecciones en esta conexión</td></tr>
+            <tr class="none"><td colspan="5" class="center">Esta conexión aún no tiene redirecciones. Añade una abajo.</td></tr>
           {/each}
         </tbody>
       </table>
     </div>
 
-    <form class="card" onsubmit={(e) => { e.preventDefault(); void add(); }}>
-      <h3>Nueva redirección</h3>
+    <form class="panel card" onsubmit={(e) => { e.preventDefault(); void add(); }}>
+      <h2>Nueva redirección</h2>
       <div class="fields">
-        <label>Tipo
+        <label class="field">Tipo
           <select bind:value={draft.kind}>
             <option value="local">-L local</option>
             <option value="remote">-R remota</option>
             <option value="dynamic">-D SOCKS</option>
           </select>
         </label>
-        <label>Escucha <input bind:value={draft.bind} placeholder="127.0.0.1" /></label>
-        <label>Puerto <input bind:value={draft.port} inputmode="numeric" placeholder="8080" /></label>
+        <label class="field">Escucha <input bind:value={draft.bind} placeholder="127.0.0.1" /></label>
+        <label class="field">Puerto <input bind:value={draft.port} inputmode="numeric" placeholder="8080" /></label>
         {#if draft.kind !== "dynamic"}
-          <label>Host destino <input bind:value={draft.host} placeholder="db.internal" /></label>
-          <label>Puerto destino <input bind:value={draft.hostPort} inputmode="numeric" placeholder="5432" /></label>
+          <label class="field">Host destino <input bind:value={draft.host} placeholder="db.internal" /></label>
+          <label class="field">Puerto destino <input bind:value={draft.hostPort} inputmode="numeric" placeholder="5432" /></label>
         {/if}
       </div>
-      {#if !check.ok && (draft.port || draft.host || draft.hostPort)}<p class="error">{check.error}</p>{/if}
-      {#if check.ok && check.warning}<p class="warn">Escucha en una interfaz no loopback: otras máquinas podrán conectar.</p>{/if}
-      <button type="submit" disabled={!check.ok || busy}>Añadir</button>
+      {#if !check.ok && (draft.port || draft.host || draft.hostPort)}<p class="alert">{check.error}</p>{/if}
+      {#if check.ok && check.warning}<p class="alert warn">Escucha en una interfaz no loopback: otras máquinas podrán conectar.</p>{/if}
+      <div class="foot"><button type="submit" class="primary" disabled={!check.ok || busy}><Icon name="plus" />Añadir</button></div>
     </form>
   {/if}
 </section>
 
 <style>
-  .view { display: flex; flex-direction: column; gap: 12px; }
-  .head { display: flex; justify-content: space-between; align-items: center; }
-  h2, h3 { margin: 0; }
-  .table-wrap { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); overflow: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th { color: var(--fg-dim); font-weight: 600; }
-  td.right { text-align: right; }
-  .mono { font-family: var(--font-mono); font-size: 12px; }
+  .conn { position: relative; display: flex; align-items: center; }
+  .conn .dot { position: absolute; left: 10px; pointer-events: none; }
+  .conn select { padding-left: 24px; min-width: 200px; font-weight: 500; }
+  .table-wrap { overflow: auto; flex: none; }
+  .table td { white-space: nowrap; }
+  .kind { font-family: var(--font-mono); text-transform: none; color: var(--accent); background: var(--accent-soft); }
+  .badge.warn { margin-left: 8px; }
   .dim { color: var(--fg-dim); }
-  .center { text-align: center; }
-  .on { color: var(--accent); }
-  .warn { color: var(--danger); font-size: 12px; margin-left: 6px; border: 1px solid var(--danger); border-radius: 4px; padding: 0 5px; }
-  .error { color: var(--danger); margin: 0; }
-  .card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--fg-dim); }
-  input, select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
-  button { font: inherit; color: var(--fg); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; align-self: flex-start; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  .switch { position: relative; display: inline-block; width: 36px; height: 20px; }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .switch span { position: absolute; inset: 0; background: var(--border); border-radius: 20px; cursor: pointer; transition: background 0.2s; }
-  .switch span::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: var(--bg-elev); border-radius: 50%; transition: transform 0.2s; }
-  .switch input:checked + span { background: var(--accent); }
-  .switch input:checked + span::before { transform: translateX(16px); }
+  .right { text-align: right; }
+  .center { text-align: center; color: var(--fg-faint); height: 64px; }
+  tbody tr.none:hover { background: none; }
+  .state { display: inline-flex; align-items: center; gap: 7px; }
+  .state.err { color: var(--danger); white-space: normal; }
+  .card { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .card h2 { font-size: 13.5px; }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .foot { display: flex; justify-content: flex-end; }
+  .switch { position: relative; display: inline-block; width: 34px; height: 20px; vertical-align: middle; }
+  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }
+  .switch span { position: absolute; inset: 0; background: var(--border-strong); border-radius: 20px; transition: background-color 0.2s var(--ease-out); }
+  .switch span::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; box-shadow: var(--shadow-1); transition: transform 0.2s var(--ease-out); }
+  .switch input:checked + span { background: var(--accent-strong); }
+  .switch input:checked + span::before { transform: translateX(14px); }
+  .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .switch input:disabled + span { opacity: 0.5; }
 </style>

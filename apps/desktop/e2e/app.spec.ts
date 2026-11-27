@@ -27,7 +27,7 @@ test("arranque: monta, rail, hosts, carpetas y búsqueda", async ({ page }, info
 });
 
 test("formulario de host: guardar envía un SessionConfig válido", async ({ page }) => {
-  await page.getByRole("button", { name: "+ Nuevo host" }).click();
+  await page.getByRole("button", { name: "Nuevo host" }).click();
   const dlg = page.getByRole("dialog");
   await dlg.getByLabel("Nombre").fill("nuevo-srv");
   await dlg.getByLabel("Host", { exact: true }).fill("10.0.0.9");
@@ -82,8 +82,7 @@ test("sftp: panel local relativo a la raíz y panel remoto", async ({ page }, in
   await expect(local.getByRole("row", { name: /informe\.pdf/ })).toBeVisible();
   expect((await calls(page, "fs_list")).at(-1)!.args.path).toBe("docs");
 
-  await page.locator("select").filter({ hasText: "Conectar host guardado" }).selectOption("web-01");
-  await page.getByRole("button", { name: "Conectar", exact: true }).click();
+  await page.getByRole("combobox", { name: "Host remoto" }).selectOption("web-01");
   const remote = page.getByRole("region", { name: "Remoto · web-01" });
   await expect(remote.getByRole("row", { name: /leeme\.md/ })).toBeVisible();
   await remote.getByRole("row", { name: /var/ }).dblclick();
@@ -116,4 +115,11 @@ test("llavero, snippets y redirecciones muestran los datos", async ({ page }, in
   await nav(page, "Redirecciones").click();
   await expect(page.getByText("127.0.0.1:8080").first()).toBeVisible();
   await shot(page, "forwards", info.project.name);
+});
+
+test("ajustes: tema segmentado y atajos", async ({ page }, info) => {
+  await nav(page, "Ajustes").click();
+  await expect(page.getByRole("radiogroup", { name: "Tema" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Sistema" })).toHaveAttribute("aria-checked", "true");
+  await shot(page, "settings", info.project.name);
 });

@@ -3,6 +3,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import FilePane, { type DragPayload } from "../components/FilePane.svelte";
   import TransferQueue from "../components/TransferQueue.svelte";
+  import Icon from "../components/Icon.svelte";
   import {
     connClose,
     connOpen,
@@ -59,6 +60,18 @@
   /** Nombre de la raíz local; su ruta (`local.path`) es relativa a ella ("" = la raíz). */
   const localName = $derived(local.fs?.kind === "local" ? rootLabel(local.fs.root) : "Local");
   const activeInfo = $derived(sessions.conns.find((c) => c.id === activeConn) ?? null);
+  /** Valor del selector del panel remoto: "c:<id>" conexión abierta, "h:<nombre>" host guardado. */
+  const remoteValue = $derived(activeConn !== null ? `c:${activeConn}` : "");
+
+  async function pickRemote(el: HTMLSelectElement) {
+    const v = el.value;
+    if (v.startsWith("c:")) await selectConn(Number(v.slice(2)));
+    else if (v.startsWith("h:")) {
+      hostName = v.slice(2);
+      await connectHost();
+    }
+    el.value = remoteValue; // refleja el estado real si la conexión falla
+  }
 
   function paneOf(side: Side): Pane {
     return side === "local" ? local : remote;
@@ -299,31 +312,26 @@
 {#snippet fileOps(side: Side)}
   {@const p = paneOf(side)}
   {@const sel = selectedEntry(p)}
-  <button onclick={() => openOp(side, { kind: "mkdir" })} disabled={!p.fs}>Nueva carpeta</button>
-  <button onclick={() => sel && openOp(side, { kind: "rename", entry: sel })} disabled={!sel}>Renombrar</button>
-  <button class="danger" onclick={() => sel && openOp(side, { kind: "delete", entry: sel })} disabled={!sel}>Eliminar</button>
+  <button class="icon-btn" title="Nueva carpeta" aria-label="Nueva carpeta" onclick={() => openOp(side, { kind: "mkdir" })} disabled={!p.fs}><Icon name="folderPlus" /></button>
+  <button class="icon-btn" title="Renombrar" aria-label="Renombrar" onclick={() => sel && openOp(side, { kind: "rename", entry: sel })} disabled={!sel}><Icon name="pencil" /></button>
+  <button class="icon-btn danger-hover" title="Eliminar" aria-label="Eliminar" onclick={() => sel && openOp(side, { kind: "delete", entry: sel })} disabled={!sel}><Icon name="trash" /></button>
+{/snippet}
+
+{#snippet noConn()}
+  <div class="empty-state">
+    <span class="ico"><Icon name={busy ? "refresh" : "server"} size={20} /></span>
+    <h3>{busy ? `Conectando a ${hostName}…` : "Sin conexión remota"}</h3>
+    <p>
+      {sshHosts.length || sessions.conns.length
+        ? "Elige un host en la cabecera de este panel. Después arrastra archivos entre paneles para transferirlos."
+        : "No hay hosts SSH guardados. Crea uno en Hosts para explorar sus archivos."}
+    </p>
+  </div>
 {/snippet}
 
 <section class="sftp">
-  <div class="toolbar">
-    <select onchange={(e) => e.currentTarget.value && void selectConn(Number(e.currentTarget.value))}>
-      <option value="" selected={activeConn === null}>Conexión abierta…</option>
-      {#each sessions.conns as c (c.id)}
-        <option value={c.id} selected={c.id === activeConn}>{c.host}</option>
-      {/each}
-    </select>
-    <select bind:value={hostName}>
-      <option value="">Conectar host guardado…</option>
-      {#each sshHosts as h (h.name)}
-        <option value={h.name}>{h.name}</option>
-      {/each}
-    </select>
-    <button onclick={connectHost} disabled={!hostName || busy}>Conectar</button>
-    <button onclick={disconnect} disabled={activeConn === null}>Desconectar</button>
-  </div>
-
   {#if topError}
-    <p class="error">{topError}</p>
+    <p class="alert" role="alert"><Icon name="alert" />{topError}</p>
   {/if}
 
   <div class="panes">
@@ -343,7 +351,8 @@
       ontransfer={(src) => onRowTransfer("local", src)}
     >
       {#snippet headerExtra()}
-        <button onclick={pickLocalRoot}>Carpeta local…</button>
+        <button class="icon-btn" title="Elegir carpeta local…" aria-label="Elegir carpeta local" onclick={pickLocalRoot}><Icon name="folder" /></button>
+        <span class="vsep" aria-hidden="true"></span>
         {@render fileOps("local")}
       {/snippet}
     </FilePane>
@@ -354,18 +363,37 @@
       path={remote.path}
       entries={remote.entries}
       loading={remote.loading}
-      error={remote.error ?? (remote.fs ? null : "Elige o conecta un host")}
+      error={remote.error}
       sort={remote.sort}
       selected={remote.selected}
       dropHighlight={overRemote}
+      placeholder={remote.fs ? undefined : noConn}
       bind:rootEl={remoteEl}
       onnavigate={(path) => navigate(remote, path)}
       onsort={(key) => setSort("remote", key)}
       onselect={(path) => (remote.selected = path)}
       ontransfer={(src) => onRowTransfer("remote", src)}
     >
+      {#snippet heading()}
+        <span class="host-pick">
+          <span class="dot {activeInfo ? 'open' : busy ? 'connecting' : 'closed'}" aria-hidden="true"></span>
+          <select aria-label="Host remoto" value={remoteValue} disabled={busy} onchange={(e) => void pickRemote(e.currentTarget)}>
+            <option value="" disabled>{busy ? "Conectando…" : "Elegir host…"}</option>
+            {#if sessions.conns.length}
+              <optgroup label="Conexiones abiertas">
+                {#each sessions.conns as c (c.id)}<option value="c:{c.id}">{c.host}</option>{/each}
+              </optgroup>
+            {/if}
+            <optgroup label="Hosts guardados">
+              {#each sshHosts as h (h.name)}<option value="h:{h.name}">{h.name}</option>{/each}
+            </optgroup>
+          </select>
+        </span>
+      {/snippet}
       {#snippet headerExtra()}
         {@render fileOps("remote")}
+        <span class="vsep" aria-hidden="true"></span>
+        <button class="icon-btn danger-hover" title="Desconectar" aria-label="Desconectar" onclick={disconnect} disabled={activeConn === null}><Icon name="power" /></button>
       {/snippet}
     </FilePane>
   </div>
@@ -378,13 +406,14 @@
       <form onsubmit={(e) => { e.preventDefault(); void runOp(); }}>
         <h3>{opTitle}</h3>
         {#if op.op.kind !== "delete"}
-          <input bind:value={opName} placeholder="Nombre" />
+          <!-- svelte-ignore a11y_autofocus -->
+          <input bind:value={opName} placeholder="Nombre" aria-label="Nombre" autofocus />
         {:else}
           <p>Esta acción no se puede deshacer.</p>
         {/if}
         <div class="actions">
           <button type="button" onclick={() => (op = null)}>Cancelar</button>
-          <button type="submit" class={op.op.kind === "delete" ? "danger" : ""} disabled={busy}>
+          <button type="submit" class={op.op.kind === "delete" ? "danger" : "primary"} disabled={busy}>
             {op.op.kind === "delete" ? "Eliminar" : "Aceptar"}
           </button>
         </div>
@@ -394,20 +423,18 @@
 </section>
 
 <style>
-  .sftp { display: flex; flex-direction: column; gap: 8px; height: 100%; min-height: 0; }
-  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .toolbar select, .dialog input {
-    font: inherit; color: var(--fg); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
-  }
-  button { font: inherit; color: var(--fg); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  button.danger { color: var(--danger); }
-  .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .error { color: var(--danger); margin: 0; }
-  .scrim { position: fixed; inset: 0; border: 0; border-radius: 0; background: rgb(0 0 0 / 0.35); z-index: 10; }
-  .dialog { position: fixed; top: 30%; left: 50%; transform: translateX(-50%); z-index: 11; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 320px; }
-  .dialog form { display: flex; flex-direction: column; gap: 10px; }
-  .dialog h3 { margin: 0; }
+  .sftp { display: flex; flex-direction: column; gap: 12px; height: 100%; min-height: 0; }
+  .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .vsep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; }
+  .host-pick { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; max-width: 260px; }
+  .host-pick .dot { position: absolute; left: 10px; pointer-events: none; }
+  .host-pick select { width: 100%; height: 30px; padding-left: 24px; font-weight: 600; background-color: var(--bg-input); }
+  .scrim { position: fixed; inset: 0; height: auto; border: 0; border-radius: 0; background: var(--scrim); z-index: var(--z-modal); cursor: default; }
+  .scrim:hover:not(:disabled) { background: var(--scrim); }
+  .dialog { position: fixed; top: 28%; left: 50%; transform: translateX(-50%); z-index: calc(var(--z-modal) + 1); background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: 12px; padding: 20px; width: min(360px, calc(100vw - 32px)); box-sizing: border-box; box-shadow: var(--shadow-3); }
+  .dialog form { display: flex; flex-direction: column; gap: 14px; }
+  .dialog h3 { font-size: 15px; overflow-wrap: anywhere; }
+  .dialog p { margin: 0; color: var(--fg-dim); }
   .dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   @media (max-width: 720px) { .panes { grid-template-columns: 1fr; } }
 </style>

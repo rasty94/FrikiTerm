@@ -15,6 +15,7 @@
   import SnippetsView from "./views/SnippetsView.svelte";
   import ForwardsView from "./views/ForwardsView.svelte";
   import SettingsView from "./views/SettingsView.svelte";
+  import Icon from "./components/Icon.svelte";
 
   // promptDone aún no está en AppEvent (types.ts); se valida en tiempo de ejecución.
   interface PromptDoneEvent {
@@ -92,17 +93,26 @@
   <ConfirmModal />
   <div class="toasts" aria-live="polite">
     {#each app.toasts as t (t.id)}
-      <div class="toast {t.kind}" role={t.kind === "error" ? "alert" : "status"}>{t.text}</div>
+      <div class="toast {t.kind}" role={t.kind === "error" ? "alert" : "status"}>
+        <span class="ti"><Icon name={t.kind === "error" ? "alert" : "check"} size={15} /></span>
+        <span>{t.text}</span>
+      </div>
     {/each}
   </div>
 </div>
 
 <style>
   .shell { display: flex; height: 100%; }
-  main { flex: 1; min-width: 0; overflow: auto; padding: 16px; display: flex; flex-direction: column; }
+  main { flex: 1; min-width: 0; overflow: auto; padding: 20px 24px; display: flex; flex-direction: column; }
   main.bare { padding: 0; overflow: hidden; }
   .ws-host { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 60; max-width: min(360px, calc(100vw - 32px)); }
-  .toast { background: var(--bg-elev); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 10px 12px; box-shadow: 0 4px 16px rgb(0 0 0 / 0.2); }
-  .toast.error { border-left-color: var(--danger); }
+  .toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: var(--z-toast); max-width: min(380px, calc(100vw - 32px)); }
+  .toast {
+    display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px 10px 12px; font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere;
+    background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--r); box-shadow: var(--shadow-2);
+    animation: toast-in 220ms var(--ease-out);
+  }
+  .ti { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; flex: none; color: var(--ok); background: var(--ok-soft); }
+  .toast.error .ti { color: var(--danger); background: var(--danger-soft); }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 </style>

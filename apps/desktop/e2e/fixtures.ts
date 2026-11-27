@@ -24,5 +24,6 @@ export const test = base.extend<{ errors: string[] }>({
 export { expect };
 
 export async function shot(page: Page, name: string, scheme: string) {
+  await page.waitForTimeout(300); // deja terminar las transiciones de estado (hover, vista activa)
   await page.screenshot({ path: `e2e/screenshots/${scheme}-${name}.png`, fullPage: true });
 }

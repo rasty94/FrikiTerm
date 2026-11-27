@@ -4,6 +4,7 @@
   import { errorMessage } from "../lib/errors";
   import { sessions } from "../lib/sessions.svelte";
   import type { ConnId, KeyInfo } from "../lib/types";
+  import Icon from "../components/Icon.svelte";
 
   let keys = $state<KeyInfo[]>([]);
   let loading = $state(false);
@@ -93,87 +94,92 @@
 </script>
 
 <section class="view">
-  <header class="head">
-    <h2>Llavero</h2>
-    <div class="row">
-      <button onclick={importKey}>Importar clave…</button>
-      <button onclick={refresh} disabled={loading}>{loading ? "Actualizando…" : "Actualizar"}</button>
+  <header class="view-head">
+    <div class="titles">
+      <h1>Llavero</h1>
+      <span class="sub">Claves públicas en ~/.ssh y en el almacén de FrikiTerm. Selecciona una para instalarla.</span>
+    </div>
+    <div class="actions">
+      <button class="icon-btn" onclick={refresh} disabled={loading} title="Actualizar" aria-label="Actualizar"><Icon name="refresh" /></button>
+      <button onclick={importKey}><Icon name="download" />Importar clave…</button>
     </div>
   </header>
 
-  {#if error}<p class="error">{error}</p>{/if}
-  {#if notice}<p class="notice">{notice}</p>{/if}
+  {#if error}<p class="alert" role="alert"><Icon name="alert" />{error}</p>{/if}
+  {#if notice}<p class="alert ok" role="status"><Icon name="check" />{notice}</p>{/if}
 
-  <div class="table-wrap">
-    <table>
+  <div class="panel table-wrap">
+    <table class="table">
       <thead>
-        <tr><th>Algoritmo</th><th>Comentario</th><th>Huella</th><th>Cifrada</th></tr>
+        <tr><th class="ic"></th><th>Algoritmo</th><th>Comentario</th><th>Huella</th><th>Estado</th></tr>
       </thead>
       <tbody>
         {#each keys as k (k.path)}
-          <tr class:picked={installKey === k.path} onclick={() => (installKey = k.path)}>
-            <td>{k.algorithm}</td>
+          <tr class:picked={installKey === k.path} onclick={() => (installKey = k.path)} title={k.path}>
+            <td class="ic"><span class="kico"><Icon name="key" size={15} /></span></td>
+            <td class="algo">{k.algorithm}</td>
             <td>{k.comment || "—"}</td>
-            <td class="mono">{k.fingerprint}</td>
-            <td>{#if k.encrypted}<span class="badge">cifrada</span>{:else}<span class="dim">no</span>{/if}</td>
+            <td class="mono fp">{k.fingerprint}</td>
+            <td>{#if k.encrypted}<span class="badge accent"><Icon name="lock" size={11} />cifrada</span>{:else}<span class="badge">sin cifrar</span>{/if}</td>
           </tr>
         {:else}
-          <tr><td colspan="4" class="dim center">{loading ? "Cargando…" : "No hay claves públicas en ~/.ssh ni en el almacén"}</td></tr>
+          <tr class="none"><td colspan="5" class="center">{loading ? "Cargando…" : "No hay claves públicas en ~/.ssh ni en el almacén. Genera una abajo o importa una existente."}</td></tr>
         {/each}
       </tbody>
     </table>
   </div>
 
   <div class="grid">
-    <form class="card" onsubmit={(e) => { e.preventDefault(); void generate(); }}>
-      <h3>Generar clave Ed25519</h3>
-      <label>Nombre <input bind:value={name} placeholder="id_work" autocomplete="off" /></label>
-      <label>Comentario <input bind:value={comment} placeholder="usuario@equipo" /></label>
-      <label>Frase de paso (opcional) <input type="password" bind:value={passphrase} autocomplete="new-password" /></label>
-      <label>Repetir frase <input type="password" bind:value={confirm} autocomplete="new-password" /></label>
-      {#if genError}<p class="error">{genError}</p>{/if}
-      <button type="submit" disabled={!name.trim() || !!genError || generating}>{generating ? "Generando…" : "Generar"}</button>
+    <form class="panel card" onsubmit={(e) => { e.preventDefault(); void generate(); }}>
+      <h2>Generar clave Ed25519</h2>
+      <div class="two">
+        <label class="field">Nombre <input bind:value={name} placeholder="id_work" autocomplete="off" /></label>
+        <label class="field">Comentario <input bind:value={comment} placeholder="usuario@equipo" /></label>
+        <label class="field">Frase de paso (opcional) <input type="password" bind:value={passphrase} autocomplete="new-password" /></label>
+        <label class="field">Repetir frase <input type="password" bind:value={confirm} autocomplete="new-password" /></label>
+      </div>
+      {#if genError}<p class="alert">{genError}</p>{/if}
+      <div class="foot"><button type="submit" class="primary" disabled={!name.trim() || !!genError || generating}><Icon name="plus" />{generating ? "Generando…" : "Generar"}</button></div>
     </form>
 
-    <div class="card">
-      <h3>Instalar en un host</h3>
-      <p class="dim">Selecciona una clave de la tabla y una conexión abierta.</p>
-      <select bind:value={installConn}>
-        <option value={null}>Conexión abierta…</option>
-        {#each sessions.conns as c (c.id)}
-          <option value={c.id}>{c.host}</option>
-        {/each}
-      </select>
-      <p class="mono small">{installKey ?? "Ninguna clave seleccionada"}</p>
-      <button onclick={install} disabled={installConn === null || !installKey}>Instalar clave</button>
+    <div class="panel card">
+      <h2>Instalar en un host</h2>
+      <p class="sub">Añade la clave seleccionada a <code>authorized_keys</code> de una conexión abierta.</p>
+      <label class="field">Conexión
+        <select bind:value={installConn}>
+          <option value={null}>{sessions.conns.length ? "Elegir conexión…" : "No hay conexiones abiertas"}</option>
+          {#each sessions.conns as c (c.id)}
+            <option value={c.id}>{c.host}</option>
+          {/each}
+        </select>
+      </label>
+      <div class="field">Clave
+        <span class="picked-key" class:none={!installKey}>{installKey ?? "Selecciona una clave en la tabla"}</span>
+      </div>
+      <div class="foot"><button class="primary" onclick={install} disabled={installConn === null || !installKey}><Icon name="send" />Instalar clave</button></div>
     </div>
   </div>
 </section>
 
 <style>
-  .view { display: flex; flex-direction: column; gap: 12px; }
-  .head { display: flex; justify-content: space-between; align-items: center; }
-  h2, h3 { margin: 0; }
-  .row { display: flex; gap: 8px; }
-  .table-wrap { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); overflow: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); }
-  th { color: var(--fg-dim); font-weight: 600; }
+  .table-wrap { overflow: auto; flex: none; }
+  .ic { width: 20px; padding-right: 0; }
+  .kico { display: flex; color: var(--fg-faint); }
   tbody tr { cursor: pointer; }
-  tbody tr:hover { background: var(--border); }
-  tbody tr.picked { background: var(--term-selection); }
-  .mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
-  .small { font-size: 12px; }
-  .dim { color: var(--fg-dim); }
-  .center { text-align: center; }
-  .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--accent); color: var(--accent); }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--fg-dim); }
-  input, select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
-  button { font: inherit; color: var(--fg); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; align-self: flex-start; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  .error { color: var(--danger); margin: 0; }
-  .notice { color: var(--accent); margin: 0; }
-  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  tbody tr.picked, tbody tr.picked:hover { background: var(--accent-soft); }
+  tbody tr.picked .kico { color: var(--accent); }
+  tbody tr.none { cursor: default; }
+  tbody tr.none:hover { background: none; }
+  .algo { font-weight: 500; white-space: nowrap; }
+  .fp { color: var(--fg-dim); word-break: break-all; }
+  .center { text-align: center; color: var(--fg-faint); height: 64px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .card { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .card h2 { font-size: 13.5px; }
+  .sub { margin: -6px 0 0; color: var(--fg-dim); font-size: 12.5px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .picked-key { font-family: var(--font-mono); font-size: 12px; color: var(--fg); padding: 7px 9px; border-radius: var(--r-sm); background: var(--bg-input); border: 1px dashed var(--border-strong); word-break: break-all; font-weight: 400; }
+  .picked-key.none { color: var(--fg-faint); font-family: var(--font-ui); }
+  .foot { display: flex; justify-content: flex-end; }
+  @media (max-width: 860px) { .grid, .two { grid-template-columns: 1fr; } }
 </style>

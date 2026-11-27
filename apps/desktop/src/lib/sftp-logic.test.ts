@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { EntryDto } from "./types";
-import { breadcrumb, formatSize, joinPath, parentPath, relBreadcrumb, relParent, rootLabel, sortEntries } from "./sftp-logic";
+import { breadcrumb, formatMtime, formatSize, joinPath, parentPath, relBreadcrumb, relParent, rootLabel, sortEntries } from "./sftp-logic";
 
 const e = (name: string, kind: EntryDto["kind"], size = 0, mtime: number | null = null): EntryDto => ({
   name,
@@ -89,4 +89,11 @@ describe("formatSize", () => {
     expect(formatSize(1024 * 1024 * 3)).toBe("3.0 MB");
     expect(formatSize(-1)).toBe("—");
   });
+});
+
+test("formatMtime: compacto, sin segundos y en el locale dado", () => {
+  expect(formatMtime(null)).toBe("—");
+  const want = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(1700000000 * 1000));
+  expect(formatMtime(1700000000)).toBe(want);
+  expect(want).not.toMatch(/:\d\d:\d\d/);
 });

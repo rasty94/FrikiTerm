@@ -47,3 +47,13 @@ export function hostsInFolder(hosts: SessionConfig[], path: string | null): Sess
     return f === path || f.startsWith(`${path}/`);
   });
 }
+
+// Tonos OKLCH escogidos para distinguirse entre sí en ambos temas.
+const HUES = [255, 165, 300, 25, 75, 140, 215, 340];
+
+/** Tono estable para el avatar de una carpeta o host: mismo nombre, mismo color. */
+export function hueOf(key: string): number {
+  let h = 0;
+  for (const c of key) h = (h * 31 + c.codePointAt(0)!) >>> 0;
+  return HUES[h % HUES.length];
+}
