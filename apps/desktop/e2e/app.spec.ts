@@ -1,0 +1,119 @@
+import { calls, expect, shot, test } from "./fixtures";
+
+test.beforeEach(async ({ page }) => {
+  await page.goto("/");
+});
+
+const nav = (page: any, name: string) => page.getByRole("navigation", { name: "Principal" }).getByRole("button", { name });
+
+test("arranque: monta, rail, hosts, carpetas y búsqueda", async ({ page }, info) => {
+  const rail = page.getByRole("navigation", { name: "Principal" });
+  await expect(rail).toBeVisible();
+  for (const n of ["Hosts", "Terminal", "SFTP", "Llavero", "Snippets", "Redirecciones"]) {
+    await expect(nav(page, n)).toBeVisible();
+  }
+  for (const n of ["web-01", "web-02", "db-01", "router-casa"]) {
+    await expect(page.getByTitle(`Conectar a ${n}`)).toBeVisible();
+  }
+  await expect(page.getByRole("button", { name: /Todos los hosts/ })).toContainText("4");
+  await expect(page.getByText("produccion", { exact: false }).first()).toBeVisible();
+  await shot(page, "hosts", info.project.name);
+
+  await page.getByRole("searchbox", { name: "Buscar hosts" }).fill("db-");
+  await expect(page.getByTitle("Conectar a db-01")).toBeVisible();
+  await expect(page.getByTitle("Conectar a web-01")).toHaveCount(0);
+  await page.getByRole("searchbox", { name: "Buscar hosts" }).fill("zzz");
+  await expect(page.getByText("Sin resultados")).toBeVisible();
+});
+
+test("formulario de host: guardar envía un SessionConfig válido", async ({ page }) => {
+  await page.getByRole("button", { name: "+ Nuevo host" }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByLabel("Nombre").fill("nuevo-srv");
+  await dlg.getByLabel("Host", { exact: true }).fill("10.0.0.9");
+  await dlg.getByRole("button", { name: "Guardar" }).click();
+  await expect(dlg).toHaveCount(0);
+  const [c] = await calls(page, "host_save");
+  expect(c.args.previousName).toBeNull();
+  expect(c.args.host).toMatchObject({
+    name: "nuevo-srv", host: "10.0.0.9", port: 22, protocol: "ssh", folder: "", forwards: [], log: null,
+    terminal: { emulation: expect.any(String), scrollback: expect.any(Number) },
+    serial: { baud: expect.any(Number) },
+  });
+  expect(Array.isArray(c.args.host.auth) && Array.isArray(c.args.host.identity_files)).toBe(true);
+  await expect(page.getByTitle("Conectar a nuevo-srv")).toBeVisible();
+});
+
+test("terminal: abre pestaña, pinta la salida y muestra el cifrado", async ({ page }, info) => {
+  await page.getByTitle("Conectar a web-01").click();
+  await expect(page.getByRole("tab", { name: "web-01" })).toBeVisible();
+  await expect(page.locator(".xterm")).toBeVisible();
+  await expect(page.locator(".xterm-rows")).toContainText("hola");
+  await expect(page.getByText("Negociado: chacha20-poly1305@openssh.com")).toBeVisible();
+  const [c] = await calls(page, "term_open");
+  expect(c.args.target).toEqual({ kind: "saved", name: "web-01" });
+  await shot(page, "terminal", info.project.name);
+});
+
+test("prompt: huella de host y respuesta acceptAndSave", async ({ page }) => {
+  await page.evaluate(() =>
+    (window as any).__mock.emitApp({
+      type: "prompt", id: 42,
+      prompt: { kind: "hostKeyUnknown", host: "web-01.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:abcDEF123" },
+    }),
+  );
+  const dlg = page.getByRole("dialog", { name: "Host desconocido" });
+  await expect(dlg).toBeVisible();
+  await expect(dlg).toContainText("SHA256:abcDEF123");
+  await dlg.getByRole("button", { name: "Aceptar y guardar" }).click();
+  await expect(dlg).toHaveCount(0);
+  const [c] = await calls(page, "prompt_answer");
+  expect(c.args).toEqual({ id: 42, answer: { kind: "hostKey", decision: "acceptAndSave" } });
+});
+
+test("sftp: panel local relativo a la raíz y panel remoto", async ({ page }, info) => {
+  await nav(page, "SFTP").click();
+  const local = page.getByRole("region", { name: "Local" });
+  await expect(local.getByRole("row", { name: /notas\.txt/ })).toBeVisible();
+  await expect(local.getByRole("button", { name: "Documents" })).toBeVisible(); // migas: raíz
+  expect((await calls(page, "fs_list"))[0].args).toMatchObject({ fs: { kind: "local", root: "/home/e2e/Documents" }, path: "" });
+  await local.getByRole("row", { name: /docs/ }).dblclick();
+  await expect(local.getByRole("button", { name: "docs", exact: true })).toBeVisible();
+  await expect(local.getByRole("row", { name: /informe\.pdf/ })).toBeVisible();
+  expect((await calls(page, "fs_list")).at(-1)!.args.path).toBe("docs");
+
+  await page.locator("select").filter({ hasText: "Conectar host guardado" }).selectOption("web-01");
+  await page.getByRole("button", { name: "Conectar", exact: true }).click();
+  const remote = page.getByRole("region", { name: "Remoto · web-01" });
+  await expect(remote.getByRole("row", { name: /leeme\.md/ })).toBeVisible();
+  await remote.getByRole("row", { name: /var/ }).dblclick();
+  await expect(remote.getByRole("button", { name: "log" })).toHaveCount(0);
+  await expect(remote.getByRole("row", { name: /log/ })).toBeVisible();
+  await shot(page, "sftp", info.project.name);
+});
+
+test("llavero, snippets y redirecciones muestran los datos", async ({ page }, info) => {
+  await nav(page, "Llavero").click();
+  await expect(page.getByText("SHA256:keyFingerprintE2E")).toBeVisible();
+  await expect(page.getByText("cifrada", { exact: true })).toBeVisible();
+  await shot(page, "keychain", info.project.name);
+
+  await nav(page, "Snippets").click();
+  await expect(page.getByRole("button", { name: "uptime" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "disco" })).toBeVisible();
+  await page.getByRole("button", { name: "disco" }).click();
+  await expect(page.locator("textarea")).toHaveValue("df -h");
+  await page.getByRole("button", { name: "Guardar" }).click();
+  expect((await calls(page, "snippets_save"))[0].args.snippets).toEqual([
+    { name: "uptime", command: "uptime" }, { name: "disco", command: "df -h" },
+  ]);
+  await shot(page, "snippets", info.project.name);
+
+  // Las redirecciones necesitan una conexión abierta: se crea con una terminal.
+  await nav(page, "Hosts").click();
+  await page.getByTitle("Conectar a web-01").click();
+  await expect(page.getByText("Negociado:")).toBeVisible();
+  await nav(page, "Redirecciones").click();
+  await expect(page.getByText("127.0.0.1:8080").first()).toBeVisible();
+  await shot(page, "forwards", info.project.name);
+});

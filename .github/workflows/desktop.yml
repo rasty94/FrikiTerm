@@ -62,6 +62,16 @@ jobs:
         working-directory: apps/desktop
         run: npm test
 
+      - name: Instalar Chromium (e2e)
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: npx playwright install --with-deps chromium
+
+      - name: Pruebas e2e de la UI
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: npm run e2e
+
       - name: Auditoría de dependencias de producción
         working-directory: apps/desktop
         run: npm audit --omit=dev --audit-level=high
