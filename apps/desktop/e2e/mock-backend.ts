@@ -29,6 +29,11 @@ export function installBackend(): void {
     cfg("db-01", "produccion/db", { port: 2222, user: "admin" }),
     cfg("router-casa", ""),
   ];
+  // Valores por defecto de src/lib/settings.ts.
+  let settings: unknown = {
+    theme: "system", fontFamily: "", fontSize: 13, cursorStyle: "block", cursorBlink: true,
+    scrollback: 10000, copyOnSelect: false, rightClick: "menu", confirmClose: true,
+  };
   let snippets = [
     { name: "uptime", command: "uptime" },
     { name: "disco", command: "df -h" },
@@ -86,6 +91,9 @@ export function installBackend(): void {
     snippets_list: () => snippets,
     snippets_save: (a) => { snippets = a.snippets; },
     fwd_list: () => [fwd],
+    settings_get: () => settings,
+    settings_save: (a) => { settings = a.settings; },
+    open_url: () => null,
     "plugin:event|listen": () => nextId++,
     "plugin:event|unlisten": () => null,
   };
