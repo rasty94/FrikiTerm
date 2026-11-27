@@ -156,9 +156,103 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-desktop:
+    name: desktop (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: aarch64
+            bundles: dmg
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+            bundles: dmg
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            bundles: deb,appimage
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: x64
+            bundles: msi,nsis
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Dependencias de sistema (Linux, Tauri/WebKitGTK)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev pkg-config
+
+      - name: Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Instalar dependencias de la UI
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Compilar la UI
+        # Antes que cargo: generate_context! necesita frontendDist (apps/desktop/dist).
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: Empaquetar con Tauri
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUNDLES: ${{ matrix.bundles }}
+          # Sin FUSE en el runner: linuxdeploy (AppImage) se ejecuta extrayéndose.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          # Versión desde el tag, igual que la CLI; tauri.conf.json queda como valor por defecto local.
+          npx tauri build --bundles "${BUNDLES}" --config "{\"version\":\"${VERSION#v}\"}" -- --locked
+
+      - name: Renombrar y reunir artefactos
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          out="${GITHUB_WORKSPACE}/desktop-dist"
+          bundle="${GITHUB_WORKSPACE}/apps/desktop/src-tauri/target/release/bundle"
+          mkdir -p "${out}"
+          find "${bundle}" -type f \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.msi' -o -name '*-setup.exe' \) -print0 |
+            while IFS= read -r -d '' f; do
+              ext="${f##*.}"
+              cp "${f}" "${out}/FrikiTerm_${version}_${ARCH}.${ext}"
+            done
+          ls -l "${out}"
+
+      - name: Subir artefactos
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-desktop-${{ matrix.target }}
+          path: desktop-dist/*
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Firmar, atestar y publicar
-    needs: [verify, build]
+    needs: [verify, build, build-desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Entorno con revisores obligatorios: nadie firma ni publica sin aprobación (docs/INSTALL.md).
@@ -186,14 +280,14 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum -- *.tar.gz *.zip *.deb > SHA256SUMS
+          sha256sum -- *.tar.gz *.zip *.deb *.dmg *.msi *.exe *.AppImage > SHA256SUMS
           cat SHA256SUMS
 
       - name: Firmar con cosign (keyless)
         working-directory: dist
         run: |
           set -euo pipefail
-          for f in *.tar.gz *.zip *.deb SHA256SUMS; do
+          for f in *.tar.gz *.zip *.deb *.dmg *.msi *.exe *.AppImage SHA256SUMS; do
             cosign sign-blob --yes --bundle "${f}.sigstore.json" "${f}"
           done
 
@@ -201,7 +295,7 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          for f in *.tar.gz *.zip *.deb SHA256SUMS; do
+          for f in *.tar.gz *.zip *.deb *.dmg *.msi *.exe *.AppImage SHA256SUMS; do
             cosign verify-blob \
               --bundle "${f}.sigstore.json" \
               --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
@@ -216,6 +310,10 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.deb
+            dist/*.dmg
+            dist/*.msi
+            dist/*.exe
+            dist/*.AppImage
 
       - name: Crear release de GitHub
         working-directory: dist
