@@ -15,6 +15,12 @@ Cada release de GitHub (`https://github.com/rasty94/FrikiTerm/releases`) incluye
 | `friki-vX.Y.Z-x86_64-apple-darwin.tar.gz` | macOS Intel |
 | `friki-vX.Y.Z-aarch64-apple-darwin.tar.gz` | macOS Apple Silicon |
 | `friki-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x86_64 |
+| `FrikiTerm_X.Y.Z_aarch64.dmg` | App de escritorio, macOS Apple Silicon |
+| `FrikiTerm_X.Y.Z_x86_64.dmg` | App de escritorio, macOS Intel |
+| `FrikiTerm_X.Y.Z_x86_64.deb` | App de escritorio, Debian/Ubuntu x86_64 |
+| `FrikiTerm_X.Y.Z_x86_64.AppImage` | App de escritorio, Linux x86_64 (portable) |
+| `FrikiTerm_X.Y.Z_x64.msi` | App de escritorio, Windows x64 (instalador MSI) |
+| `FrikiTerm_X.Y.Z_x64.exe` | App de escritorio, Windows x64 (instalador NSIS) |
 | `SHA256SUMS` | Hashes SHA-256 de todos los ficheros anteriores |
 | `*.sigstore.json` | Firma keyless (cosign) de cada fichero y de `SHA256SUMS` |
 
@@ -98,6 +104,26 @@ Las completions van en `friki-vX.Y.Z-<target>/completions/`, y la página man en
 ### Windows: zip
 
 Descomprime `friki-vX.Y.Z-x86_64-pc-windows-msvc.zip` y ejecuta `friki.exe`. Para PowerShell, la completion es `completions\_friki.ps1`.
+
+### Aplicación de escritorio (FrikiTerm Desktop)
+
+La app de escritorio (Tauri v2) se publica con los mismos pasos de verificación de la sección 2 (SHA256SUMS, cosign y `gh attestation verify`); basta cambiar el nombre del fichero por el de la tabla.
+
+Las apps **no están firmadas con un certificado de desarrollador** (ni notarizadas por Apple ni firmadas con Authenticode). Por eso el sistema las trata como no verificadas al abrirlas por primera vez. La integridad se comprueba con los pasos de la sección 2 antes de instalar.
+
+**macOS (`.dmg`)**: el DMG va firmado ad-hoc (`codesign -s -`), lo que basta para que el binario arranque en Apple Silicon. Al descargarlo, macOS le pone el atributo de cuarentena y Gatekeeper lo bloquea ("no se puede abrir porque el desarrollador no se puede verificar"). Tras arrastrar la app a `/Applications`, quita la cuarentena:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/FrikiTerm.app
+```
+
+Después ábrela normalmente. Alternativa desde la interfaz: Ajustes del Sistema > Privacidad y seguridad > "Abrir igualmente" (tras el primer intento de apertura).
+
+**Windows (`.msi` o `.exe`)**: SmartScreen mostrará "Windows protegió su PC". Pulsa **Más información > Ejecutar de todas formas**.
+
+**Linux**: `.deb` con `sudo apt install ./FrikiTerm_X.Y.Z_x86_64.deb`, o el AppImage: `chmod +x FrikiTerm_X.Y.Z_x86_64.AppImage && ./FrikiTerm_X.Y.Z_x86_64.AppImage`. No requiere firma adicional.
+
+Sin notarización ni firma de Windows, las actualizaciones son manuales: descarga la nueva versión desde la release.
 
 ## 4. Compilar desde el código fuente
 
