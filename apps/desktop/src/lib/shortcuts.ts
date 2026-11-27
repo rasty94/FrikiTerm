@@ -1,7 +1,7 @@
 // Atajos globales. macOS usa Cmd; el resto Ctrl+Shift para no pisar los de la shell (^C, ^W, ^D…).
 export type ShortcutAction =
   | "newTab" | "closeTab" | "nextTab" | "prevTab" | "splitRight" | "splitDown" | "nextPane"
-  | "find" | "zoomIn" | "zoomOut" | "zoomReset"
+  | "broadcast" | "find" | "zoomIn" | "zoomOut" | "zoomReset"
   | "view:hosts" | "view:terminal" | "view:sftp" | "view:keychain" | "view:snippets" | "view:forwards" | "view:settings";
 
 interface Def {
@@ -20,6 +20,7 @@ export const SHORTCUTS: Def[] = [
   { action: "splitRight", label: "Dividir a la derecha", mac: ["meta+KeyD"], other: ["ctrl+shift+KeyD"] },
   { action: "splitDown", label: "Dividir abajo", mac: ["meta+shift+KeyD"], other: ["ctrl+shift+KeyE"] },
   { action: "nextPane", label: "Siguiente panel", mac: ["meta+BracketRight"], other: ["ctrl+shift+KeyO"] },
+  { action: "broadcast", label: "Enviar a todos los paneles (difusión)", mac: ["meta+shift+KeyB"], other: ["ctrl+shift+KeyB"] },
   { action: "find", label: "Buscar en el terminal", mac: ["meta+KeyF"], other: ["ctrl+shift+KeyF"] },
   { action: "zoomIn", label: "Aumentar fuente", mac: ["meta+Equal", "meta+shift+Equal"], other: ["ctrl+shift+Equal"] },
   { action: "zoomOut", label: "Reducir fuente", mac: ["meta+Minus"], other: ["ctrl+shift+Minus"] },

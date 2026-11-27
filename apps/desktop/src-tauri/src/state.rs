@@ -31,11 +31,16 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub enum TermCmd {
     Write(Vec<u8>),
     Resize(u16, u16),
+    /// Activa (`Some`) o desactiva el registro de sesión de esta terminal.
+    Log(Option<Box<friki_term::SessionLogger>>),
     Close,
 }
 
 pub struct TermHandle {
     pub tx: mpsc::UnboundedSender<TermCmd>,
+    /// Nombre de la sesión (o host) para la plantilla del fichero de registro.
+    pub name: String,
+    pub host: String,
 }
 
 /// Conexión SSH compartida por terminal, SFTP y redirecciones.

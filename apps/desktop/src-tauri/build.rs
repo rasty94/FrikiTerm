@@ -38,6 +38,9 @@ const COMMANDS: &[&str] = &[
     "open_url",
     "serial_ports",
     "pick_identity_file",
+    "term_log_start",
+    "term_log_stop",
+    "reveal_path",
 ];
 
 fn main() {

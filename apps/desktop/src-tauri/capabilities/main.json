@@ -44,6 +44,9 @@
     "allow-open-url",
     "allow-serial-ports",
     "allow-pick-identity-file",
+    "allow-term-log-start",
+    "allow-term-log-stop",
+    "allow-reveal-path",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

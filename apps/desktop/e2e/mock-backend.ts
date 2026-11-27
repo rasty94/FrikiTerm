@@ -32,7 +32,7 @@ export function installBackend(): void {
   // Valores por defecto de src/lib/settings.ts.
   let settings: unknown = {
     theme: "system", fontFamily: "", fontSize: 13, cursorStyle: "block", cursorBlink: true,
-    scrollback: 10000, copyOnSelect: false, rightClick: "menu", confirmClose: true,
+    scrollback: 10000, copyOnSelect: false, rightClick: "menu", confirmClose: true, restoreQuick: false,
   };
   let snippets = [
     { name: "uptime", command: "uptime" },
@@ -107,6 +107,9 @@ export function installBackend(): void {
       { name: "/dev/ttyS0", description: "" },
     ],
     pick_identity_file: () => "/home/e2e/.ssh/id_ed25519",
+    term_log_start: ({ id }) => `/home/e2e/.config/friki/logs/sesion-${id}-2026-01-01.log`,
+    term_log_stop: () => null,
+    reveal_path: () => null,
     "plugin:event|listen": () => nextId++,
     "plugin:event|unlisten": () => null,
   };

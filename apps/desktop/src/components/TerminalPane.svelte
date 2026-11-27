@@ -6,9 +6,11 @@
   import { SearchAddon } from "@xterm/addon-search";
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import "@xterm/xterm/css/xterm.css";
-  import { openUrl, termOpen, termWrite, termResize, termClose } from "../lib/api";
+  import { openUrl, termOpen, termWrite, termResize, termClose, termLogStart, termLogStop, revealPath } from "../lib/api";
   import type { TermEvent, TermId } from "../lib/types";
-  import { app, askConfirm, setActiveLeaf, tabById, toast, type Leaf } from "../lib/state.svelte";
+  import { app, askConfirm, paneWriters, setActiveLeaf, tabById, toast, type Leaf } from "../lib/state.svelte";
+  import { broadcastTargets, leavesOf } from "../lib/layout";
+  import Icon from "./Icon.svelte";
   import { effectiveFontSize } from "../lib/settings";
   import { needsPasteConfirm } from "../lib/paste";
   import { isMac } from "../lib/shortcuts";
@@ -28,6 +30,24 @@
   let seenFind = app.find.n;
   let menu = $state<{ x: number; y: number } | null>(null);
   const mac = isMac();
+  const revealLabel = mac ? "Mostrar en Finder" : /Win/.test(navigator.platform) ? "Mostrar en el Explorador" : "Mostrar carpeta";
+  /** Id de la terminal en el backend mientras la sesión vive. */
+  let id: TermId | null = null;
+  const broadcasting = $derived(tabById(tabId)?.broadcast ?? false);
+
+  async function toggleLog() {
+    if (id === null) return;
+    try {
+      if (leaf.log) {
+        await termLogStop(id);
+        leaf.log = null;
+      } else {
+        leaf.log = await termLogStart(id);
+      }
+    } catch (e) {
+      toast(errMsg(e));
+    }
+  }
 
   const monoVar = () => getComputedStyle(document.documentElement).getPropertyValue("--font-mono");
   const fontFamily = () => (app.settings.fontFamily ? `${app.settings.fontFamily}, ${monoVar()}` : monoVar());
@@ -204,7 +224,6 @@
     host.addEventListener("paste", onPaste, true);
     host.addEventListener("mouseup", onMouseUp);
 
-    let id: TermId | null = null;
     let closed = false;
     // Sesión terminada: se deja de enviar y la pestaña sale de sessions (SnippetRunner, etc.).
     let dead = false;
@@ -212,9 +231,15 @@
       dead = true;
       if (id !== null) removeTerm(id);
       id = null;
+      leaf.log = null;
+      paneWriters.delete(leaf.id);
     };
     const sub = t.onData((d) => {
-      if (id !== null) termWrite(id, new TextEncoder().encode(d)).catch((e) => toast(errMsg(e)));
+      const bytes = new TextEncoder().encode(d);
+      if (id !== null) termWrite(id, bytes).catch((e) => toast(errMsg(e)));
+      // Difusión: solo a los demás paneles de la pestaña con sesión abierta (broadcastTargets los filtra).
+      const tab = tabById(tabId);
+      if (tab?.broadcast) for (const lid of broadcastTargets(leavesOf(tab.root), leaf.id, true)) paneWriters.get(lid)?.(bytes);
     });
     dims = `${t.cols}×${t.rows}`;
     const rs = t.onResize(({ cols, rows }) => {
@@ -240,6 +265,7 @@
       .then((tid) => {
         if (closed || dead) return void termClose(tid).catch(() => {});
         id = tid;
+        paneWriters.set(leaf.id, (b) => void termWrite(tid, b).catch(() => {}));
         addTerm({ id: tid, label: leaf.title });
         // Por si el panel cambió de tamaño mientras conectaba.
         termResize(tid, t.cols, t.rows).catch(() => {});
@@ -253,6 +279,7 @@
       closed = true;
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("mouseup", onMouseUp);
+      paneWriters.delete(leaf.id);
       endSession();
       ro.disconnect();
       sub.dispose();
@@ -268,7 +295,7 @@
   });
 </script>
 
-<div class="pane" class:active onfocusin={() => setActiveLeaf(tabId, leaf.id)} role="group" aria-label="Terminal {leaf.title}">
+<div class="pane" class:active class:bcast={broadcasting} onfocusin={() => setActiveLeaf(tabId, leaf.id)} role="group" aria-label="Terminal {leaf.title}">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="term" bind:this={host} oncontextmenu={onContextMenu}></div>
   {#if finding}
@@ -289,6 +316,7 @@
         { label: "Pegar", run: () => void pasteFromClipboard() },
         { label: "Buscar…", run: () => { finding = true; findKey++; } },
         { label: "Limpiar terminal", run: () => term?.clear() },
+        ...(leaf.status.state === "open" ? [{ label: leaf.log ? "Detener grabación" : "Grabar sesión", run: () => void toggleLog() }] : []),
       ]}
     />
   {/if}
@@ -296,7 +324,18 @@
     <span class="dot {leaf.status.state}" aria-hidden="true"></span>
     <span class="state">{STATE_LABEL[leaf.status.state]}</span>
     {#if leaf.status.state !== "connecting"}<span class="detail">{statusText}</span>{/if}
+    {#if leaf.log}
+      <span class="rec" title="Grabando la sesión"><span class="recdot" aria-hidden="true"></span>REC</span>
+      <span class="logpath" title={leaf.log}>{leaf.log}</span>
+      <button class="sbtn" onclick={() => leaf.log && revealPath(leaf.log).catch((e) => toast(errMsg(e)))}>{revealLabel}</button>
+    {/if}
+    <span class="right">
+    {#if broadcasting}<span class="badge-bc" title="Lo que escribas se envía a todos los paneles abiertos de la pestaña"><Icon name="broadcast" size={12} />Enviar a todos</span>{/if}
+    {#if leaf.status.state === "open"}
+      <button class="sbtn" aria-pressed={!!leaf.log} onclick={() => void toggleLog()}>{leaf.log ? "Detener grabación" : "Grabar sesión"}</button>
+    {/if}
     {#if dims}<span class="dims" aria-label="Tamaño en columnas por filas">{dims}</span>{/if}
+    </span>
   </div>
 </div>
 
@@ -314,5 +353,15 @@
   .status.failed .state { color: var(--danger); }
   .detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); font-size: 11px; }
   .status.failed .detail, .status.closed .detail { font-family: var(--font-ui); font-size: 11.5px; }
-  .dims { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+  .pane.bcast::before { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 0 2px var(--accent); }
+  .badge-bc { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; font-weight: 600; color: var(--accent-fg, #fff); background: var(--accent); }
+  .rec { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; color: var(--danger); }
+  .recdot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); animation: recblink 1.4s ease-in-out infinite; }
+  @keyframes recblink { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .recdot { animation: none; } }
+  .logpath { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); font-size: 11px; }
+  .sbtn { height: 20px; padding: 0 8px; border: 0; border-radius: 4px; background: none; color: var(--fg-dim); font-size: 11.5px; flex: none; }
+  .sbtn:hover, .sbtn[aria-pressed="true"] { background: var(--bg-hover); color: var(--fg); }
+  .right { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }
+  .dims { font-family: var(--font-mono); font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
 </style>

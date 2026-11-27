@@ -56,6 +56,9 @@ fn main() {
             settings::open_url,
             serial::serial_ports,
             serial::pick_identity_file,
+            term::term_log_start,
+            term::term_log_stop,
+            term::reveal_path,
         ])
         .run(tauri::generate_context!())
         .expect("error al arrancar FrikiTerm");

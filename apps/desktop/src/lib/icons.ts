@@ -36,6 +36,7 @@ export const ICONS = {
   check: '<path d="M20 6 9 17l-5-5"/>',
   alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5M12 16.5h.01"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-5M12 7.5h.01"/>',
+  broadcast: '<circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19.1 4.9a10 10 0 0 1 0 14.2M4.9 19.1a10 10 0 0 1 0-14.2"/>',
   zap: '<path d="M13 2 4 14h7.5L11 22l9-12h-7.5z"/>',
   save: '<path d="M5 3h11l5 5v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7.5 3v5h8M7.5 21v-7h9v7"/>',
   // Glifos de SO: formas propias y neutras (no son logotipos).

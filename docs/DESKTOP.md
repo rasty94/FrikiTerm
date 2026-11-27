@@ -95,7 +95,9 @@ enum Prompt {
 
 ### Ajustes y utilidades
 
-- `settings_get() -> DesktopSettings`, `settings_save(DesktopSettings)` (`config_dir/desktop.toml`, escritura atómica). Campos camelCase: `theme` (system|light|dark), `fontFamily`, `fontSize` (8-32), `cursorStyle` (block|underline|bar), `cursorBlink`, `scrollback` (0-100000), `copyOnSelect`, `rightClick` (paste|menu), `confirmClose`. Campos desconocidos o ausentes: se ignoran / valor por defecto; un fichero inválido da los valores por defecto. `settings_save` rechaza valores fuera de rango (`invalid`).
+- `settings_get() -> DesktopSettings`, `settings_save(DesktopSettings)` (`config_dir/desktop.toml`, escritura atómica). Campos camelCase: `theme` (system|light|dark), `fontFamily`, `fontSize` (8-32), `cursorStyle` (block|underline|bar), `cursorBlink`, `scrollback` (0-100000), `copyOnSelect`, `rightClick` (paste|menu), `confirmClose`, `restoreQuick` (bool, por defecto false). Campos desconocidos o ausentes: se ignoran / valor por defecto; un fichero inválido da los valores por defecto. `settings_save` rechaza valores fuera de rango (`invalid`).
+- `term_log_start(id) -> String`: empieza a registrar la salida de la terminal en `config_dir/logs/` (plantilla `%S-%D.log`, modo añadir, solo salida; `SessionLogger` de friki-term, que rechaza rutas fuera del directorio). Devuelve la ruta. `term_log_stop(id)` lo detiene; el registro también acaba al cerrarse la sesión.
+- `reveal_path(path)`: muestra el fichero en el gestor de archivos (`open -R`, `explorer /select,`, `xdg-open` del directorio). Solo rutas existentes dentro de `config_dir/logs/` (tras resolver `..` y enlaces simbólicos); otras dan `invalid`.
 - `open_url(url)`: abre en el navegador del SO; solo `http://` y `https://` (sin espacios ni caracteres de control). El webview no tiene permiso de opener.
 
 ### Redirecciones
@@ -176,3 +178,9 @@ Solo T0 toca `dto.rs`, `types.ts` y `api.ts`. Un cambio de contrato se pide al c
 - `pick_identity_file() -> Option<String>`: diálogo nativo en Rust (`tauri-plugin-dialog`) que empieza en `~/.ssh`. `None` si se cancela.
 - Validación del formulario en `lib/hostForm.ts` (sin IPC; `npm test`). Replica `hosts::validate` y añade: puerto 1-65535, velocidad entero positivo (lista sugerida o personalizada), bits de datos 5-8, parada 1-2, timeout/reintentos enteros y destino de redirecciones. «Guardar» está desactivado hasta que el borrador es válido.
 - Pestañas por protocolo: SSH (General, Autenticación, Terminal, Redirecciones), serie (General, Terminal, Serie), telnet/raw/telnet-tls (General, Terminal), shell local (General, Terminal). TN3270 no aparece.
+
+### Terminal: pestañas, difusión y restauración (solo frontend)
+
+- Menú «+» de la barra de pestañas: terminal local, conexión rápida (historial de 10 en `localStorage` `friki.quickHistory`) y hosts guardados con búsqueda.
+- «Enviar a todos» (por pestaña, `Cmd/Ctrl+Shift+B`): la entrada de un panel se refleja en los demás paneles de la pestaña con sesión abierta; nunca en cerrados.
+- Restauración: pestañas, divisiones y destinos se guardan en `localStorage` `friki.workspace.v1` (solo nombres de host guardados y Local; las conexiones rápidas únicamente con el ajuste `restoreQuick`). Al arrancar se ofrece «Restaurar sesiones anteriores»; no reconecta solo.

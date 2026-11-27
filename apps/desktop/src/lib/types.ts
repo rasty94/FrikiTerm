@@ -224,6 +224,8 @@ export interface DesktopSettings {
   copyOnSelect: boolean;
   rightClick: RightClick;
   confirmClose: boolean;
+  /** Restaurar también las conexiones rápidas (usuario@host:puerto; nunca guardan contraseñas). */
+  restoreQuick: boolean;
 }
 
 /** Metadatos de un host (no secretos); los escribe el backend. `hosts_meta()` -> Record<nombre, HostMeta>. */
