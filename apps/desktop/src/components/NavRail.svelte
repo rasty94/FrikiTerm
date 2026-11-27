@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, cycleTheme, type ViewName } from "../lib/state.svelte";
+  import { app, type ViewName } from "../lib/state.svelte";
 
   const items: { name: ViewName; label: string; d: string }[] = [
     { name: "hosts", label: "Hosts", d: "M4 5h16v6H4zM4 13h16v6H4zM8 8h.01M8 16h.01" },
@@ -9,7 +9,7 @@
     { name: "snippets", label: "Snippets", d: "M9 4H7v16h2M15 4h2v16h-2" },
     { name: "forwards", label: "Redirecciones", d: "M4 12h11M11 7l5 5-5 5M19 4v16" },
   ];
-  const themeLabel = { system: "Auto", light: "Claro", dark: "Oscuro" };
+  const settings = { name: "settings" as ViewName, label: "Ajustes", d: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" };
 </script>
 
 <nav class="rail" aria-label="Principal">
@@ -19,9 +19,9 @@
       <span>{it.label}</span>
     </button>
   {/each}
-  <button class="item theme" onclick={cycleTheme} aria-label="Tema: {themeLabel[app.theme]}. Cambiar">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 1 0 18z" /></svg>
-    <span>{themeLabel[app.theme]}</span>
+  <button class="item bottom" class:active={app.view === "settings"} aria-current={app.view === "settings" ? "page" : undefined} onclick={() => (app.view = "settings")}>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d={settings.d} /></svg>
+    <span>{settings.label}</span>
   </button>
 </nav>
 
@@ -31,7 +31,5 @@
   .item:hover:not(:disabled) { background: var(--bg-hover); }
   .item.active { color: var(--accent); background: var(--bg-hover); }
   .item svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  .item.theme { margin-top: auto; }
-  .theme circle { fill: none; }
-  .theme path { fill: currentColor; stroke: none; }
+  .item.bottom { margin-top: auto; }
 </style>

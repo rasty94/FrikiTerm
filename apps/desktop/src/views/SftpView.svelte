@@ -223,6 +223,12 @@
 
   onMount(() => {
     void initLocal();
+    // «Abrir SFTP» desde el menú de un host.
+    if (app.sftpHost) {
+      hostName = app.sftpHost;
+      app.sftpHost = null;
+      void connectHost();
+    }
     let unlisten: (() => void) | undefined;
     // Fuera de Tauri (vite en navegador) no hay webview nativo: se ignora.
     getCurrentWebview()

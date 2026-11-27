@@ -38,6 +38,9 @@
     "allow-fwd-list",
     "allow-fwd-start",
     "allow-fwd-stop",
+    "allow-settings-get",
+    "allow-settings-save",
+    "allow-open-url",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

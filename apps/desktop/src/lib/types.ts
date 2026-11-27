@@ -204,3 +204,24 @@ export interface Snippet {
   name: string;
   command: string;
 }
+
+// ---- Ajustes de escritorio (`settings_get` / `settings_save`, `config_dir/desktop.toml`) ----
+
+export type ThemePref = "system" | "light" | "dark";
+export type CursorStyle = "block" | "underline" | "bar";
+export type RightClick = "paste" | "menu";
+
+export interface DesktopSettings {
+  theme: ThemePref;
+  /** "" = fuente monoespaciada del sistema. */
+  fontFamily: string;
+  /** 8-32. */
+  fontSize: number;
+  cursorStyle: CursorStyle;
+  cursorBlink: boolean;
+  /** 0-100000 líneas. */
+  scrollback: number;
+  copyOnSelect: boolean;
+  rightClick: RightClick;
+  confirmClose: boolean;
+}
