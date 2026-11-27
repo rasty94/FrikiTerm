@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { app, closePane, closeTab, openTab, splitPane, tabById, toast } from "../lib/state.svelte";
+  import { app, closePane, openTab, requestCloseTab, splitPane, tabById, toast } from "../lib/state.svelte";
   import { defaultSession, parseQuickSpec } from "../lib/session";
 
   let adding = $state(false);
@@ -8,6 +8,14 @@
   let input = $state<HTMLInputElement>();
   $effect(() => {
     if (adding) tick().then(() => input?.focus());
+  });
+  let seenQuick = app.quick;
+  $effect(() => {
+    if (app.quick !== seenQuick) {
+      seenQuick = app.quick;
+      adding = true;
+      app.view = "terminal";
+    }
   });
   const active = $derived(tabById(app.activeTab));
 
@@ -27,14 +35,14 @@
     {#each app.tabs as t (t.id)}
       <div class="tab" class:on={t.id === app.activeTab}>
         <button role="tab" class="label" aria-selected={t.id === app.activeTab} onclick={() => (app.activeTab = t.id)}>{t.title}</button>
-        <button class="close" aria-label="Cerrar {t.title}" onclick={() => closeTab(t.id)}>×</button>
+        <button class="close" aria-label="Cerrar {t.title}" onclick={() => requestCloseTab(t.id)}>×</button>
       </div>
     {/each}
     <button class="plus" aria-label="Conexión rápida" aria-expanded={adding} onclick={() => (adding = !adding)}>+</button>
   </div>
   {#if adding}
     <form class="quick" onsubmit={quickConnect}>
-      <input bind:value={spec} placeholder="usuario@host:22" aria-label="Conexión rápida (usuario@host:puerto)" bind:this={input} />
+      <input bind:value={spec} onkeydown={(e) => e.key === "Escape" && (adding = false)} placeholder="usuario@host:22" aria-label="Conexión rápida (usuario@host:puerto)" bind:this={input} />
       <button class="primary">Conectar</button>
     </form>
   {/if}

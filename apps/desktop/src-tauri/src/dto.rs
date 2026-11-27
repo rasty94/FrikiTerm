@@ -288,6 +288,60 @@ pub struct Snippet {
     pub command: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePref {
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorStyle {
+    Block,
+    Underline,
+    Bar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RightClick {
+    Paste,
+    Menu,
+}
+
+/// Preferencias de la app de escritorio (`config_dir/desktop.toml`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DesktopSettings {
+    pub theme: ThemePref,
+    pub font_family: String,
+    pub font_size: u8,
+    pub cursor_style: CursorStyle,
+    pub cursor_blink: bool,
+    pub scrollback: u32,
+    pub copy_on_select: bool,
+    pub right_click: RightClick,
+    pub confirm_close: bool,
+}
+
+impl Default for DesktopSettings {
+    fn default() -> Self {
+        Self {
+            theme: ThemePref::System,
+            font_family: String::new(),
+            font_size: 13,
+            cursor_style: CursorStyle::Block,
+            cursor_blink: true,
+            scrollback: 10_000,
+            copy_on_select: false,
+            right_click: RightClick::Menu,
+            confirm_close: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

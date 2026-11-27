@@ -1,12 +1,12 @@
 <script lang="ts">
   import type { SessionConfig } from "../lib/types";
 
-  let { host, onconnect, onedit }: { host: SessionConfig; onconnect: () => void; onedit: () => void } = $props();
+  let { host, onconnect, onedit, oncontext }: { host: SessionConfig; onconnect: () => void; onedit: () => void; oncontext: (e: MouseEvent) => void } = $props();
 
   const addr = $derived(`${host.user ? `${host.user}@` : ""}${host.host}:${host.port}`);
 </script>
 
-<li class="row">
+<li class="row" oncontextmenu={(e) => { e.preventDefault(); oncontext(e); }}>
   <button class="open" onclick={onconnect} title="Conectar a {host.name}">
     <span class="proto">{host.protocol}</span>
     <span class="name">{host.name}</span>

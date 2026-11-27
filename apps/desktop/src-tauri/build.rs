@@ -32,6 +32,9 @@ const COMMANDS: &[&str] = &[
     "fwd_list",
     "fwd_start",
     "fwd_stop",
+    "settings_get",
+    "settings_save",
+    "open_url",
 ];
 
 fn main() {

@@ -1,7 +1,7 @@
 // Único sitio que llama a `invoke`. Un envoltorio tipado por comando de Rust.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
-  AppEvent, ConnId, EntryDto, Forward, ForwardId, ForwardStatus, FsRef, ImportReport, JobId,
+  AppEvent, ConnId, DesktopSettings, EntryDto, Forward, ForwardId, ForwardStatus, FsRef, ImportReport, JobId,
   KeyInfo, PromptAnswer, PromptId, SessionConfig, SftpId, Snippet, TermEvent, TermId, TermTarget,
   XferJob,
 } from "./types";
@@ -93,3 +93,11 @@ export const fwdList = (conn: ConnId): Promise<ForwardStatus[]> => invoke("fwd_l
 export const fwdStart = (conn: ConnId, spec: Forward): Promise<ForwardStatus> =>
   invoke("fwd_start", { conn, spec });
 export const fwdStop = (conn: ConnId, id: ForwardId): Promise<void> => invoke("fwd_stop", { conn, id });
+
+// ---- Ajustes y utilidades ----
+
+export const settingsGet = (): Promise<DesktopSettings> => invoke("settings_get");
+export const settingsSave = (settings: DesktopSettings): Promise<void> =>
+  invoke("settings_save", { settings });
+/** Solo http(s); el backend lo abre en el navegador del SO. */
+export const openUrl = (url: string): Promise<void> => invoke("open_url", { url });

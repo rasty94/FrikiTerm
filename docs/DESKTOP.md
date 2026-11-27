@@ -89,6 +89,11 @@ enum Prompt {
 - `key_install(conn, key_path) -> bool`: `key_path` tiene que ser uno de los que devuelve `keys_list`.
 - `snippets_list() -> Vec<Snippet { name, command }>`, `snippets_save(Vec<Snippet>)` (`config_dir/snippets.toml`). Enviar un snippet a varias sesiones es un bucle de `term_write` en la UI.
 
+### Ajustes y utilidades
+
+- `settings_get() -> DesktopSettings`, `settings_save(DesktopSettings)` (`config_dir/desktop.toml`, escritura atómica). Campos camelCase: `theme` (system|light|dark), `fontFamily`, `fontSize` (8-32), `cursorStyle` (block|underline|bar), `cursorBlink`, `scrollback` (0-100000), `copyOnSelect`, `rightClick` (paste|menu), `confirmClose`. Campos desconocidos o ausentes: se ignoran / valor por defecto; un fichero inválido da los valores por defecto. `settings_save` rechaza valores fuera de rango (`invalid`).
+- `open_url(url)`: abre en el navegador del SO; solo `http://` y `https://` (sin espacios ni caracteres de control). El webview no tiene permiso de opener.
+
 ### Redirecciones
 
 - `fwd_list(conn) -> Vec<ForwardStatus { id, spec: Forward, listen, active, error }>`

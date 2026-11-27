@@ -1,8 +1,10 @@
 // Estado global con runes. Las pestañas viven aquí para sobrevivir a cambios de vista.
-import type { Prompt, PromptId, SessionConfig, TermTarget } from "./types";
+import type { DesktopSettings, Prompt, PromptId, SessionConfig, TermTarget, ThemePref } from "./types";
+import { settingsGet, settingsSave } from "./api";
+import { DEFAULT_SETTINGS, normalizeSettings } from "./settings";
 
-export type ViewName = "hosts" | "terminal" | "sftp" | "keychain" | "snippets" | "forwards";
-export type ThemePref = "system" | "light" | "dark";
+export type ViewName = "hosts" | "terminal" | "sftp" | "keychain" | "snippets" | "forwards" | "settings";
+export type { ThemePref };
 
 export interface PendingPrompt {
   id: PromptId;
@@ -74,18 +76,59 @@ export const app = $state({
   tabs: [] as Tab[],
   activeTab: 0,
   toasts: [] as Toast[],
+  settings: { ...DEFAULT_SETTINGS } as DesktopSettings,
+  /** Zoom temporal del terminal (pasos de fuente); no se guarda. */
+  zoom: 0,
+  /** Petición de abrir la barra de búsqueda en un panel. */
+  find: { leaf: 0, n: 0 },
+  /** Contador: cada incremento abre y enfoca la conexión rápida de la barra de pestañas. */
+  quick: 0,
+  /** Confirmación modal pendiente (ConfirmModal). */
+  confirm: null as { text: string; ok: string; resolve: (v: boolean) => void } | null,
+  /** Host a conectar por SFTP al entrar en la vista (lo consume SftpView). */
+  sftpHost: null as string | null,
 });
 applyTheme(app.theme);
 
-const THEME_ORDER: ThemePref[] = ["system", "light", "dark"];
-export function cycleTheme(): void {
-  app.theme = THEME_ORDER[(THEME_ORDER.indexOf(app.theme) + 1) % THEME_ORDER.length];
-  applyTheme(app.theme);
+function cacheTheme(t: ThemePref): void {
   try {
-    localStorage.setItem(THEME_KEY, app.theme);
+    localStorage.setItem(THEME_KEY, t);
   } catch {
-    /* sin almacenamiento: el tema dura lo que la sesión */
+    /* sin almacenamiento: solo es una caché anti-parpadeo */
   }
+}
+
+/** Carga los ajustes del backend (el fichero manda; localStorage solo evita el parpadeo del tema). */
+export async function loadSettings(): Promise<void> {
+  try {
+    app.settings = normalizeSettings(await settingsGet());
+    app.theme = app.settings.theme;
+    applyTheme(app.theme);
+    cacheTheme(app.theme);
+  } catch {
+    /* fuera de Tauri o error de lectura: valores por defecto */
+  }
+}
+
+export async function updateSettings(patch: Partial<DesktopSettings>): Promise<void> {
+  const next = normalizeSettings({ ...app.settings, ...patch });
+  app.settings = next;
+  app.theme = next.theme;
+  applyTheme(next.theme);
+  cacheTheme(next.theme);
+  try {
+    await settingsSave(next);
+  } catch (e) {
+    toast(`No se pudieron guardar los ajustes: ${(e as { message?: string })?.message ?? e}`);
+  }
+}
+
+/** Modal propio: `window.confirm` no funciona sin permisos del plugin de diálogo. */
+export function askConfirm(text: string, ok = "Aceptar"): Promise<boolean> {
+  app.confirm?.resolve(false);
+  return new Promise((resolve) => {
+    app.confirm = { text, ok, resolve };
+  });
 }
 
 export function toast(text: string, kind: Toast["kind"] = "error"): void {
@@ -109,6 +152,34 @@ export function openTab(target: TermTarget, title: string): void {
   app.tabs.push(tab);
   app.activeTab = tab.id;
   app.view = "terminal";
+}
+
+export function leaves(n: PaneNode): Leaf[] {
+  return n.kind === "leaf" ? [n] : n.children.flatMap(leaves);
+}
+
+/** Pide confirmación (si está activada) cuando alguna sesión de la pestaña sigue viva. */
+export async function requestCloseTab(tabId: number): Promise<void> {
+  const tab = tabById(tabId);
+  if (!tab) return;
+  const live = leaves(tab.root).some((l) => l.status.state === "open" || l.status.state === "connecting");
+  if (live && app.settings.confirmClose && !(await askConfirm(`¿Cerrar «${tab.title}»? La sesión activa se cerrará.`, "Cerrar"))) return;
+  closeTab(tabId);
+}
+
+export function cycleTab(delta: 1 | -1): void {
+  if (app.tabs.length === 0) return;
+  const i = app.tabs.findIndex((t) => t.id === app.activeTab);
+  app.activeTab = app.tabs[(i + delta + app.tabs.length) % app.tabs.length].id;
+  app.view = "terminal";
+}
+
+export function focusNextPane(): void {
+  const tab = tabById(app.activeTab);
+  if (!tab) return;
+  const ls = leaves(tab.root);
+  const i = ls.findIndex((l) => l.id === tab.activeLeaf);
+  tab.activeLeaf = ls[(i + 1) % ls.length].id;
 }
 
 export function closeTab(tabId: number): void {
