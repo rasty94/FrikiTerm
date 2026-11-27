@@ -38,6 +38,7 @@
     "allow-fwd-list",
     "allow-fwd-start",
     "allow-fwd-stop",
+    "allow-hosts-meta",
     "allow-settings-get",
     "allow-settings-save",
     "allow-open-url",

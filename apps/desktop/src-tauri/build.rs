@@ -32,6 +32,7 @@ const COMMANDS: &[&str] = &[
     "fwd_list",
     "fwd_start",
     "fwd_stop",
+    "hosts_meta",
     "settings_get",
     "settings_save",
     "open_url",

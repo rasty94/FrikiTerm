@@ -1,28 +1,27 @@
 <script lang="ts">
-  import type { SessionConfig } from "../lib/types";
+  import type { HostMeta, SessionConfig } from "../lib/types";
   import { hueOf } from "../lib/folderTree";
+  import { ago, initialsOf } from "../lib/hostMeta";
   import Icon from "./Icon.svelte";
+  import OsBadge from "./OsBadge.svelte";
 
-  let { host, onconnect, onedit, oncontext }: { host: SessionConfig; onconnect: () => void; onedit: () => void; oncontext: (e: MouseEvent) => void } = $props();
+  let { host, title, meta, onconnect, onedit, oncontext }: { host: SessionConfig; title?: string; meta?: HostMeta; onconnect: () => void; onedit: () => void; oncontext: (e: MouseEvent) => void } = $props();
 
   const addr = $derived(`${host.user ? `${host.user}@` : ""}${host.host}:${host.port}`);
   // Color por carpeta de primer nivel (o por host si no tiene): los hosts de un grupo se reconocen de un vistazo.
   const hue = $derived(hueOf(host.folder.split("/")[0] || host.name));
-  // "router-casa" -> "RC"; "web-01" -> "WE" (un sufijo numérico no aporta).
-  const initials = $derived.by(() => {
-    const [a = "", b = ""] = host.name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-    return (/^\p{L}/u.test(b) ? a[0] + b[0] : a.slice(0, 2)).toUpperCase() || "?";
-  });
 </script>
 
 <li class="row" oncontextmenu={(e) => { e.preventDefault(); oncontext(e); }}>
-  <button class="open" onclick={onconnect} title="Conectar a {host.name}">
-    <span class="avatar" style:--h={hue} aria-hidden="true">{initials}</span>
+  <button class="open" data-nav data-name={host.name} onclick={onconnect} title={title ?? `Conectar a ${host.name}`}>
+    <span class="avatar" style:--h={hue} aria-hidden="true">{initialsOf(host.name)}</span>
     <span class="text">
       <span class="name">{host.name}</span>
       <span class="addr">{addr}</span>
     </span>
     {#if host.folder}<span class="folder">{host.folder}</span>{/if}
+    {#if meta?.lastConnected}<span class="last">{ago(meta.lastConnected)}</span>{/if}
+    <OsBadge os={meta?.os} />
     <span class="badge proto">{host.protocol}</span>
   </button>
   <button class="icon-btn edit" aria-label="Editar {host.name}" title="Editar" onclick={onedit}>
@@ -49,6 +48,7 @@
   .name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .addr { color: var(--fg-dim); font-family: var(--font-mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .folder { color: var(--fg-faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30%; }
+  .last { color: var(--fg-faint); font-size: 12px; white-space: nowrap; }
   .proto { text-transform: uppercase; letter-spacing: 0.03em; }
   .edit { position: absolute; right: 10px; opacity: 0; }
   .row:hover .edit, .edit:focus-visible { opacity: 1; }

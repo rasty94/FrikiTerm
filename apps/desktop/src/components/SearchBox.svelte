@@ -1,12 +1,12 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
 
-  let { value = $bindable(""), placeholder = "Buscar hosts…" }: { value?: string; placeholder?: string } = $props();
+  let { value = $bindable(""), input = $bindable(), placeholder = "Buscar hosts…" }: { value?: string; input?: HTMLInputElement; placeholder?: string } = $props();
 </script>
 
 <label class="search">
   <span class="ico"><Icon name="search" size={15} /></span>
-  <input type="search" bind:value {placeholder} aria-label="Buscar hosts" />
+  <input type="search" bind:value bind:this={input} {placeholder} aria-label="Buscar hosts" />
 </label>
 
 <style>

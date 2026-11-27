@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hosts-meta"
+description = "Enables the hosts_meta command without any pre-configured scope."
+commands.allow = ["hosts_meta"]
+
+[[permission]]
+identifier = "deny-hosts-meta"
+description = "Denies the hosts_meta command without any pre-configured scope."
+commands.deny = ["hosts_meta"]
