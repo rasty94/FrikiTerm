@@ -10,6 +10,7 @@ use friki_core::config::{Forward, Protocol, SessionConfig};
 use friki_core::paths;
 use friki_core::transport::{StreamEvent, StreamReader, StreamWriter};
 use friki_session::{Asker, Reply};
+use friki_term::SessionLogger;
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::mpsc;
@@ -21,7 +22,7 @@ use crate::dto::{
     AppEvent, ConnId, ForwardStatus, HostKeyDecision, KbdPrompt, Prompt, PromptAnswer, TermEvent,
     TermId, TermTarget,
 };
-use crate::error::CmdError;
+use crate::error::{CmdError, ErrorKind};
 use crate::state::{AppState, ConnHandle, PROMPT_TIMEOUT, TermCmd, TermHandle};
 
 /// Trozo de salida: se envía al llenarse o a los 16 ms del primer byte pendiente.
@@ -246,6 +247,7 @@ async fn pump(
     reader: &mut dyn StreamReader,
     rx: &mut mpsc::UnboundedReceiver<TermCmd>,
     output: &Channel<InvokeResponseBody>,
+    logger: &mut Option<Box<SessionLogger>>,
 ) -> TermEvent {
     let mut buf = Vec::new();
     let mut due: Option<Instant> = None;
@@ -254,6 +256,10 @@ async fn pump(
         tokio::select! {
             cmd = rx.recv() => match cmd {
                 Some(TermCmd::Write(d)) => {
+                    // Un fallo de disco apaga el registro, no la sesión.
+                    if logger.as_mut().is_some_and(|l| l.log_input(&d).is_err()) {
+                        *logger = None;
+                    }
                     if let Err(e) = writer.write(&d).await {
                         break TermEvent::Lost { reason: Some(e.to_string()) };
                     }
@@ -261,10 +267,14 @@ async fn pump(
                 Some(TermCmd::Resize(c, r)) => {
                     let _ = writer.resize(c, r).await;
                 }
+                Some(TermCmd::Log(l)) => *logger = l,
                 Some(TermCmd::Close) | None => break TermEvent::Closed,
             },
             ev = reader.next_event() => match ev {
                 Some(StreamEvent::Data(d)) => {
+                    if logger.as_mut().is_some_and(|l| l.log_output(&d).is_err()) {
+                        *logger = None;
+                    }
                     if buf.is_empty() {
                         due = Some(Instant::now() + FLUSH_EVERY);
                     }
@@ -309,12 +319,14 @@ async fn run_term(
     // Mientras conecta: las escrituras se guardan para enviarlas al abrir; cerrar cancela.
     let mut early: Vec<Vec<u8>> = Vec::new();
     let mut latest: Option<(u16, u16)> = None;
+    let mut logger: Option<Box<SessionLogger>> = None;
     let res = loop {
         tokio::select! {
             r = &mut open => break r,
             cmd = rx.recv() => match cmd {
                 Some(TermCmd::Write(d)) => early.push(d),
                 Some(TermCmd::Resize(c, r)) => latest = Some((c, r)),
+                Some(TermCmd::Log(l)) => logger = l,
                 Some(TermCmd::Close) | None => {
                     state.terms.remove(id);
                     return;
@@ -358,7 +370,7 @@ async fn run_term(
     for d in early {
         let _ = writer.write(&d).await;
     }
-    let end = pump(&*writer, &mut *reader, &mut rx, &output).await;
+    let end = pump(&*writer, &mut *reader, &mut rx, &output, &mut logger).await;
     state.terms.remove(id);
     drop((writer, reader));
     if let Some(c) = conn_id {
@@ -406,7 +418,14 @@ pub fn open_term(
     check_size(size)?;
     let cfg = resolve(target, dir)?;
     let (tx, rx) = mpsc::unbounded_channel();
-    let id = state.terms.insert(TermHandle { tx });
+    let name = if cfg.name.is_empty() {
+        &cfg.host
+    } else {
+        &cfg.name
+    }
+    .clone();
+    let host = cfg.host.clone();
+    let id = state.terms.insert(TermHandle { tx, name, host });
     tokio::spawn(run_term(state.clone(), id, cfg, size, rx, output, events));
     Ok(id)
 }
@@ -449,6 +468,83 @@ pub fn close_term(state: &AppState, id: TermId) {
     if let Some(h) = state.terms.remove(id) {
         let _ = h.tx.send(TermCmd::Close);
     }
+}
+
+/// Empieza a registrar la terminal en `dir` con la plantilla por defecto (`%S-%D.log`, solo salida:
+/// la entrada tras un aviso de contraseña nunca se escribiría, y aquí ni siquiera se registra).
+/// Devuelve la ruta del fichero; `SessionLogger` rechaza cualquier ruta fuera de `dir`.
+pub fn start_log(state: &AppState, dir: &Path, id: TermId) -> Result<String, CmdError> {
+    let (name, host) = state
+        .terms
+        .with(id, |h| (h.name.clone(), h.host.clone()))
+        .ok_or_else(|| CmdError::invalid("terminal desconocido o cerrado"))?;
+    let logger = SessionLogger::open(&friki_core::config::LogConfig::default(), dir, &name, &host)
+        .map_err(|e| {
+            CmdError::new(
+                ErrorKind::Other,
+                format!("no se pudo abrir el registro: {e}"),
+            )
+        })?;
+    let path = logger.path().to_string_lossy().into_owned();
+    send(state, id, TermCmd::Log(Some(Box::new(logger))))?;
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn term_log_start(state: State<'_, AppState>, id: TermId) -> Result<String, CmdError> {
+    start_log(&state, &paths::logs_dir(), id)
+}
+
+#[tauri::command]
+pub async fn term_log_stop(state: State<'_, AppState>, id: TermId) -> Result<(), CmdError> {
+    send(&state, id, TermCmd::Log(None))
+}
+
+/// Solo rutas de ficheros existentes dentro de `logs` (tras resolver `..` y enlaces simbólicos).
+fn check_reveal(path: &str, logs: &Path) -> Result<std::path::PathBuf, CmdError> {
+    let bad = || CmdError::invalid("solo se pueden mostrar ficheros del directorio de registros");
+    let p = Path::new(path).canonicalize().map_err(|_| bad())?;
+    let base = logs.canonicalize().map_err(|_| bad())?;
+    if p.starts_with(&base) {
+        Ok(p)
+    } else {
+        Err(bad())
+    }
+}
+
+#[tauri::command]
+pub async fn reveal_path(path: String) -> Result<(), CmdError> {
+    let p = check_reveal(&path, &paths::logs_dir())?;
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(&p);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", p.display()));
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(p.parent().unwrap_or(&p));
+        c
+    };
+    cmd.spawn()
+        .map(|mut c| {
+            std::thread::spawn(move || {
+                let _ = c.wait();
+            });
+        })
+        .map_err(|e| {
+            CmdError::new(
+                ErrorKind::Other,
+                format!("no se pudo abrir el gestor de archivos: {e}"),
+            )
+        })
 }
 
 fn send(state: &AppState, id: TermId, cmd: TermCmd) -> Result<(), CmdError> {
@@ -655,5 +751,65 @@ mod tests {
             bytes.extend(b);
         }
         assert!(String::from_utf8_lossy(&bytes).contains("42"), "{bytes:?}");
+    }
+
+    fn fake_term(state: &AppState, name: &str) -> (TermId, mpsc::UnboundedReceiver<TermCmd>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let id = state.terms.insert(TermHandle {
+            tx,
+            name: name.into(),
+            host: "h".into(),
+        });
+        (id, rx)
+    }
+
+    #[test]
+    fn log_start_stays_inside_logs_dir() {
+        let d = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        // Un nombre malicioso no puede escapar del directorio de registros.
+        let (id, mut rx) = fake_term(&state, "../../evil\x1b");
+        let path = start_log(&state, d.path(), id).unwrap();
+        let p = std::path::PathBuf::from(&path);
+        assert!(p.starts_with(d.path()), "{path}");
+        assert!(p.exists());
+        assert!(matches!(rx.try_recv(), Ok(TermCmd::Log(Some(_)))));
+        // check_reveal acepta justo esa ruta.
+        assert!(check_reveal(&path, d.path()).is_ok());
+    }
+
+    #[test]
+    fn log_start_unknown_term_and_stop() {
+        let d = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        assert_eq!(
+            start_log(&state, d.path(), 99).unwrap_err().kind,
+            ErrorKind::Invalid
+        );
+        let (id, mut rx) = fake_term(&state, "s");
+        send(&state, id, TermCmd::Log(None)).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(TermCmd::Log(None))));
+    }
+
+    #[test]
+    fn reveal_rejects_paths_outside_logs() {
+        let logs = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let outside = other.path().join("x.log");
+        std::fs::write(&outside, "x").unwrap();
+        let inside = logs.path().join("a.log");
+        std::fs::write(&inside, "x").unwrap();
+        let rej = |p: &str| check_reveal(p, logs.path()).unwrap_err().kind == ErrorKind::Invalid;
+        assert!(rej(outside.to_str().unwrap()));
+        assert!(rej(logs.path().join("../nope.log").to_str().unwrap()));
+        assert!(rej(logs.path().join("missing.log").to_str().unwrap()));
+        assert!(rej("/etc/hosts"));
+        assert!(check_reveal(inside.to_str().unwrap(), logs.path()).is_ok());
+        #[cfg(unix)]
+        {
+            let link = logs.path().join("l.log");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(rej(link.to_str().unwrap()), "enlace que escapa");
+        }
     }
 }

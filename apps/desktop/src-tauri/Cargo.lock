@@ -1631,6 +1631,7 @@ dependencies = [
  "friki-core",
  "friki-session",
  "friki-ssh",
+ "friki-term",
  "friki-xfer",
  "russh",
  "serde",

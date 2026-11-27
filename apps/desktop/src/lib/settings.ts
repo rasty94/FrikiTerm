@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   copyOnSelect: false,
   rightClick: "menu",
   confirmClose: true,
+  restoreQuick: false,
 };
 
 const pick = <T extends string>(v: unknown, all: readonly T[], d: T): T =>
@@ -37,6 +38,7 @@ export function normalizeSettings(raw: Partial<Record<keyof DesktopSettings, unk
     copyOnSelect: bool(r.copyOnSelect, d.copyOnSelect),
     rightClick: pick(r.rightClick, ["paste", "menu"], d.rightClick),
     confirmClose: bool(r.confirmClose, d.confirmClose),
+    restoreQuick: bool(r.restoreQuick, d.restoreQuick),
   };
 }
 

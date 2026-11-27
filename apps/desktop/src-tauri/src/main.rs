@@ -53,6 +53,9 @@ fn main() {
             settings::settings_get,
             settings::settings_save,
             settings::open_url,
+            term::term_log_start,
+            term::term_log_stop,
+            term::reveal_path,
         ])
         .run(tauri::generate_context!())
         .expect("error al arrancar FrikiTerm");

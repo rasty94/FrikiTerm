@@ -14,6 +14,7 @@ friki-core = { path = "../../../crates/friki-core" }
 friki-ssh = { path = "../../../crates/friki-ssh" }
 friki-xfer = { path = "../../../crates/friki-xfer" }
 friki-session = { path = "../../../crates/friki-session" }
+friki-term = { path = "../../../crates/friki-term" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }

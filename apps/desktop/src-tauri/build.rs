@@ -35,6 +35,9 @@ const COMMANDS: &[&str] = &[
     "settings_get",
     "settings_save",
     "open_url",
+    "term_log_start",
+    "term_log_stop",
+    "reveal_path",
 ];
 
 fn main() {

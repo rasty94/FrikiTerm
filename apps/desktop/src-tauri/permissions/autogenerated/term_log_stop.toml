@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-term-log-stop"
+description = "Enables the term_log_stop command without any pre-configured scope."
+commands.allow = ["term_log_stop"]
+
+[[permission]]
+identifier = "deny-term-log-stop"
+description = "Denies the term_log_stop command without any pre-configured scope."
+commands.deny = ["term_log_stop"]

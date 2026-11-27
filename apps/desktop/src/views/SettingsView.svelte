@@ -75,6 +75,10 @@
       <span class="lbl">Confirmar antes de cerrar una pestaña con sesión activa</span>
       <input type="checkbox" checked={s.confirmClose} onchange={(e) => set({ confirmClose: chk(e) })} />
     </label>
+    <label class="row">
+      <span class="lbl">Incluir conexiones rápidas al restaurar sesiones (solo usuario@host:puerto, sin contraseñas)</span>
+      <input type="checkbox" checked={s.restoreQuick} onchange={(e) => set({ restoreQuick: chk(e) })} />
+    </label>
   </section>
 
   <section class="panel">

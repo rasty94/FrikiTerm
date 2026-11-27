@@ -224,4 +224,6 @@ export interface DesktopSettings {
   copyOnSelect: boolean;
   rightClick: RightClick;
   confirmClose: boolean;
+  /** Restaurar también las conexiones rápidas (usuario@host:puerto; nunca guardan contraseñas). */
+  restoreQuick: boolean;
 }

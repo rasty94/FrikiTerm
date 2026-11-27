@@ -100,4 +100,7 @@ export const settingsGet = (): Promise<DesktopSettings> => invoke("settings_get"
 export const settingsSave = (settings: DesktopSettings): Promise<void> =>
   invoke("settings_save", { settings });
 /** Solo http(s); el backend lo abre en el navegador del SO. */
+export const termLogStart = (id: TermId): Promise<string> => invoke("term_log_start", { id });
+export const termLogStop = (id: TermId): Promise<void> => invoke("term_log_stop", { id });
+export const revealPath = (path: string): Promise<void> => invoke("reveal_path", { path });
 export const openUrl = (url: string): Promise<void> => invoke("open_url", { url });

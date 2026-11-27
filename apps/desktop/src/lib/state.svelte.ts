@@ -2,6 +2,8 @@
 import type { DesktopSettings, Prompt, PromptId, SessionConfig, TermTarget, ThemePref } from "./types";
 import { settingsGet, settingsSave } from "./api";
 import { DEFAULT_SETTINGS, normalizeSettings } from "./settings";
+import { parseWorkspace, pushHistory, reorder, serializeNode, serializeWorkspace, type SavedNode, type SavedWorkspace } from "./layout";
+import { defaultSession } from "./session";
 
 export type ViewName = "hosts" | "terminal" | "sftp" | "keychain" | "snippets" | "forwards" | "settings";
 export type { ThemePref };
@@ -22,6 +24,8 @@ export interface Leaf {
   title: string;
   target: TermTarget;
   status: PaneStatus;
+  /** Ruta del registro de sesión activo (REC); null si no se graba. */
+  log: string | null;
 }
 export interface SplitNode {
   kind: "split";
@@ -36,6 +40,8 @@ export interface Tab {
   title: string;
   root: PaneNode;
   activeLeaf: number;
+  /** "Enviar a todos": la entrada de un panel se refleja en los demás paneles abiertos de la pestaña. */
+  broadcast: boolean;
 }
 
 export interface Toast {
@@ -47,6 +53,8 @@ export interface Toast {
 /** Niveles máximos de división anidada. */
 const MAX_DEPTH = 2;
 const THEME_KEY = "friki.theme";
+const WS_KEY = "friki.workspace.v1";
+const QUICK_KEY = "friki.quickHistory";
 
 let seq = 0;
 const nextId = () => ++seq;
@@ -87,6 +95,8 @@ export const app = $state({
   confirm: null as { text: string; ok: string; resolve: (v: boolean) => void } | null,
   /** Host a conectar por SFTP al entrar en la vista (lo consume SftpView). */
   sftpHost: null as string | null,
+  /** Espacio de trabajo guardado de la sesión anterior, pendiente de que el usuario lo restaure. */
+  restore: loadWorkspace(),
 });
 applyTheme(app.theme);
 
@@ -141,17 +151,26 @@ export function toast(text: string, kind: Toast["kind"] = "error"): void {
 }
 
 function newLeaf(target: TermTarget, title: string): Leaf {
-  return { kind: "leaf", id: nextId(), title, target, status: { state: "connecting" } };
+  return { kind: "leaf", id: nextId(), title, target, status: { state: "connecting" }, log: null };
 }
+
+/** Escritores de los paneles con sesión abierta (hoja -> escribir bytes), para la difusión de entrada. */
+export const paneWriters = new Map<number, (data: Uint8Array) => void>();
 
 export const tabById = (id: number) => app.tabs.find((t) => t.id === id);
 
 export function openTab(target: TermTarget, title: string): void {
   const root = newLeaf(target, title);
-  const tab: Tab = { id: nextId(), title, root, activeLeaf: root.id };
-  app.tabs.push(tab);
+  addTab(root, title, false);
+}
+
+function addTab(root: PaneNode, title: string, broadcast: boolean, at?: number): Tab {
+  const tab: Tab = { id: nextId(), title, root, activeLeaf: firstLeaf(root).id, broadcast };
+  app.tabs.splice(at ?? app.tabs.length, 0, tab);
   app.activeTab = tab.id;
   app.view = "terminal";
+  persistWorkspace();
+  return tab;
 }
 
 export function leaves(n: PaneNode): Leaf[] {
@@ -187,6 +206,7 @@ export function closeTab(tabId: number): void {
   if (i < 0) return;
   app.tabs.splice(i, 1);
   if (app.activeTab === tabId) app.activeTab = app.tabs[Math.max(0, i - 1)]?.id ?? 0;
+  persistWorkspace();
 }
 
 export function setActiveLeaf(tabId: number, leafId: number): void {
@@ -246,6 +266,7 @@ export function splitPane(tabId: number, leafId: number, dir: "row" | "col"): vo
   const fresh = newLeaf(src.target, src.title);
   tab.root = replaceLeaf(tab.root, leafId, { kind: "split", id: nextId(), dir, children: [src, fresh] });
   tab.activeLeaf = fresh.id;
+  persistWorkspace();
 }
 
 export function closePane(tabId: number, leafId: number): void {
@@ -255,4 +276,117 @@ export function closePane(tabId: number, leafId: number): void {
   if (!next) return closeTab(tabId);
   tab.root = next;
   if (tab.activeLeaf === leafId) tab.activeLeaf = firstLeaf(next).id;
+  persistWorkspace();
+}
+
+// ---- Pestañas: renombrar, reordenar, duplicar, cerrar otras, difusión ----
+
+export function renameTab(tabId: number, title: string): void {
+  const tab = tabById(tabId);
+  const t = title.replace(/\p{Cc}/gu, "").trim().slice(0, 60);
+  if (tab && t) {
+    tab.title = t;
+    persistWorkspace();
+  }
+}
+
+export function moveTab(from: number, to: number): void {
+  app.tabs = reorder(app.tabs, from, to);
+  persistWorkspace();
+}
+
+function buildNode(n: SavedNode): PaneNode {
+  if (n.k === "leaf") {
+    const t = n.target;
+    const target: TermTarget =
+      t.kind === "quick" ? { kind: "quick", spec: defaultSession({ host: t.host, port: t.port, user: t.user }) } : t;
+    return newLeaf(target, n.title);
+  }
+  return { kind: "split", id: nextId(), dir: n.dir, children: n.children.map(buildNode) };
+}
+
+/** Pestaña nueva a la derecha de la original con el mismo diseño y destinos (sesiones nuevas). */
+export function duplicateTab(tabId: number): void {
+  const i = app.tabs.findIndex((t) => t.id === tabId);
+  const src = app.tabs[i];
+  const node = src && serializeNode(src.root, true);
+  if (node) addTab(buildNode(node), src.title, src.broadcast, i + 1);
+}
+
+/** Cierra las demás pestañas (con confirmación si alguna tiene sesión viva). */
+export async function closeOtherTabs(tabId: number): Promise<void> {
+  const others = app.tabs.filter((t) => t.id !== tabId);
+  const live = others.some((t) => leaves(t.root).some((l) => l.status.state === "open" || l.status.state === "connecting"));
+  if (live && app.settings.confirmClose && !(await askConfirm(`¿Cerrar las otras ${others.length} pestañas? Sus sesiones activas se cerrarán.`, "Cerrar"))) return;
+  app.tabs = app.tabs.filter((t) => t.id === tabId);
+  app.activeTab = tabId;
+  persistWorkspace();
+}
+
+export function toggleBroadcast(tabId: number): void {
+  const tab = tabById(tabId);
+  if (!tab) return;
+  tab.broadcast = !tab.broadcast;
+  persistWorkspace();
+  toast(tab.broadcast ? "Enviar a todos activado: lo que escribas llega a todos los paneles de la pestaña" : "Enviar a todos desactivado", "info");
+}
+
+// ---- Persistencia (localStorage, siempre con try/catch) ----
+
+function loadWorkspace(): SavedWorkspace | null {
+  try {
+    return parseWorkspace(JSON.parse(localStorage.getItem(WS_KEY) ?? "null"));
+  } catch {
+    return null;
+  }
+}
+
+/** Guarda pestañas, diseño y destinos. Mientras haya una restauración pendiente y ninguna pestaña, no se pisa. */
+export function persistWorkspace(): void {
+  if (app.restore && app.tabs.length === 0) return;
+  try {
+    const ws = serializeWorkspace(app.tabs, app.activeTab, app.settings.restoreQuick);
+    if (ws) localStorage.setItem(WS_KEY, JSON.stringify(ws));
+    else localStorage.removeItem(WS_KEY);
+  } catch {
+    /* sin almacenamiento: no se restaura */
+  }
+}
+
+export function restoreWorkspace(): void {
+  const ws = app.restore;
+  app.restore = null;
+  if (!ws) return;
+  const ids = ws.tabs.map((t) => addTab(buildNode(t.root), t.title, t.broadcast).id);
+  app.activeTab = ids[ws.active] ?? ids[0];
+}
+
+export function dismissRestore(): void {
+  app.restore = null;
+  persistWorkspace();
+}
+
+export function loadQuickHistory(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(QUICK_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 10) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function rememberQuick(spec: string): void {
+  try {
+    localStorage.setItem(QUICK_KEY, JSON.stringify(pushHistory(loadQuickHistory(), spec)));
+  } catch {
+    /* solo es comodidad */
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", persistWorkspace);
+  window.addEventListener("beforeunload", persistWorkspace);
+  setInterval(persistWorkspace, 15_000);
+  // Con una sesión anterior guardada se ofrece restaurarla en la vista Terminal.
+  if (app.restore) app.view = "terminal";
 }

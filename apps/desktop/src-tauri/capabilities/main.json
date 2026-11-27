@@ -41,6 +41,9 @@
     "allow-settings-get",
     "allow-settings-save",
     "allow-open-url",
+    "allow-term-log-start",
+    "allow-term-log-stop",
+    "allow-reveal-path",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

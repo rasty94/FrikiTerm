@@ -324,6 +324,8 @@ pub struct DesktopSettings {
     pub copy_on_select: bool,
     pub right_click: RightClick,
     pub confirm_close: bool,
+    /// Incluir las conexiones rápidas (sin secretos) al restaurar el espacio de trabajo.
+    pub restore_quick: bool,
 }
 
 impl Default for DesktopSettings {
@@ -338,6 +340,7 @@ impl Default for DesktopSettings {
             copy_on_select: false,
             right_click: RightClick::Menu,
             confirm_close: true,
+            restore_quick: false,
         }
     }
 }

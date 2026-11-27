@@ -11,7 +11,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::num::NonZeroU16;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod pre;
 mod wyse;
@@ -844,6 +844,7 @@ impl Filter {
 /// fiable); solo se detecta por el texto del aviso.
 pub struct SessionLogger {
     file: File,
+    path: PathBuf,
     log_input: bool,
     out_filter: Filter,
     in_filter: Filter,
@@ -949,7 +950,8 @@ impl SessionLogger {
             oo.write(true).truncate(true);
         }
         Ok(Self {
-            file: oo.open(path)?,
+            file: oo.open(&path)?,
+            path,
             log_input: cfg.log_input,
             out_filter: Filter(St::Text),
             in_filter: Filter(St::Text),
@@ -958,6 +960,11 @@ impl SessionLogger {
             armed: false,
             marked: false,
         })
+    }
+
+    /// Ruta del fichero de registro (ya expandida).
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn log_output(&mut self, bytes: &[u8]) -> std::io::Result<()> {
