@@ -7,6 +7,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   use: {
     baseURL: "http://127.0.0.1:4173",
+    locale: "es-ES",
     // Sin WebGL xterm usa el renderer DOM (la app ya lo prevé) y el texto es aserible.
     launchOptions: { args: ["--disable-webgl", "--disable-webgl2"] },
   },

@@ -13,79 +13,97 @@
   const set = (patch: Partial<DesktopSettings>) => void updateSettings(patch);
 </script>
 
-<div class="settings">
-  <h1>Ajustes</h1>
+{#snippet seg<T extends string>(label: string, value: T, options: [T, string][], pick: (v: T) => void)}
+  <div class="seg" role="radiogroup" aria-label={label}>
+    {#each options as [v, text] (v)}
+      <button type="button" role="radio" aria-checked={value === v} onclick={() => pick(v)}>{text}</button>
+    {/each}
+  </div>
+{/snippet}
 
-  <section>
+<div class="view settings">
+  <header class="view-head">
+    <div class="titles">
+      <h1>Ajustes</h1>
+      <span class="sub">Se guardan al momento y se aplican a todas las sesiones.</span>
+    </div>
+  </header>
+
+  <section class="panel">
     <h2>Apariencia</h2>
-    <label>Tema
-      <select value={s.theme} onchange={(e) => set({ theme: val(e) as DesktopSettings["theme"] })}>
-        <option value="system">Automático (sistema)</option>
-        <option value="light">Claro</option>
-        <option value="dark">Oscuro</option>
-      </select>
-    </label>
+    <div class="row">
+      <span class="lbl">Tema</span>
+      {@render seg("Tema", s.theme, [["system", "Sistema"], ["light", "Claro"], ["dark", "Oscuro"]], (v) => set({ theme: v }))}
+    </div>
   </section>
 
-  <section>
+  <section class="panel">
     <h2>Terminal</h2>
-    <label>Fuente
-      <input value={s.fontFamily} placeholder="Predeterminada del sistema (p. ej. Fira Code)" onchange={(e) => set({ fontFamily: val(e) })} />
+    <label class="row">
+      <span class="lbl">Fuente</span>
+      <input class="wide" value={s.fontFamily} placeholder="Predeterminada (p. ej. Fira Code)" onchange={(e) => set({ fontFamily: val(e) })} />
     </label>
-    <label>Tamaño de fuente
-      <input type="number" min={FONT_MIN} max={FONT_MAX} value={s.fontSize} onchange={(e) => set({ fontSize: num(e) })} />
+    <label class="row">
+      <span class="lbl">Tamaño de fuente <small>{FONT_MIN}–{FONT_MAX} px</small></span>
+      <input class="narrow" type="number" min={FONT_MIN} max={FONT_MAX} value={s.fontSize} onchange={(e) => set({ fontSize: num(e) })} />
     </label>
-    <label>Cursor
-      <select value={s.cursorStyle} onchange={(e) => set({ cursorStyle: val(e) as DesktopSettings["cursorStyle"] })}>
-        <option value="block">Bloque</option>
-        <option value="underline">Subrayado</option>
-        <option value="bar">Barra</option>
-      </select>
+    <div class="row">
+      <span class="lbl">Cursor</span>
+      {@render seg("Cursor", s.cursorStyle, [["block", "Bloque"], ["underline", "Subrayado"], ["bar", "Barra"]], (v) => set({ cursorStyle: v }))}
+    </div>
+    <label class="row">
+      <span class="lbl">Cursor parpadeante</span>
+      <input type="checkbox" checked={s.cursorBlink} onchange={(e) => set({ cursorBlink: chk(e) })} />
     </label>
-    <label class="check"><input type="checkbox" checked={s.cursorBlink} onchange={(e) => set({ cursorBlink: chk(e) })} /> Cursor parpadeante</label>
-    <label>Scrollback (líneas)
-      <input type="number" min="0" max={SCROLLBACK_MAX} step="1000" value={s.scrollback} onchange={(e) => set({ scrollback: num(e) })} />
+    <label class="row">
+      <span class="lbl">Scrollback <small>líneas</small></span>
+      <input class="narrow" type="number" min="0" max={SCROLLBACK_MAX} step="1000" value={s.scrollback} onchange={(e) => set({ scrollback: num(e) })} />
     </label>
-    <label class="check"><input type="checkbox" checked={s.copyOnSelect} onchange={(e) => set({ copyOnSelect: chk(e) })} /> Copiar al seleccionar</label>
-    <label>Clic derecho
-      <select value={s.rightClick} onchange={(e) => set({ rightClick: val(e) as DesktopSettings["rightClick"] })}>
-        <option value="menu">Menú contextual</option>
-        <option value="paste">Pegar</option>
-      </select>
+    <label class="row">
+      <span class="lbl">Copiar al seleccionar</span>
+      <input type="checkbox" checked={s.copyOnSelect} onchange={(e) => set({ copyOnSelect: chk(e) })} />
     </label>
+    <div class="row">
+      <span class="lbl">Clic derecho</span>
+      {@render seg("Clic derecho", s.rightClick, [["menu", "Menú contextual"], ["paste", "Pegar"]], (v) => set({ rightClick: v }))}
+    </div>
   </section>
 
-  <section>
+  <section class="panel">
     <h2>Sesiones</h2>
-    <label class="check"><input type="checkbox" checked={s.confirmClose} onchange={(e) => set({ confirmClose: chk(e) })} /> Confirmar antes de cerrar una pestaña con sesión activa</label>
+    <label class="row">
+      <span class="lbl">Confirmar antes de cerrar una pestaña con sesión activa</span>
+      <input type="checkbox" checked={s.confirmClose} onchange={(e) => set({ confirmClose: chk(e) })} />
+    </label>
   </section>
 
-  <section>
-    <h2>Atajos</h2>
+  <section class="panel">
+    <h2>Atajos de teclado</h2>
     <p class="hint">
       {mac ? "En macOS se usa Cmd." : "Se usa Ctrl+Shift para no chocar con los atajos de la shell."}
       Copiar con {mac ? "⌘C" : "Ctrl+C"} solo si hay selección (si no, se envía ^C); pegar con {mac ? "⌘V" : "Ctrl+V"}.
     </p>
     <dl>
       {#each SHORTCUTS as d (d.action)}
-        <dt>{d.label}</dt>
-        <dd><kbd>{shortcutLabel(d, mac)}</kbd></dd>
+        <div class="row"><dt>{d.label}</dt><dd><kbd>{shortcutLabel(d, mac)}</kbd></dd></div>
       {/each}
     </dl>
   </section>
 </div>
 
 <style>
-  .settings { max-width: 640px; display: grid; gap: 20px; align-content: start; }
-  h1 { margin: 0; font-size: 20px; }
-  h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-dim); }
-  section { display: grid; gap: 10px; border-top: 1px solid var(--border); padding-top: 12px; }
-  label { display: grid; grid-template-columns: 200px minmax(0, 1fr); align-items: center; gap: 12px; }
-  label.check { display: flex; align-items: center; gap: 8px; }
-  input[type="number"], select { max-width: 220px; }
-  .hint { margin: 0; color: var(--fg-dim); font-size: 12px; }
-  dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; margin: 0; }
+  .settings { max-width: 720px; width: 100%; }
+  section { padding: 4px 16px; }
+  h2 { font-size: 13.5px; padding: 12px 0 8px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 46px; border-top: 1px solid var(--border); }
+  h2 + .row { border-top: 0; }
+  .lbl { display: grid; gap: 1px; color: var(--fg); }
+  .lbl small { color: var(--fg-faint); font-size: 11.5px; }
+  .wide { width: 280px; }
+  .narrow { width: 96px; text-align: right; font-variant-numeric: tabular-nums; }
+  .hint { margin: 0 0 8px; color: var(--fg-dim); font-size: 12.5px; line-height: 1.5; }
+  dl { margin: 0; }
+  dl .row { min-height: 38px; border-top: 1px solid var(--border); }
   dt { color: var(--fg); }
-  dd { margin: 0; text-align: right; }
-  kbd { font-family: var(--font-mono); font-size: 12px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+  dd { margin: 0; }
 </style>

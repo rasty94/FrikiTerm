@@ -29,8 +29,10 @@
 {/if}
 
 <style>
-  .scrim { position: fixed; inset: 0; background: rgb(0 0 0 / 0.45); display: grid; place-items: center; z-index: 55; }
-  .modal { width: min(440px, calc(100vw - 32px)); background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; display: grid; gap: 14px; }
-  p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; }
+  .scrim { position: fixed; inset: 0; background: var(--scrim); display: grid; place-items: center; z-index: var(--z-modal); animation: fade 140ms var(--ease-out); }
+  .modal { width: min(420px, calc(100vw - 32px)); box-sizing: border-box; background: var(--bg-raised); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 12px; padding: 20px; display: grid; gap: 18px; box-shadow: var(--shadow-3); animation: pop 180ms var(--ease-out); }
+  p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; font-size: 13.5px; line-height: 1.5; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes pop { from { opacity: 0; transform: scale(0.97) translateY(4px); } }
 </style>

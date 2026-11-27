@@ -140,14 +140,18 @@
 {/if}
 
 <style>
-  .scrim { position: fixed; inset: 0; background: rgb(0 0 0 / 0.45); display: grid; place-items: center; z-index: 50; }
-  .modal { width: min(480px, calc(100vw - 32px)); background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; display: grid; gap: 10px; }
-  h2 { margin: 0; font-size: 17px; }
-  .danger-title, .warn { color: var(--danger); }
-  p { margin: 0; color: var(--fg-dim); overflow-wrap: anywhere; }
-  .fp { font-family: var(--font-mono); font-size: 12px; background: var(--bg); padding: 8px; border-radius: 6px; word-break: break-all; color: var(--fg); }
-  form { display: grid; gap: 10px; }
-  .field { display: grid; gap: 4px; color: var(--fg-dim); font-size: 12px; }
-  .check { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); }
-  .actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+  .scrim { position: fixed; inset: 0; background: var(--scrim); display: grid; place-items: center; z-index: var(--z-modal); animation: fade 140ms var(--ease-out); }
+  .modal { width: min(460px, calc(100vw - 32px)); box-sizing: border-box; background: var(--bg-raised); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 12px; padding: 22px; display: grid; gap: 12px; box-shadow: var(--shadow-3); animation: pop 180ms var(--ease-out); }
+  h2 { margin: 0 0 2px; font-size: 15px; }
+  .danger-title { color: var(--danger); }
+  .warn { color: var(--danger); background: var(--danger-soft); padding: 8px 12px; border-radius: var(--r-sm); }
+  p { margin: 0; color: var(--fg-dim); overflow-wrap: anywhere; line-height: 1.5; }
+  p strong { color: var(--fg); }
+  .fp { display: block; font-family: var(--font-mono); font-size: 12px; background: var(--bg-input); border: 1px solid var(--border); padding: 8px 10px; border-radius: var(--r-sm); word-break: break-all; color: var(--fg); }
+  form { display: grid; gap: 12px; }
+  .field { display: grid; gap: 5px; color: var(--fg-dim); font-size: 12px; font-weight: 500; }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--fg); }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes pop { from { opacity: 0; transform: scale(0.97) translateY(4px); } }
 </style>

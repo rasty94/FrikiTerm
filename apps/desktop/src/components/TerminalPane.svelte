@@ -81,6 +81,8 @@
 
   const active = $derived(tabById(tabId)?.activeLeaf === leaf.id);
 
+  let dims = $state("");
+  const STATE_LABEL = { connecting: "Conectando", open: "Conectado", closed: "Cerrada", failed: "Error" } as const;
   const statusText = $derived.by(() => {
     const s = leaf.status;
     if (s.state === "connecting") return "Conectando…";
@@ -214,7 +216,9 @@
     const sub = t.onData((d) => {
       if (id !== null) termWrite(id, new TextEncoder().encode(d)).catch((e) => toast(errMsg(e)));
     });
+    dims = `${t.cols}×${t.rows}`;
     const rs = t.onResize(({ cols, rows }) => {
+      dims = `${cols}×${rows}`;
       if (id !== null) termResize(id, cols, rows).catch(() => {});
     });
     const ro = new ResizeObserver(() => {
@@ -288,13 +292,27 @@
       ]}
     />
   {/if}
-  <div class="status {leaf.status.state}" role="status">{statusText}</div>
+  <div class="status {leaf.status.state}" role="status">
+    <span class="dot {leaf.status.state}" aria-hidden="true"></span>
+    <span class="state">{STATE_LABEL[leaf.status.state]}</span>
+    {#if leaf.status.state !== "connecting"}<span class="detail">{statusText}</span>{/if}
+    {#if dims}<span class="dims" aria-label="Tamaño en columnas por filas">{dims}</span>{/if}
+  </div>
 </div>
 
 <style>
-  .pane { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-  .pane.active { border-color: var(--accent); }
-  .term { flex: 1; min-height: 0; padding: 4px; background: var(--term-bg); }
-  .status { font-size: 12px; padding: 2px 8px; color: var(--fg-dim); border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .status.failed, .status.closed { color: var(--danger); }
+  .pane { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--term-bg); }
+  /* Con varios paneles, el activo se marca con una línea de acento; con uno solo no hace falta. */
+  :global(.multi > .cell) > .pane::after { content: ""; position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 1px transparent; transition: box-shadow 120ms var(--ease-out); }
+  :global(.multi > .cell) > .pane.active::after { box-shadow: inset 0 2px 0 0 var(--accent); }
+  .term { flex: 1; min-height: 0; padding: 8px 4px 4px 12px; background: var(--term-bg); }
+  .status {
+    display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 12px; flex: none;
+    font-size: 11.5px; color: var(--fg-dim); background: var(--bg-sunken); border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden;
+  }
+  .state { font-weight: 600; color: var(--fg); }
+  .status.failed .state { color: var(--danger); }
+  .detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); font-size: 11px; }
+  .status.failed .detail, .status.closed .detail { font-family: var(--font-ui); font-size: 11.5px; }
+  .dims { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
 </style>

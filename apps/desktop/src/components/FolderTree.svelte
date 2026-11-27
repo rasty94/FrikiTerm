@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { FolderNode } from "../lib/folderTree";
+  import { hueOf, type FolderNode } from "../lib/folderTree";
   import FolderTree from "./FolderTree.svelte";
 
   let {
@@ -22,9 +22,10 @@
         class="folder"
         class:on={selected === n.path}
         aria-pressed={selected === n.path}
-        style:padding-left="{8 + depth * 14}px"
+        style:padding-left="{10 + depth * 14}px"
         onclick={() => onselect(n.path)}
       >
+        <span class="sw" style:--h={hueOf(n.path.split("/")[0])} aria-hidden="true"></span>
         <span class="name">{n.name}</span>
         <span class="count">{n.count}</span>
       </button>
@@ -36,9 +37,10 @@
 </ul>
 
 <style>
-  ul { list-style: none; margin: 0; padding: 0; }
-  .folder { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 6px; border: 0; border-radius: 6px; background: none; padding: 5px 8px; text-align: left; color: var(--fg); }
-  .folder.on { background: var(--bg-hover); color: var(--accent); }
-  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .count { color: var(--fg-dim); font-size: 12px; }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+  .folder { width: 100%; height: 30px; justify-content: flex-start; gap: 9px; border: 0; background: none; padding-right: 10px; font-weight: 400; color: var(--fg); }
+  .folder.on, .folder.on:hover:not(:disabled) { background: var(--bg-active); font-weight: 500; }
+  .sw { width: 8px; height: 8px; border-radius: 3px; flex: none; background: oklch(var(--av-fg-l) var(--av-fg-c) var(--h)); }
+  .name { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .count { color: var(--fg-faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 </style>

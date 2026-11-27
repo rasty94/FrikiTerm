@@ -47,7 +47,11 @@
 </ul>
 
 <style>
-  .menu { position: fixed; z-index: 70; list-style: none; margin: 0; padding: 4px; min-width: 180px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / 0.3); }
-  button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 6px 10px; border-radius: 5px; }
-  button.danger { color: var(--danger); }
+  .menu { position: fixed; z-index: var(--z-menu); list-style: none; margin: 0; padding: 4px; min-width: 184px; background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--r); box-shadow: var(--shadow-2); animation: menu-in 120ms var(--ease-out); }
+  button { width: 100%; justify-content: flex-start; height: 28px; border: 0; background: none; padding: 0 10px; border-radius: 5px; font-weight: 400; }
+  button:hover:not(:disabled), button:focus-visible { background: var(--accent-strong); color: var(--accent-fg); outline: none; }
+  button.danger { color: var(--danger); background: none; }
+  button.danger:hover:not(:disabled), button.danger:focus-visible { background: var(--danger-strong); color: #fff; }
+  li:has(.danger) { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+  @keyframes menu-in { from { opacity: 0; transform: translateY(-3px); } }
 </style>
