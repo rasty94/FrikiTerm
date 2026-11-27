@@ -38,6 +38,13 @@ export const ICONS = {
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-5M12 7.5h.01"/>',
   zap: '<path d="M13 2 4 14h7.5L11 22l9-12h-7.5z"/>',
   save: '<path d="M5 3h11l5 5v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7.5 3v5h8M7.5 21v-7h9v7"/>',
+  // Glifos de SO: formas propias y neutras (no son logotipos).
+  linux: '<path d="M12 3c-2.2 0-3.5 1.9-3.5 4.2 0 1.2-.5 2-1.3 3.3C6 12.3 5 14 5 16c0 2.8 2.7 5 7 5s7-2.2 7-5c0-2-1-3.7-2.2-5.5-.8-1.3-1.3-2.1-1.3-3.3C15.5 4.9 14.2 3 12 3z"/><path d="M10.2 7.5h.01M13.8 7.5h.01M10 10.5c1.2.8 2.8.8 4 0"/>',
+  apple: '<path d="M12 8.5c-1.5-1-4-1.2-5.5.5C5 10.5 5 13.5 6.5 16.500c1.2 2.5 2.8 4.5 5.5 3.5 2.7 1 4.3-1 5.5-3.5 1.5-3 1.5-6 0-7.5-1.5-1.7-4-1.5-5.5-.5z"/><path d="M12 8.500c0-2 1-3.5 3-4.5"/>',
+  windows: '<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>',
+  bsd: '<circle cx="12" cy="14" r="6"/><path d="M7.5 9.5 5 4l5 2.500M16.5 9.5 19 4l-5 2.5"/>',
+  grid: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
+  list: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
 } as const;
 
 export type IconName = keyof typeof ICONS;

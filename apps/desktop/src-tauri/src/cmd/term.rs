@@ -343,6 +343,7 @@ async fn run_term(
     let conn_id = conn
         .as_ref()
         .map(|c| state.conns.insert(ConnHandle { conn: c.clone() }));
+    super::meta::on_connected(&cfg, conn.as_ref());
     let _ = events.send(TermEvent::Opened {
         conn: conn_id,
         warnings,
@@ -474,6 +475,7 @@ pub async fn open_conn(state: &AppState, dir: &Path, host: &str) -> Result<ConnI
         Arc::new(friki_session::connect_ssh(asker.clone(), &cfg, paths::known_hosts_file()).await?);
     asker.commit();
     let id = state.conns.insert(ConnHandle { conn: conn.clone() });
+    super::meta::on_connected(&cfg, Some(&conn));
     for f in &cfg.forwards {
         let r = conn.start_forward(f).await.map_err(|e| e.to_string());
         state.emit(AppEvent::Forward {

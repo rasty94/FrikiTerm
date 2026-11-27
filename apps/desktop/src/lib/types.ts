@@ -225,3 +225,12 @@ export interface DesktopSettings {
   rightClick: RightClick;
   confirmClose: boolean;
 }
+
+/** Metadatos de un host (no secretos); los escribe el backend. `hosts_meta()` -> Record<nombre, HostMeta>. */
+export interface HostMeta {
+  /** Segundos Unix de la última conexión correcta. */
+  lastConnected?: number;
+  /** "linux" | distro ("debian", "ubuntu"...) | "macos" | "freebsd" | "windows"... */
+  os?: string;
+  connectCount: number;
+}

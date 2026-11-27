@@ -325,3 +325,30 @@ async fn redirecciones_de_la_sesion_se_registran() {
     term::close_conn(&state, id, None).await;
     assert!(state.fwds.lock().unwrap().get(&id).is_none());
 }
+
+#[tokio::test]
+async fn detecta_so_y_anota_metadatos() {
+    let Some(e) = env() else { return };
+    let state = AppState::default();
+    let _ui = fake_ui(&state);
+    let id = conn(&state, &e).await;
+    // La detección corre en segundo plano: se espera a que aparezca en el fichero de metadatos.
+    let path = friki_core::paths::config_dir().join("desktop-hosts.toml");
+    let os = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(os) = crate::cmd::meta::load(&path)
+                .get("it")
+                .and_then(|m| m.os.clone())
+            {
+                break os;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("SO sin detectar");
+    assert!(!os.is_empty(), "{os}");
+    let m = crate::cmd::meta::load(&path);
+    assert!(m["it"].connect_count >= 1 && m["it"].last_connected.is_some());
+    term::close_conn(&state, id, None).await;
+}

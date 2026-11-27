@@ -123,3 +123,42 @@ test("ajustes: tema segmentado y atajos", async ({ page }, info) => {
   await expect(page.getByRole("radio", { name: "Sistema" })).toHaveAttribute("aria-checked", "true");
   await shot(page, "settings", info.project.name);
 });
+
+test("hosts: vista en cuadrícula persistida, recientes y teclado", async ({ page }, info) => {
+  // Recientes: los 3 con última conexión, el más reciente primero; router-casa (nunca usado) no entra.
+  const recents = page.getByRole("list", { name: "Recientes" });
+  await expect(page.getByRole("heading", { name: "Recientes" })).toBeVisible();
+  await expect(recents.locator("[data-nav] .name")).toHaveText(["web-01", "db-01", "web-02"]);
+  await expect(recents.locator("[data-nav]")).toHaveCount(3);
+
+  await page.getByRole("button", { name: "Vista de cuadrícula" }).click();
+  await expect(page.getByRole("button", { name: "Vista de cuadrícula" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("ul.grid").first()).toBeVisible();
+  await expect(page.getByRole("img", { name: "Debian" }).first()).toBeVisible();
+  await shot(page, "hosts-grid", info.project.name);
+
+  // Persistencia tras recargar.
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Vista de cuadrícula" })).toHaveAttribute("aria-pressed", "true");
+
+  // Con filtro no hay sección Recientes.
+  await page.getByRole("searchbox", { name: "Buscar hosts" }).fill("web");
+  await expect(page.getByRole("heading", { name: "Recientes" })).toHaveCount(0);
+  await page.getByRole("searchbox", { name: "Buscar hosts" }).fill("");
+
+  // "/" enfoca el buscador; ↓ salta al primer host; → mueve; Enter conecta.
+  await page.getByRole("heading", { name: "Hosts", level: 1 }).click(); // saca el foco del buscador
+  await page.keyboard.press("/");
+  await expect(page.getByRole("searchbox", { name: "Buscar hosts" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(recents.locator("[data-nav]").first()).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(recents.locator("[data-nav]").nth(1)).toBeFocused();
+  await page.keyboard.press("Control+e");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Vista de lista" }).click();
+  await page.getByRole("list", { name: "Hosts" }).getByTitle("Conectar a router-casa").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("tab", { name: "router-casa" })).toBeVisible();
+});

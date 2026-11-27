@@ -89,6 +89,10 @@ enum Prompt {
 - `key_install(conn, key_path) -> bool`: `key_path` tiene que ser uno de los que devuelve `keys_list`.
 - `snippets_list() -> Vec<Snippet { name, command }>`, `snippets_save(Vec<Snippet>)` (`config_dir/snippets.toml`). Enviar un snippet a varias sesiones es un bucle de `term_write` en la UI.
 
+### Metadatos de hosts
+
+- `hosts_meta() -> Map<nombre, HostMeta { lastConnected?: i64 (s Unix), os?: string, connectCount: u32 }>` (`config_dir/desktop-hosts.toml`, atómico, sin secretos). Solo lectura: el backend anota `lastConnected`/`connectCount` al abrir con éxito un host guardado (`term_open`/`conn_open`) y detecta `os` una vez en segundo plano con `uname -s; cat /etc/os-release` por un canal exec de la misma conexión (plazo 5 s, fallos ignorados). `os`: `linux`, id de distro (`debian`, `ubuntu`, `alpine`, `rhel`, `fedora`, `arch`...), `macos`, `freebsd`/`openbsd`/`netbsd`, `windows`. `host_save` (renombrado) y `host_delete` mueven/borran la entrada.
+
 ### Ajustes y utilidades
 
 - `settings_get() -> DesktopSettings`, `settings_save(DesktopSettings)` (`config_dir/desktop.toml`, escritura atómica). Campos camelCase: `theme` (system|light|dark), `fontFamily`, `fontSize` (8-32), `cursorStyle` (block|underline|bar), `cursorBlink`, `scrollback` (0-100000), `copyOnSelect`, `rightClick` (paste|menu), `confirmClose`. Campos desconocidos o ausentes: se ignoran / valor por defecto; un fichero inválido da los valores por defecto. `settings_save` rechaza valores fuera de rango (`invalid`).

@@ -91,6 +91,14 @@ export function installBackend(): void {
     snippets_list: () => snippets,
     snippets_save: (a) => { snippets = a.snippets; },
     fwd_list: () => [fwd],
+    hosts_meta: () => {
+      const now = Math.floor(Date.now() / 1000);
+      return {
+        "web-01": { lastConnected: now - 60, os: "debian", connectCount: 5 },
+        "db-01": { lastConnected: now - 3600, os: "alpine", connectCount: 2 },
+        "web-02": { lastConnected: now - 86400, os: "ubuntu", connectCount: 1 },
+      };
+    },
     settings_get: () => settings,
     settings_save: (a) => { settings = a.settings; },
     open_url: () => null,

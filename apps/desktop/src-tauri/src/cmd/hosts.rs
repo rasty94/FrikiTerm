@@ -38,12 +38,19 @@ pub async fn hosts_list() -> Result<Vec<SessionConfig>, CmdError> {
 
 #[tauri::command]
 pub async fn host_save(host: SessionConfig, previous_name: Option<String>) -> Result<(), CmdError> {
-    save_in(&paths::sessions_dir(), host, previous_name)
+    let (name, prev) = (host.name.clone(), previous_name.clone());
+    save_in(&paths::sessions_dir(), host, previous_name)?;
+    if let Some(p) = prev.filter(|p| *p != name) {
+        super::meta::on_renamed(&p, &name);
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn host_delete(name: String) -> Result<(), CmdError> {
-    delete_in(&paths::sessions_dir(), &name)
+    delete_in(&paths::sessions_dir(), &name)?;
+    super::meta::on_deleted(&name);
+    Ok(())
 }
 
 #[tauri::command]
