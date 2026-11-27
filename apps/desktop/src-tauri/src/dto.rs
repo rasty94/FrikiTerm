@@ -288,6 +288,15 @@ pub struct Snippet {
     pub command: String,
 }
 
+// ---- Puertos serie ----
+
+/// Puerto serie detectado (`serial_ports`). `description` es orientativa (USB, Bluetooth...) y puede ir vacía.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerialPortInfo {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePref {

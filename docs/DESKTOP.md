@@ -170,3 +170,9 @@ App.svelte
 - **Oleada 3:** integración con `cargo tauri dev` contra el sshd de pruebas.
 
 Solo T0 toca `dto.rs`, `types.ts` y `api.ts`. Un cambio de contrato se pide al coordinador.
+
+## Formulario de hosts (puertos serie, identidades)
+- `serial_ports() -> Vec<SerialPortInfo { name, description }>`: lista de `friki_serial::list_ports` (igual que `friki serial list`). `description` es orientativa (USB, Bluetooth, Puerto COM) y puede ir vacía. Bloqueante en un hilo aparte.
+- `pick_identity_file() -> Option<String>`: diálogo nativo en Rust (`tauri-plugin-dialog`) que empieza en `~/.ssh`. `None` si se cancela.
+- Validación del formulario en `lib/hostForm.ts` (sin IPC; `npm test`). Replica `hosts::validate` y añade: puerto 1-65535, velocidad entero positivo (lista sugerida o personalizada), bits de datos 5-8, parada 1-2, timeout/reintentos enteros y destino de redirecciones. «Guardar» está desactivado hasta que el borrador es válido.
+- Pestañas por protocolo: SSH (General, Autenticación, Terminal, Redirecciones), serie (General, Terminal, Serie), telnet/raw/telnet-tls (General, Terminal), shell local (General, Terminal). TN3270 no aparece.

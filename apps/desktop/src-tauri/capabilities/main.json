@@ -42,6 +42,8 @@
     "allow-settings-get",
     "allow-settings-save",
     "allow-open-url",
+    "allow-serial-ports",
+    "allow-pick-identity-file",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

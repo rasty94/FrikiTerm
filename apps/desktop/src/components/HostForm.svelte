@@ -1,10 +1,16 @@
 <script lang="ts">
-  import { untrack } from "svelte";
-  import { hostSave } from "../lib/api";
-  import type { BackspaceMode, Emulation, Forward, FlowControl, Parity, Protocol, SessionConfig } from "../lib/types";
+  import { onMount, untrack } from "svelte";
+  import { hostSave, pickIdentityFile, serialPorts } from "../lib/api";
+  import type {
+    BackspaceMode, Emulation, FlowControl, Forward, Parity, Protocol, SerialPortInfo, SessionConfig,
+  } from "../lib/types";
   import { defaultSession, errMsg } from "../lib/session";
   import { normFolder } from "../lib/folderTree";
   import { toast } from "../lib/state.svelte";
+  import {
+    BAUD_RATES, DATA_BITS, STOP_BITS, hasErrors, isPort, parseIdentityText, validateForward, validateSession,
+    type HostErrors,
+  } from "../lib/hostForm";
   import Icon from "./Icon.svelte";
 
   let {
@@ -24,12 +30,21 @@
   type Section = "general" | "auth" | "terminal" | "forwards" | "serial";
   const SECTIONS: [Section, string][] = [
     ["general", "General"],
-    ["auth", "Auth"],
+    ["auth", "Autenticación"],
     ["terminal", "Terminal"],
-    ["forwards", "Forwards"],
-    ["serial", "Serial"],
+    ["forwards", "Redirecciones"],
+    ["serial", "Serie"],
   ];
-  const PROTOCOLS: Protocol[] = ["ssh", "telnet", "telnet-tls", "raw", "tn3270", "serial", "local-shell"];
+  // Sin tn3270: el backend no lo admite en el escritorio.
+  const PROTOCOLS: Protocol[] = ["ssh", "telnet", "telnet-tls", "raw", "serial", "local-shell"];
+  const PROTOCOL_LABELS: Record<string, string> = {
+    ssh: "SSH",
+    telnet: "Telnet",
+    "telnet-tls": "Telnet TLS",
+    raw: "RAW",
+    serial: "Puerto serie",
+    "local-shell": "Shell local",
+  };
   const EMULATIONS: Emulation[] = ["xterm", "vt100", "vt220", "linux", "ansi", "wyse50", "wyse60", "tvi910", "tvi925"];
   const BACKSPACE: BackspaceMode[] = ["delete", "ctrl-h"];
   const PARITY: Parity[] = ["none", "odd", "even"];
@@ -63,40 +78,92 @@
       : { kind: r.kind, bind: r.bind, port: r.port, host: r.host, host_port: r.host_port };
 
   let section = $state<Section>("general");
-  let idText = $state(start.identity_files.join("\n"));
+  let ids = $state<string[]>([...start.identity_files]);
   let fwd = $state(start.forwards.map(toRow));
   let logPath = $state(start.log?.path ?? "");
   let logAppend = $state(start.log?.append ?? true);
   let logInput = $state(start.log?.log_input ?? false);
   let error = $state("");
   let saving = $state(false);
+  let ports = $state<SerialPortInfo[]>([]);
+  let portsError = $state("");
+
+  const isSsh = $derived(draft.protocol === "ssh");
+  const isSerial = $derived(draft.protocol === "serial");
+  const isLocal = $derived(draft.protocol === "local-shell");
+  const isNet = $derived(!isSerial && !isLocal);
+
+  // Pestañas según el protocolo; si la activa desaparece (cambió el protocolo), vuelve a General.
+  const sections = $derived(
+    SECTIONS.filter(([id]) => (id === "auth" || id === "forwards" ? isSsh : id === "serial" ? isSerial : true)),
+  );
+  const current = $derived(sections.some(([id]) => id === section) ? section : "general");
+
+  // Lo que se guardaría: mismas normalizaciones que antes (nombre y host recortados, ruta de log, etc.).
+  const candidate = $derived.by((): SessionConfig => {
+    const d = $state.snapshot(draft) as SessionConfig;
+    return {
+      ...d,
+      name: d.name.trim(),
+      host: d.host.trim(),
+      port: isNet || isPort(d.port) ? d.port : 22,
+      user: isSsh ? d.user?.trim() || null : null,
+      folder: normFolder(d.folder),
+      local_command: isLocal ? d.local_command?.trim() || null : null,
+      identity_files: isSsh ? parseIdentityText(ids.join("\n")) : [],
+      forwards: isSsh ? fwd.map(fromRow) : [],
+      log: logPath.trim() ? { path: logPath.trim(), append: logAppend, log_input: logInput } : null,
+    };
+  });
+  const errors: HostErrors = $derived(validateSession(candidate));
+  const valid = $derived(!hasErrors(errors));
+
+  // Pestañas con algún campo inválido (para marcarlas aunque no estén activas).
+  const bad: Record<Section, boolean> = $derived({
+    general: !!(errors.name || errors.host || errors.port),
+    auth: false,
+    terminal: false,
+    forwards: !!errors.forwards,
+    serial: !!(errors.device || errors.baud || errors.dataBits || errors.stopBits),
+  });
+
+  // Puertos serie: se piden solo cuando el protocolo es serie.
+  let portsAsked = false;
+  $effect(() => {
+    if (isSerial && !portsAsked) {
+      portsAsked = true;
+      serialPorts()
+        .then((p) => (ports = p))
+        .catch((e) => (portsError = errMsg(e)));
+    }
+  });
+  // Un dispositivo guardado que ya no aparece sigue en la lista para no perderlo al guardar.
+  const portOptions = $derived.by((): SerialPortInfo[] => {
+    const cur = draft.serial.device;
+    if (!cur || ports.some((p) => p.name === cur)) return ports;
+    return [{ name: cur, description: "no detectado ahora" }, ...ports];
+  });
 
   function addForward() {
     fwd.push({ kind: "local", bind: "127.0.0.1", port: 2222, host: "localhost", host_port: 22 });
   }
 
+  async function pickKey() {
+    try {
+      const p = await pickIdentityFile();
+      if (p && !ids.includes(p)) ids.push(p);
+    } catch (e) {
+      toast(errMsg(e));
+    }
+  }
+
   async function save(e: SubmitEvent) {
     e.preventDefault();
-    const name = draft.name.trim();
-    const addr = draft.host.trim();
-    if (!name) return (error = "Falta el nombre");
-    if (!addr) return (error = "Falta el host");
-    if (!Number.isInteger(draft.port) || draft.port < 1 || draft.port > 65535) return (error = "Puerto no válido");
-
-    const payload: SessionConfig = {
-      ...$state.snapshot(draft),
-      name,
-      host: addr,
-      user: draft.user?.trim() || null,
-      folder: normFolder(draft.folder),
-      identity_files: idText.split("\n").map((s) => s.trim()).filter(Boolean),
-      forwards: fwd.map(fromRow),
-      log: logPath.trim() ? { path: logPath.trim(), append: logAppend, log_input: logInput } : null,
-    };
+    if (!valid || saving) return;
     saving = true;
     error = "";
     try {
-      await hostSave(payload, originalName);
+      await hostSave(candidate, originalName);
       toast("Host guardado", "info");
       onsaved();
     } catch (err) {
@@ -109,6 +176,10 @@
 
 <svelte:window onkeydown={(e) => e.key === "Escape" && onclose()} />
 
+{#snippet fe(msg: string | undefined)}
+  {#if msg}<span class="fe">{msg}</span>{/if}
+{/snippet}
+
 <div class="scrim" onclick={onclose} role="presentation"></div>
 <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="hf-title">
   <header>
@@ -120,55 +191,106 @@
   </header>
 
   <div class="tabs" role="tablist">
-    {#each SECTIONS as [id, label] (id)}
-      <button role="tab" class:on={section === id} aria-selected={section === id} aria-controls="hf-panel" onclick={() => (section = id)}>{label}</button>
+    {#each sections as [id, label] (id)}
+      <button
+        role="tab"
+        class:on={current === id}
+        class:bad={bad[id]}
+        aria-selected={current === id}
+        aria-controls="hf-panel"
+        onclick={() => (section = id)}
+      >{label}</button>
     {/each}
   </div>
 
-  <form onsubmit={save}>
+  <form onsubmit={save} novalidate>
     <div class="body" role="tabpanel" id="hf-panel">
-      {#if section === "general"}
-        <label>Nombre <input bind:value={draft.name} required /></label>
-        <label>Host <input bind:value={draft.host} required autocomplete="off" /></label>
+      {#if current === "general"}
         <div class="row2">
-          <label>Puerto <input type="number" min="1" max="65535" bind:value={draft.port} /></label>
-          <label>Protocolo
-            <select bind:value={draft.protocol}>
-              {#each PROTOCOLS as p (p)}<option value={p}>{p}</option>{/each}
-            </select>
-          </label>
+          <div class="f">
+            <label>Nombre <input bind:value={draft.name} required autocomplete="off" aria-invalid={errors.name ? "true" : undefined} /></label>
+            {@render fe(errors.name)}
+          </div>
+          <div class="f">
+            <label>Protocolo
+              <select bind:value={draft.protocol}>
+                {#each PROTOCOLS as p (p)}<option value={p}>{PROTOCOL_LABELS[p]}</option>{/each}
+              </select>
+            </label>
+          </div>
         </div>
-        {#if draft.protocol === "local-shell"}
-          <label>Comando local <input bind:value={draft.local_command} /></label>
+
+        {#if isNet}
+          <div class="row2 host-row">
+            <div class="f">
+              <label>Host <input bind:value={draft.host} required autocomplete="off" aria-invalid={errors.host ? "true" : undefined} /></label>
+              {@render fe(errors.host)}
+            </div>
+            <div class="f">
+              <label>Puerto <input type="number" min="1" max="65535" bind:value={draft.port} aria-invalid={errors.port ? "true" : undefined} /></label>
+              {@render fe(errors.port)}
+            </div>
+          </div>
         {/if}
+
+        {#if isLocal}
+          <label>Comando local (opcional) <input bind:value={draft.local_command} placeholder="Por defecto: el shell del usuario" /></label>
+        {/if}
+
         <label>Carpeta
-          <input list="hf-folders" bind:value={draft.folder} placeholder="produccion/web" />
+          <input list="hf-folders" bind:value={draft.folder} placeholder="produccion/web" autocomplete="off" />
         </label>
         <datalist id="hf-folders">
           {#each folders as f (f)}<option value={f}></option>{/each}
         </datalist>
-        <label>ProxyJump <input bind:value={draft.proxy_jump} placeholder="usuario@salto" /></label>
-        <div class="row2">
-          <label>Timeout (s) <input type="number" min="1" bind:value={draft.connect_timeout_secs} /></label>
-          <label>Keepalive (s) <input type="number" min="0" bind:value={draft.keepalive_secs} /></label>
+
+        {#if isSsh}
+          <label>ProxyJump <input bind:value={draft.proxy_jump} placeholder="usuario@salto" autocomplete="off" /></label>
+          <div class="row2">
+            <div class="f">
+              <label>Timeout (s) <input type="number" min="1" bind:value={draft.connect_timeout_secs} aria-invalid={errors.timeout ? "true" : undefined} /></label>
+              {@render fe(errors.timeout)}
+            </div>
+            <div class="f">
+              <label>Keepalive (s) <input type="number" min="0" bind:value={draft.keepalive_secs} aria-invalid={errors.keepalive ? "true" : undefined} /></label>
+              {@render fe(errors.keepalive)}
+            </div>
+          </div>
+        {/if}
+      {:else if current === "auth"}
+        <label>Usuario <input bind:value={draft.user} autocomplete="off" placeholder="Por defecto: el de la sesión" /></label>
+
+        <div class="f" role="group" aria-label="Archivos de identidad">
+          <span class="lbl">Archivos de identidad</span>
+          {#each ids as _, i (i)}
+            <div class="id-row">
+              <input bind:value={ids[i]} aria-label="Archivo de identidad {i + 1}" placeholder="~/.ssh/id_ed25519" autocomplete="off" />
+              <button type="button" class="icon-btn danger-hover" aria-label="Quitar archivo {i + 1}" title="Quitar" onclick={() => ids.splice(i, 1)}><Icon name="x" /></button>
+            </div>
+          {:else}
+            <p class="hint">Ninguno: se usan el agente SSH y las claves por defecto.</p>
+          {/each}
+          <div class="actions-row">
+            <button type="button" class="add" onclick={pickKey}><Icon name="folder" />Elegir archivo…</button>
+            <button type="button" class="add" onclick={() => ids.push("")}><Icon name="plus" />Escribir ruta</button>
+          </div>
         </div>
-        <label>Intentos de autenticación <input type="number" min="1" bind:value={draft.max_auth_attempts} /></label>
-        <label>PKCS#11 provider <input bind:value={draft.pkcs11_provider} /></label>
+
+        <div class="row2">
+          <label>Intentos de autenticación <input type="number" min="1" bind:value={draft.max_auth_attempts} aria-invalid={errors.maxAuth ? "true" : undefined} /></label>
+          <label>PKCS#11 provider <input bind:value={draft.pkcs11_provider} autocomplete="off" /></label>
+        </div>
+        {@render fe(errors.maxAuth)}
         <fieldset class="opts">
-        <legend>Opciones SSH</legend>
-        <label class="check"><input type="checkbox" bind:checked={draft.forward_agent} /> Reenviar agente SSH</label>
-        <label class="check"><input type="checkbox" bind:checked={draft.gssapi} /> GSSAPI</label>
-        <label class="check"><input type="checkbox" bind:checked={draft.gssapi_delegate} /> Delegar credenciales GSSAPI</label>
-        <label class="check"><input type="checkbox" bind:checked={draft.legacy_algorithms} /> Algoritmos legacy</label>
-        <label class="check"><input type="checkbox" bind:checked={draft.require_strict_kex} /> Exigir strict KEX</label>
+          <legend>Opciones SSH</legend>
+          <label class="check"><input type="checkbox" bind:checked={draft.forward_agent} /> Reenviar agente SSH</label>
+          <label class="check"><input type="checkbox" bind:checked={draft.require_strict_kex} /> Exigir strict KEX</label>
+          <label class="check"><input type="checkbox" bind:checked={draft.gssapi} /> GSSAPI</label>
+          <label class="check"><input type="checkbox" bind:checked={draft.gssapi_delegate} /> Delegar credenciales GSSAPI</label>
+          <label class="check"><input type="checkbox" bind:checked={draft.legacy_algorithms} /> Algoritmos legacy</label>
         </fieldset>
-      {:else if section === "auth"}
-        <label>Usuario <input bind:value={draft.user} autocomplete="off" /></label>
-        <label>Archivos de identidad (uno por línea)
-          <textarea rows="5" bind:value={idText} placeholder="~/.ssh/id_ed25519"></textarea>
-        </label>
         <p class="hint">Las contraseñas nunca se guardan: se piden al conectar.</p>
-      {:else if section === "terminal"}
+      {:else if current === "terminal"}
         <label>TERM <input bind:value={draft.term} /></label>
         <div class="row2">
           <label>Emulación
@@ -189,7 +311,7 @@
         <label>Log de sesión (ruta) <input bind:value={logPath} placeholder="vacío = sin log" /></label>
         <label class="check"><input type="checkbox" bind:checked={logAppend} /> Añadir al log existente</label>
         <label class="check"><input type="checkbox" bind:checked={logInput} /> Registrar también la entrada</label>
-      {:else if section === "forwards"}
+      {:else if current === "forwards"}
         {#each fwd as f, i (i)}
           <div class="fwd">
             <select bind:value={f.kind} aria-label="Tipo de redirección">
@@ -200,20 +322,51 @@
             <input bind:value={f.bind} aria-label="Dirección de escucha" placeholder="127.0.0.1" />
             <input type="number" bind:value={f.port} aria-label="Puerto de escucha" />
             {#if f.kind !== "dynamic"}
-              <input bind:value={f.host} aria-label="Host destino" />
+              <input bind:value={f.host} aria-label="Host destino" placeholder="localhost" />
               <input type="number" bind:value={f.host_port} aria-label="Puerto destino" />
+            {:else}
+              <span class="hint">SOCKS</span><span></span>
             {/if}
             <button type="button" class="icon-btn danger-hover" aria-label="Quitar redirección" title="Quitar" onclick={() => fwd.splice(i, 1)}><Icon name="x" /></button>
           </div>
+          {@const ferr = validateForward(fromRow(f))}
+          {#if ferr}<span class="fe">Redirección {i + 1}: {ferr}</span>{/if}
         {:else}
           <p class="hint">Sin redirecciones.</p>
         {/each}
         <button type="button" class="add" onclick={addForward}><Icon name="plus" />Redirección</button>
       {:else}
-        <label>Dispositivo <input bind:value={draft.serial.device} placeholder="/dev/ttyUSB0" /></label>
+        <div class="f">
+          <label>Dispositivo
+            <select bind:value={draft.serial.device} aria-invalid={errors.device ? "true" : undefined}>
+              <option value="">— elige un puerto —</option>
+              {#each portOptions as p (p.name)}
+                <option value={p.name}>{p.name}{p.description ? ` · ${p.description}` : ""}</option>
+              {/each}
+            </select>
+          </label>
+          {@render fe(errors.device)}
+          {#if portsError}<span class="hint">No se pudieron listar los puertos ({portsError}).</span>{/if}
+          {#if !portsError && ports.length === 0}<span class="hint">No se detecta ningún puerto serie conectado.</span>{/if}
+        </div>
         <div class="row2">
-          <label>Velocidad (baud) <input type="number" bind:value={draft.serial.baud} /></label>
-          <label>Bits de datos <input type="number" bind:value={draft.serial.data_bits} /></label>
+          <div class="f">
+            <label>Velocidad (baud)
+              <input type="number" min="1" step="1" list="hf-bauds" bind:value={draft.serial.baud} aria-invalid={errors.baud ? "true" : undefined} />
+            </label>
+            <datalist id="hf-bauds">
+              {#each BAUD_RATES as b (b)}<option value={b}></option>{/each}
+            </datalist>
+            {@render fe(errors.baud)}
+          </div>
+          <div class="f">
+            <label>Bits de datos
+              <select bind:value={draft.serial.data_bits} aria-invalid={errors.dataBits ? "true" : undefined}>
+                {#each DATA_BITS as b (b)}<option value={b}>{b}</option>{/each}
+              </select>
+            </label>
+            {@render fe(errors.dataBits)}
+          </div>
         </div>
         <div class="row2">
           <label>Paridad
@@ -221,7 +374,14 @@
               {#each PARITY as p (p)}<option value={p}>{p}</option>{/each}
             </select>
           </label>
-          <label>Bits de parada <input type="number" bind:value={draft.serial.stop_bits} /></label>
+          <div class="f">
+            <label>Bits de parada
+              <select bind:value={draft.serial.stop_bits} aria-invalid={errors.stopBits ? "true" : undefined}>
+                {#each STOP_BITS as b (b)}<option value={b}>{b}</option>{/each}
+              </select>
+            </label>
+            {@render fe(errors.stopBits)}
+          </div>
         </div>
         <label>Control de flujo
           <select bind:value={draft.serial.flow}>
@@ -236,8 +396,9 @@
     <footer>
       {#if host && ondelete}<button type="button" class="ghost del" onclick={() => ondelete?.(host)}><Icon name="trash" />Eliminar</button>{/if}
       <span class="grow"></span>
+      {#if !valid}<span class="need" aria-live="polite">Faltan datos válidos</span>{/if}
       <button type="button" onclick={onclose}>Cancelar</button>
-      <button class="primary" disabled={saving}>Guardar</button>
+      <button class="primary" disabled={!valid || saving}>Guardar</button>
     </footer>
   </form>
 </div>
@@ -253,23 +414,35 @@
   h2 { font-size: 16px; }
   .sub { margin: 2px 0 0; color: var(--fg-dim); font-family: var(--font-mono); font-size: 12px; }
   .tabs { display: flex; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
-  .tabs button { height: 36px; border: 0; border-radius: 0; background: none; padding: 0 8px; color: var(--fg-dim); box-shadow: inset 0 -2px 0 transparent; }
+  .tabs button { height: 36px; border: 0; border-radius: 0; background: none; padding: 0 8px; color: var(--fg-dim); box-shadow: inset 0 -2px 0 transparent; white-space: nowrap; }
   .tabs button:hover:not(:disabled) { background: none; color: var(--fg); }
   .tabs button.on { color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+  .tabs button.bad { color: var(--danger); }
   form { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .body { flex: 1; overflow: auto; padding: 20px; display: grid; gap: 14px; align-content: start; }
   label { display: grid; gap: 5px; font-size: 12px; font-weight: 500; color: var(--fg-dim); }
   label.check { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 400; color: var(--fg); cursor: pointer; }
+  .lbl { font-size: 12px; font-weight: 500; color: var(--fg-dim); }
+  .f { display: grid; gap: 5px; align-content: start; min-width: 0; }
+  .fe { font-size: 12px; color: var(--danger); line-height: 1.35; }
+  .need { font-size: 12px; color: var(--fg-dim); }
   .opts { display: grid; gap: 10px; margin: 4px 0 0; padding: 14px; border: 1px solid var(--border); border-radius: var(--r); }
   legend { padding: 0 6px; margin-left: -6px; font-size: 12px; font-weight: 500; color: var(--fg-dim); }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .row2 > * { min-width: 0; }
+  .host-row { grid-template-columns: 1fr 120px; }
   .fwd { display: grid; grid-template-columns: 92px 1fr 72px 1fr 72px auto; gap: 6px; align-items: center; }
+  .id-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; }
+  .actions-row { display: flex; flex-wrap: wrap; gap: 8px; }
   .add { justify-self: start; }
   .hint { font-size: 12px; color: var(--fg-dim); margin: 0; }
-  .err { margin: 0 20px 12px; }
-  footer { display: flex; align-items: center; gap: 8px; padding: 12px 16px 12px 20px; border-top: 1px solid var(--border); background: var(--bg-elev); }
+  .alert.err { margin: 0 20px 12px; }
+  footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 16px 12px 20px; border-top: 1px solid var(--border); background: var(--bg-elev); }
   .del:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); }
   .grow { flex: 1; }
+  @media (max-width: 520px) {
+    .row2, .host-row, .fwd { grid-template-columns: 1fr; }
+  }
   @keyframes fade { from { opacity: 0; } }
   @keyframes slide-in { from { transform: translateX(24px); opacity: 0; } }
 </style>

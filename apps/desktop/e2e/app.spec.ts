@@ -162,3 +162,95 @@ test("hosts: vista en cuadrícula persistida, recientes y teclado", async ({ pag
   await page.keyboard.press("Enter");
   await expect(page.getByRole("tab", { name: "router-casa" })).toBeVisible();
 });
+
+test("formulario: host serie con puerto de la lista y velocidad", async ({ page }) => {
+  await page.getByRole("button", { name: "Nuevo host" }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByLabel("Nombre").fill("consola-serie");
+  await dlg.getByLabel("Protocolo").selectOption("serial");
+  await expect(dlg.getByLabel("Host", { exact: true })).toHaveCount(0);
+  await dlg.getByRole("tab", { name: "Serie" }).click();
+  await expect(dlg.getByRole("option", { name: /ttyUSB0 · USB/ })).toHaveCount(1);
+  await dlg.getByLabel("Dispositivo").selectOption("/dev/ttyUSB0");
+  await dlg.getByLabel("Velocidad (baud)").fill("250000");
+  await dlg.getByRole("button", { name: "Guardar" }).click();
+  await expect(dlg).toHaveCount(0);
+  const [c] = await calls(page, "host_save");
+  expect(c.args.host).toMatchObject({
+    name: "consola-serie", protocol: "serial", port: 22,
+    serial: { device: "/dev/ttyUSB0", baud: 250000, data_bits: 8, parity: "none", stop_bits: 1, flow: "none" },
+  });
+  await expect(page.getByTitle("Conectar a consola-serie")).toBeVisible();
+});
+
+test("formulario: host SSH con archivo de identidad elegido y validación del puerto", async ({ page }, info) => {
+  await page.getByRole("button", { name: "Nuevo host" }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByLabel("Nombre").fill("ssh-clave");
+  await dlg.getByLabel("Host", { exact: true }).fill("10.0.0.8");
+  const guardar = dlg.getByRole("button", { name: "Guardar" });
+  await expect(guardar).toBeEnabled();
+
+  await dlg.getByLabel("Puerto", { exact: true }).fill("70000");
+  await expect(dlg.getByText("Puerto entre 1 y 65535")).toBeVisible();
+  await expect(guardar).toBeDisabled();
+  await dlg.getByLabel("Puerto", { exact: true }).fill("2222");
+  await expect(guardar).toBeEnabled();
+
+  await dlg.getByRole("tab", { name: "Autenticación" }).click();
+  await dlg.getByRole("button", { name: "Elegir archivo…" }).click();
+  await expect(dlg.getByLabel("Archivo de identidad 1")).toHaveValue("/home/e2e/.ssh/id_ed25519");
+  await shot(page, "host-ssh", info.project.name);
+  await guardar.click();
+  await expect(dlg).toHaveCount(0);
+  const [c] = await calls(page, "host_save");
+  expect(c.args.host).toMatchObject({ name: "ssh-clave", host: "10.0.0.8", port: 2222, protocol: "ssh", identity_files: ["/home/e2e/.ssh/id_ed25519"] });
+});
+
+test("menú contextual: iconos, teclado y peligro; tema rápido sincronizado", async ({ page }) => {
+  await page.getByTitle("Conectar a web-01").click({ button: "right" });
+  const menu = page.getByRole("menu");
+  await expect(menu.getByRole("menuitem")).toHaveCount(5);
+  await expect(menu.locator(".ico svg")).toHaveCount(5);
+  await expect(menu.getByRole("menuitem", { name: "Conectar" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(menu.getByRole("menuitem", { name: "Abrir SFTP" })).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(menu.getByRole("menuitem", { name: "Eliminar" })).toBeFocused();
+  await expect(menu.getByRole("menuitem", { name: "Eliminar" })).toHaveClass(/danger/);
+  await page.keyboard.press("ArrowDown");
+  await expect(menu.getByRole("menuitem", { name: "Conectar" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+
+  await page.getByRole("button", { name: /Tema: Sistema/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByRole("button", { name: /Tema: Claro/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect((await calls(page, "settings_save")).at(-1)!.args.settings.theme).toBe("dark");
+  await nav(page, "Ajustes").click();
+  await expect(page.getByRole("radio", { name: "Oscuro" })).toHaveAttribute("aria-checked", "true");
+});
+
+for (const [w, h] of [[1024, 700], [860, 640]] as const) {
+  test(`responsive ${w}x${h}: rail de iconos y sin scroll horizontal`, async ({ page }, info) => {
+    await page.setViewportSize({ width: w, height: h });
+    const rail = page.getByRole("navigation", { name: "Principal" });
+    await expect(rail).toBeVisible();
+    if (w < 1100) {
+      // Solo iconos: el texto se oculta, el nombre sigue accesible.
+      await expect(page.locator(".item .label").first()).toBeHidden();
+      expect((await rail.boundingBox())!.width).toBeLessThanOrEqual(60);
+    }
+    await expect(nav(page, "Llavero")).toBeVisible();
+    for (const view of ["Hosts", "SFTP", "Llavero", "Snippets", "Redirecciones", "Ajustes"]) {
+      await nav(page, view).click();
+      const overflow = await page.evaluate(() => {
+        const m = document.querySelector("main")!;
+        return { main: m.scrollWidth - m.clientWidth, doc: document.documentElement.scrollWidth - innerWidth };
+      });
+      expect(overflow, view).toEqual({ main: 0, doc: 0 });
+    }
+    await shot(page, `responsive-${w}`, info.project.name);
+  });
+}

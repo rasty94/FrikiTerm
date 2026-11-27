@@ -1629,6 +1629,7 @@ dependencies = [
  "async-trait",
  "directories",
  "friki-core",
+ "friki-serial",
  "friki-session",
  "friki-ssh",
  "friki-xfer",

@@ -36,6 +36,8 @@ const COMMANDS: &[&str] = &[
     "settings_get",
     "settings_save",
     "open_url",
+    "serial_ports",
+    "pick_identity_file",
 ];
 
 fn main() {

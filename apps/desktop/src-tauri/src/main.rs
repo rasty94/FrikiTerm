@@ -10,7 +10,7 @@ mod error;
 mod integration;
 mod state;
 
-use cmd::{fwd, hosts, keys, meta, settings, sftp, term};
+use cmd::{fwd, hosts, keys, meta, serial, settings, sftp, term};
 
 fn main() {
     tauri::Builder::default()
@@ -54,6 +54,8 @@ fn main() {
             settings::settings_get,
             settings::settings_save,
             settings::open_url,
+            serial::serial_ports,
+            serial::pick_identity_file,
         ])
         .run(tauri::generate_context!())
         .expect("error al arrancar FrikiTerm");

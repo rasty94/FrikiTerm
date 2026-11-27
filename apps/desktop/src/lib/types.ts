@@ -234,3 +234,10 @@ export interface HostMeta {
   os?: string;
   connectCount: number;
 }
+
+// ---- Formulario de hosts: puertos serie y ficheros de identidad (`serial_ports`, `pick_identity_file`) ----
+export interface SerialPortInfo {
+  name: string;
+  /** Orientativa (USB, Bluetooth...); puede estar vacía. */
+  description: string;
+}

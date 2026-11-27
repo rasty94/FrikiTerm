@@ -102,6 +102,11 @@ export function installBackend(): void {
     settings_get: () => settings,
     settings_save: (a) => { settings = a.settings; },
     open_url: () => null,
+    serial_ports: () => [
+      { name: "/dev/ttyUSB0", description: "USB" },
+      { name: "/dev/ttyS0", description: "" },
+    ],
+    pick_identity_file: () => "/home/e2e/.ssh/id_ed25519",
     "plugin:event|listen": () => nextId++,
     "plugin:event|unlisten": () => null,
   };
@@ -126,6 +131,9 @@ export function installBackend(): void {
       return h(args);
     },
   };
+
+  // Tauri llama a unregisterListener al soltar un listen (p. ej. al salir de SFTP).
+  w.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
 
   w.__mock = {
     calls, unhandled,

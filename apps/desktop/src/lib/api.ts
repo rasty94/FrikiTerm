@@ -5,6 +5,7 @@ import type {
   KeyInfo, PromptAnswer, PromptId, SessionConfig, SftpId, Snippet, TermEvent, TermId, TermTarget,
   XferJob,
 } from "./types";
+import type { SerialPortInfo } from "./types";
 
 // ---- Eventos globales ----
 
@@ -103,3 +104,9 @@ export const settingsSave = (settings: DesktopSettings): Promise<void> =>
   invoke("settings_save", { settings });
 /** Solo http(s); el backend lo abre en el navegador del SO. */
 export const openUrl = (url: string): Promise<void> => invoke("open_url", { url });
+
+// ---- Formulario de hosts ----
+/** Puertos serie detectados (`friki serial list`). */
+export const serialPorts = (): Promise<SerialPortInfo[]> => invoke("serial_ports");
+/** Diálogo nativo en Rust, empezando en ~/.ssh. `null` si se cancela. */
+export const pickIdentityFile = (): Promise<string | null> => invoke("pick_identity_file");
